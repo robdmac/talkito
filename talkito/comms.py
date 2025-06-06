@@ -1,0 +1,1052 @@
+#!/usr/bin/env python3
+
+# Talkito - Universal TTS wrapper that works with any command
+# Copyright (C) 2025 Robert Macrae
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+"""Communication providers for remote interaction with talkito - supports Twilio SMS, WhatsApp, and Slack."""
+
+import os
+import re
+import logging
+import time
+import hashlib
+import threading
+import signal
+import subprocess
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Optional, List, Callable
+from queue import Queue, Empty
+
+# Import centralized logging utilities
+from .logs import log_message as _base_log_message
+
+# Try to load .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Optional imports for providers
+try:
+    from twilio.rest import Client as TwilioClient
+    TWILIO_AVAILABLE = True
+except ImportError:
+    TWILIO_AVAILABLE = False
+
+try:
+    from slack_sdk import WebClient as SlackClient
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.socket_mode import SocketModeClient
+    from slack_sdk.socket_mode.response import SocketModeResponse
+    from slack_sdk.socket_mode.request import SocketModeRequest
+    SLACK_AVAILABLE = True
+except ImportError:
+    SLACK_AVAILABLE = False
+
+# For webhook server - using Python's built-in HTTP server
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import json
+
+# Tunnel support (using zrok - free, open source, zero trust)
+
+def log_message(level: str, message: str, force_console: bool = False) -> None:
+    """Log a message with [COMMS] prefix"""
+    _base_log_message(level, f"[COMMS] {message}", __name__)
+    # Also print critical messages to console if requested
+    if force_console or level in ["ERROR", "CRITICAL"]:
+        print(f"[COMMS] {message}")
+
+
+@dataclass
+class Message:
+    """Represents a message to send or received"""
+    content: str
+    sender: str  # Phone number, Slack user ID, etc.
+    channel: str  # SMS, WhatsApp, Slack channel
+    timestamp: float = field(default_factory=time.time)
+    session_id: Optional[str] = None
+    message_id: Optional[str] = None
+    reply_to: Optional[str] = None  # For threading
+
+
+@dataclass 
+class CommsConfig:
+    """Configuration for communication providers"""
+    # Twilio
+    twilio_account_sid: Optional[str] = None
+    twilio_auth_token: Optional[str] = None
+    twilio_phone_number: Optional[str] = None
+    twilio_whatsapp_number: Optional[str] = None
+    
+    # Slack
+    slack_bot_token: Optional[str] = None
+    slack_app_token: Optional[str] = None
+    slack_channel: Optional[str] = None
+    
+    # General settings
+    webhook_port: int = 8080
+    webhook_host: str = "0.0.0.0"
+    webhook_use_tunnel: bool = True  # Auto-start zrok
+    zrok_reserved_token: Optional[str] = None  # Optional zrok reserved share token for stable URL
+    max_message_length: int = 1600  # SMS limit
+    batch_delay: float = 0.5  # Delay between batched messages
+    
+    # Recipients
+    sms_recipients: List[str] = field(default_factory=list)
+    whatsapp_recipients: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Load from environment variables if not provided"""
+        self.twilio_account_sid = self.twilio_account_sid or os.environ.get('TWILIO_ACCOUNT_SID')
+        self.twilio_auth_token = self.twilio_auth_token or os.environ.get('TWILIO_AUTH_TOKEN')
+        self.twilio_phone_number = self.twilio_phone_number or os.environ.get('TWILIO_PHONE_NUMBER')
+        self.twilio_whatsapp_number = self.twilio_whatsapp_number or os.environ.get('TWILIO_WHATSAPP_NUMBER')
+        self.slack_bot_token = self.slack_bot_token or os.environ.get('SLACK_BOT_TOKEN')
+        self.slack_app_token = self.slack_app_token or os.environ.get('SLACK_APP_TOKEN')
+        self.slack_channel = self.slack_channel or os.environ.get('SLACK_CHANNEL')
+        self.zrok_reserved_token = self.zrok_reserved_token or os.environ.get('ZROK_RESERVED_TOKEN')
+
+
+class CommsProvider(ABC):
+    """Abstract base class for communication providers"""
+    
+    def __init__(self, config: CommsConfig):
+        self.config = config
+        self.active = True
+    
+    @abstractmethod
+    def send_message(self, message: Message) -> bool:
+        """Send a message through the provider"""
+        pass
+    
+    @abstractmethod
+    def start(self, input_callback: Callable[[Message], None]):
+        """Start the provider and set up message receiving"""
+        pass
+    
+    @abstractmethod
+    def stop(self):
+        """Stop the provider"""
+        pass
+    
+    def format_output(self, text: str) -> List[str]:
+        """Format terminal output for messaging, splitting if needed"""
+        # Remove ANSI codes
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        text = ansi_escape.sub('', text)
+        
+        # Clean up excessive whitespace
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = text.strip()
+        
+        if not text:
+            return []
+        
+        # Split into chunks if too long
+        chunks = []
+        max_len = self.config.max_message_length
+        
+        if len(text) <= max_len:
+            return [text]
+        
+        # Try to split on newlines first
+        lines = text.split('\n')
+        current_chunk = []
+        current_length = 0
+        
+        for line in lines:
+            line_len = len(line) + 1  # +1 for newline
+            if current_length + line_len > max_len and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_length = line_len
+            else:
+                current_chunk.append(line)
+                current_length += line_len
+        
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+
+
+class TwilioBaseProvider(CommsProvider):
+    """Base class for Twilio providers with common functionality"""
+    
+    def __init__(self, config: CommsConfig, phone_number_config_key: str, provider_name: str):
+        super().__init__(config)
+        if not TWILIO_AVAILABLE:
+            raise ImportError("Twilio library not installed. Run: pip install twilio")
+        
+        # Get phone number from config
+        phone_number = getattr(config, phone_number_config_key)
+        if not all([config.twilio_account_sid, config.twilio_auth_token, phone_number]):
+            raise ValueError(f"Twilio {provider_name} credentials not configured")
+        
+        # Suppress Twilio HTTP logging when no logger is set
+        self._suppress_twilio_logging()
+        
+        self.client = TwilioClient(config.twilio_account_sid, config.twilio_auth_token)
+        self.phone_number = phone_number
+        log_message("INFO", f"Initialized {provider_name} provider with number {phone_number}")
+    
+    def _suppress_twilio_logging(self):
+        """Suppress verbose Twilio HTTP logging."""
+        # Always suppress verbose Twilio HTTP logging
+        import logging as stdlib_logging
+        twilio_logger = stdlib_logging.getLogger('twilio.http_client')
+        twilio_logger.setLevel(stdlib_logging.WARNING)
+    
+    def start(self, input_callback: Callable[[Message], None]):
+        """Start webhook server for receiving messages."""
+        log_message("INFO", f"{self.__class__.__name__} started")
+    
+    def stop(self):
+        """Stop the provider."""
+        self.active = False
+        log_message("INFO", f"{self.__class__.__name__} stopped")
+
+
+class TwilioSMSProvider(TwilioBaseProvider):
+    """Twilio SMS provider"""
+    
+    def __init__(self, config: CommsConfig):
+        super().__init__(config, 'twilio_phone_number', 'SMS')
+    
+    def send_message(self, message: Message) -> bool:
+        """Send SMS message"""
+        try:
+            chunks = self.format_output(message.content)
+            
+            for i, chunk in enumerate(chunks):
+                if i > 0:
+                    time.sleep(self.config.batch_delay)
+                
+                # Add chunk indicator if multiple
+                if len(chunks) > 1:
+                    chunk = f"[{i+1}/{len(chunks)}] {chunk}"
+                
+                result = self.client.messages.create(
+                    body=chunk,
+                    from_=self.phone_number,
+                    to=message.sender
+                )
+            
+            return True
+        except Exception as e:
+            log_message("ERROR", f"Failed to send SMS: {e}")
+            return False
+    
+
+
+class TwilioWhatsAppProvider(TwilioBaseProvider):
+    """WhatsApp provider via Twilio"""
+    
+    def __init__(self, config: CommsConfig):
+        super().__init__(config, 'twilio_whatsapp_number', 'WhatsApp')
+    
+    def send_message(self, message: Message) -> bool:
+        """Send WhatsApp message"""
+        try:
+            chunks = self.format_output(message.content)
+            for i, chunk in enumerate(chunks):
+                if i > 0:
+                    time.sleep(self.config.batch_delay)
+                
+                # WhatsApp numbers need 'whatsapp:' prefix
+                from_number = f"whatsapp:{self.phone_number}"
+                to_number = f"whatsapp:{message.sender}" if not message.sender.startswith("whatsapp:") else message.sender
+                
+                self.client.messages.create(
+                    body=chunk,
+                    from_=from_number,
+                    to=to_number
+                )
+            
+            return True
+        except Exception as e:
+            log_message("ERROR", f"Failed to send WhatsApp message: {e}")
+            return False
+    
+
+
+class SlackProvider(CommsProvider):
+    """Slack provider"""
+    
+    def __init__(self, config: CommsConfig):
+        super().__init__(config)
+        if not SLACK_AVAILABLE:
+            raise ImportError("Slack SDK not installed. Run: pip install slack-sdk")
+        
+        if not config.slack_bot_token:
+            raise ValueError("Slack bot token not configured")
+        
+        self.client = SlackClient(token=config.slack_bot_token)
+        self.channel = config.slack_channel
+        self.socket_client = None
+        self.input_callback = None
+        
+        # Enable Socket Mode if app token is provided
+        if config.slack_app_token:
+            self.socket_client = SocketModeClient(
+                app_token=config.slack_app_token,
+                web_client=self.client
+            )
+            log_message("INFO", f"Initialized Slack provider with Socket Mode for channel {self.channel}")
+        else:
+            log_message("INFO", f"Initialized Slack provider for channel {self.channel} (send-only)")
+    
+    def send_message(self, message: Message) -> bool:
+        """Send Slack message."""
+        try:
+            # Format for code blocks if it looks like terminal output
+            content = message.content
+            if any(char in content for char in ['│', '╰', '├', '└', '⏺']):
+                content = f"```\n{content}\n```"
+            
+            # Determine target channel
+            target = message.sender if message.sender != self.channel else self.channel
+            
+            result = self.client.chat_postMessage(
+                channel=target,
+                text=content,
+                thread_ts=message.reply_to  # Thread support
+            )
+            
+            # Store message timestamp for threading
+            if result.get("ok"):
+                message.message_id = result["ts"]
+            
+            return True
+        except SlackApiError as e:
+            log_message("ERROR", f"Failed to send Slack message: {e}")
+            return False
+    
+    def _process_slack_event(self, client: SocketModeClient, req: SocketModeRequest):
+        """Process incoming Slack events."""
+        if req.type == "events_api":
+            # Acknowledge the request
+            response = SocketModeResponse(envelope_id=req.envelope_id)
+            client.send_socket_mode_response(response)
+            
+            # Handle different event types
+            event = req.payload.get("event", {})
+            event_type = event.get("type")
+            
+            if event_type == "message":
+                # Ignore bot messages to prevent loops
+                if event.get("bot_id"):
+                    return
+                
+                # Extract message details
+                text = event.get("text", "")
+                user = event.get("user", "")
+                channel = event.get("channel", "")
+                thread_ts = event.get("thread_ts")
+                
+                # Create Message object
+                message = Message(
+                    content=text,
+                    sender=channel,  # Use channel as sender
+                    channel="slack",
+                    reply_to=thread_ts
+                )
+                
+                # Call the input callback
+                if self.input_callback:
+                    self.input_callback(message)
+                    
+                log_message("DEBUG", f"Received Slack message from {user} in {channel}: {text[:50]}...")
+    
+    def start(self, input_callback: Callable[[Message], None]):
+        """Start Slack event listener."""
+        self.input_callback = input_callback
+        
+        if self.socket_client:
+            # Register event handler
+            self.socket_client.socket_mode_request_listeners.append(self._process_slack_event)
+            
+            # Start Socket Mode client in a separate thread
+            def run_socket_mode():
+                try:
+                    self.socket_client.connect()
+                    log_message("INFO", "Slack Socket Mode connected")
+                    # Keep the connection alive
+                    while self.active:
+                        time.sleep(1)
+                except Exception as e:
+                    log_message("ERROR", f"Slack Socket Mode error: {e}")
+            
+            socket_thread = threading.Thread(target=run_socket_mode, daemon=True)
+            socket_thread.start()
+            log_message("INFO", "Slack provider started with Socket Mode")
+        else:
+            log_message("INFO", "Slack provider started (send-only mode)")
+    
+    def stop(self):
+        """Stop the provider."""
+        self.active = False
+        if self.socket_client:
+            try:
+                self.socket_client.close()
+                log_message("INFO", "Slack Socket Mode disconnected")
+            except:
+                pass
+        log_message("INFO", "Slack provider stopped")
+
+
+class CommunicationManager:
+    """Manages all communication providers and message routing"""
+    
+    def __init__(self, config: CommsConfig):
+        self.config = config
+        self.providers: List[CommsProvider] = []
+        self.input_queue: Queue[Message] = Queue()
+        self.output_queue: Queue[Message] = Queue()
+        self.webhook_server = None
+        self.webhook_server_thread = None
+        self.tunnel_process = None
+        self.webhook_url = None
+        self.active = False
+        self.worker_thread = None
+        self.current_session_id = self._generate_session_id()
+    
+    def _generate_session_id(self) -> str:
+        """Generate unique session ID"""
+        return hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
+    
+    def add_provider(self, provider_type: str, recipients: List[str] = None) -> bool:
+        """Add a communication provider - returns True if successful, False otherwise."""
+        try:
+            if provider_type == "sms" and TWILIO_AVAILABLE:
+                provider = TwilioSMSProvider(self.config)
+                self.providers.append(provider)
+                log_message("INFO", "Added SMS provider")
+                return True
+            
+            elif provider_type == "whatsapp" and TWILIO_AVAILABLE:
+                provider = TwilioWhatsAppProvider(self.config)
+                self.providers.append(provider)
+                log_message("INFO", "Added WhatsApp provider")
+                return True
+            
+            elif provider_type == "slack" and SLACK_AVAILABLE:
+                provider = SlackProvider(self.config)
+                self.providers.append(provider)
+                log_message("INFO", "Added Slack provider")
+                return True
+            
+            else:
+                log_message("WARNING", f"Provider {provider_type} not available")
+                return False
+        
+        except Exception as e:
+            log_message("ERROR", f"Failed to add provider {provider_type}: {e}")
+            return False
+    
+    def start(self):
+        """Start all providers and worker thread"""
+        self.active = True
+        
+        # Start providers
+        for provider in self.providers:
+            provider.start(self._handle_input_message)
+
+        # Start webhook server if needed
+        if any(isinstance(p, (TwilioSMSProvider, TwilioWhatsAppProvider)) for p in self.providers):
+            self._start_webhook_server()
+
+        # Start worker thread
+        self.worker_thread = threading.Thread(target=self._output_worker, daemon=True)
+        self.worker_thread.start()
+
+        log_message("INFO", f"Communication manager started with session {self.current_session_id}")
+    
+    def stop(self):
+        """Stop all providers"""
+        self.active = False
+        
+        for provider in self.providers:
+            provider.stop()
+        
+        if self.webhook_server:
+            # Shutdown the HTTP server
+            try:
+                self.webhook_server.shutdown()
+                log_message("INFO", "Webhook server stopped")
+            except:
+                pass
+        
+        if self.tunnel_process:
+            try:
+                # Kill the entire process group to ensure zrok and any children are terminated
+                if os.name != 'nt':
+                    os.killpg(os.getpgid(self.tunnel_process.pid), signal.SIGTERM)
+                else:
+                    self.tunnel_process.terminate()
+                self.tunnel_process.wait(timeout=5)
+                log_message("INFO", "Zrok tunnel disconnected")
+            except:
+                try:
+                    if os.name != 'nt':
+                        os.killpg(os.getpgid(self.tunnel_process.pid), signal.SIGKILL)
+                    else:
+                        self.tunnel_process.kill()
+                except:
+                    pass
+        
+        log_message("INFO", "Communication manager stopped")
+    
+    def send_output(self, text: str, recipients: List[str] = None):
+        """Queue output to be sent to all configured recipients"""
+        if not text.strip():
+            return
+        
+        # Send to SMS recipients
+        sms_recipients = recipients or self.config.sms_recipients
+        for phone in sms_recipients:
+            msg = Message(
+                content=text,
+                sender=phone,
+                channel="sms",
+                session_id=self.current_session_id
+            )
+            self.output_queue.put(msg)
+        
+        # Send to WhatsApp recipients  
+        for phone in self.config.whatsapp_recipients:
+            msg = Message(
+                content=text,
+                sender=phone,
+                channel="whatsapp",
+                session_id=self.current_session_id
+            )
+            self.output_queue.put(msg)
+        
+        # Send to Slack
+        if any(isinstance(p, SlackProvider) for p in self.providers):
+            msg = Message(
+                content=text,
+                sender=self.config.slack_channel,
+                channel="slack",
+                session_id=self.current_session_id
+            )
+            self.output_queue.put(msg)
+    
+    def get_input(self, timeout: float = None) -> Optional[str]:
+        """Get input from communication channels."""
+        try:
+            # Use non-blocking get to avoid freezing the terminal
+            if timeout == 0 or timeout is None:
+                message = self.input_queue.get_nowait()
+            else:
+                message = self.input_queue.get(timeout=timeout)
+            return message.content
+        except Empty:
+            return None
+    
+    def get_active_provider_types(self) -> List[str]:
+        """Get list of active provider types."""
+        active_types = []
+        for provider in self.providers:
+            if isinstance(provider, TwilioSMSProvider):
+                active_types.append("sms")
+            elif isinstance(provider, TwilioWhatsAppProvider):
+                active_types.append("whatsapp")
+            elif isinstance(provider, SlackProvider):
+                active_types.append("slack")
+        return active_types
+    
+    def _handle_input_message(self, message: Message):
+        """Handle incoming message from providers"""
+        # Associate with current session
+        message.session_id = self.current_session_id
+        self.input_queue.put(message)
+        log_message("INFO", f"Received input from {message.sender}: {message.content}")
+    
+    def _output_worker(self):
+        """Worker thread to process output queue."""
+        # Map channel types to provider classes
+        channel_to_provider = {
+            "sms": TwilioSMSProvider,
+            "whatsapp": TwilioWhatsAppProvider,
+            "slack": SlackProvider
+        }
+        
+        while self.active:
+            try:
+                message = self.output_queue.get(timeout=1)
+                
+                # Find appropriate provider
+                provider_class = channel_to_provider.get(message.channel)
+                if provider_class:
+                    for provider in self.providers:
+                        if isinstance(provider, provider_class):
+                            provider.send_message(message)
+                            break
+                
+            except Empty:
+                continue
+            except Exception as e:
+                log_message("ERROR", f"Error in output worker: {e}")
+    
+    def _start_webhook_server(self):
+        """Start HTTP webhook server for Twilio"""
+        # Create custom request handler with access to self
+        parent_self = self
+        
+        class WebhookHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                # Override to suppress HTTP server's default logging
+                pass
+            
+            def do_POST(self):
+                """Handle POST requests for webhooks."""
+                # Parse the path
+                parsed_path = urlparse(self.path)
+                channel = parsed_path.path.strip('/')
+                
+                if channel not in ['sms', 'whatsapp']:
+                    self.send_error(404, "Not Found")
+                    return
+                
+                # Read the POST data
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length).decode('utf-8')
+                
+                # Parse the form data
+                params = parse_qs(post_data)
+                from_number = params.get('From', [''])[0]
+                body = params.get('Body', [''])[0]
+                
+                # Create and handle the message
+                message = Message(
+                    content=body,
+                    sender=from_number,
+                    channel=channel
+                )
+                parent_self._handle_input_message(message)
+                
+                # Send response
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'')
+            
+            def do_GET(self):
+                """Handle GET requests (for testing)."""
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Webhook server is running')
+        
+        # Create and start the server in a separate thread
+        from threading import Thread
+        
+        def run_server():
+            try:
+                server = HTTPServer((self.config.webhook_host, self.config.webhook_port), WebhookHandler)
+                self.webhook_server = server
+                log_message("INFO", f"HTTP webhook server started on {self.config.webhook_host}:{self.config.webhook_port}")
+                server.serve_forever()
+            except Exception as e:
+                log_message("ERROR", f"Failed to start webhook server: {e}")
+        
+        server_thread = Thread(target=run_server, daemon=True)
+        server_thread.start()
+        self.webhook_server_thread = server_thread
+        
+        # Set up zrok if configured
+        if self.config.webhook_use_tunnel:
+            self._setup_zrok()
+    
+    def _extract_zrok_url(self, raw_url: str) -> str:
+        """Extract clean URL from zrok output, removing markers like ││[PUBLIC]."""
+        # Remove trailing period if any
+        url = raw_url.rstrip('.')
+        # Extract just the URL part before any ││ or other markers
+        if '││' in url:
+            url = url.split('││')[0]
+        return url
+    
+    def _build_zrok_command(self) -> List[str]:
+        """Build the zrok command based on configuration."""
+        if self.config.zrok_reserved_token:
+            # Use reserved share: zrok share reserved TOKEN --headless
+            cmd = ["zrok", "share", "reserved", self.config.zrok_reserved_token, "--headless"]
+            log_message("INFO", f"Using reserved share token: {self.config.zrok_reserved_token}")
+        else:
+            # Use ephemeral share: zrok share public http://localhost:PORT --headless
+            cmd = ["zrok", "share", "public", f"http://localhost:{self.config.webhook_port}", "--headless"]
+            log_message("INFO", "Using ephemeral zrok share")
+        return cmd
+    
+    def _print_webhook_info(self):
+        """Print webhook configuration information."""
+        has_sms = any(isinstance(p, TwilioSMSProvider) for p in self.providers)
+        has_whatsapp = any(isinstance(p, TwilioWhatsAppProvider) for p in self.providers)
+        if self.config.zrok_reserved_token:
+            print("\nPermanent Webhook URLs:")
+        else:
+            print("\nTemporary Webhook URLs:")
+        if has_sms:
+            print(f"  SMS: {self.webhook_url}/sms")
+        if has_whatsapp:
+            print(f"  WhatsApp: {self.webhook_url}/whatsapp")
+        
+        if has_sms or has_whatsapp:
+            print(f"\nAdd these URLs in your Twilio console:\n")
+            print(f"  1. Go to https://console.twilio.com/")
+            print(f"  2. For SMS: Phone Numbers → Manage → Active Numbers → Your Number → Messaging")
+            print(f"  3. For WhatsApp: Messaging → Settings → WhatsApp Sandbox Settings")
+            print(f"  4. Set the webhook URL for incoming messages")
+        
+        if not self.config.zrok_reserved_token:
+            print(f"Note: This URL will change on restart. Use 'zrok reserve' for a permanent URL and set the")
+            print("ZROK_RESERVED_TOKEN env variable so you won't need to update Twilio settings on restart!")
+    
+    def _read_zrok_output(self, stream, stream_name: str, url_found: threading.Event):
+        """Read and parse zrok process output."""
+        try:
+            for line in iter(stream.readline, ''):
+                if line.strip():  # Only log non-empty lines
+                    log_message("DEBUG", f"Zrok {stream_name}: {line.strip()}")
+                
+                # Check for URL in the output
+                if ".share.zrok.io" in line or "zrok.io" in line:
+                    # Try to find URL in the line - stop at quotes, commas, or whitespace
+                    match = re.search(r'https?://[^\s",}]+', line)
+                    if match:
+                        self.webhook_url = self._extract_zrok_url(match.group(0))
+                        log_message("INFO", f"Zrok tunnel created: {self.webhook_url}")
+                        url_found.set()
+                        return
+                
+                # Sometimes the URL appears on its own line
+                url_match = re.search(r'https?://[^\s",}]*\.zrok\.io', line)
+                if url_match:
+                    self.webhook_url = self._extract_zrok_url(url_match.group(0))
+                    log_message("INFO", f"Zrok tunnel created: {self.webhook_url}")
+                    url_found.set()
+                    return
+                
+                # Check for error messages
+                if "error" in line.lower() or "failed" in line.lower():
+                    log_message("ERROR", f"Zrok error: {line}")
+                
+                # Check for specific errors
+                if "subdomain is already registered" in line.lower():
+                    log_message("ERROR", f"Zrok error: {line}")
+        except Exception as e:
+            log_message("ERROR", f"Error reading zrok {stream_name}: {e}")
+    
+    def _setup_zrok(self):
+        """Set up zrok (free, open source, zero trust tunneling)"""
+        try:
+            import threading
+            import re
+            
+            # Build zrok command
+            zrok_cmd = self._build_zrok_command()
+            
+            log_message("INFO", "Starting zrok tunnel...")
+            
+            # Start zrok process
+            # Create a new process group so zrok doesn't interfere with terminal
+            self.tunnel_process = subprocess.Popen(
+                zrok_cmd,
+                stdin=subprocess.DEVNULL,  # Prevent zrok from capturing stdin
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=0,  # Unbuffered for immediate output
+                preexec_fn=os.setsid if os.name != 'nt' else None  # New process group
+            )
+            
+            # Flag to track if URL was found
+            url_found = threading.Event()
+            
+            # Create output reader function
+            def read_output(stream, stream_name):
+                self._read_zrok_output(stream, stream_name, url_found)
+            
+            # Start reading both stdout and stderr in background
+            stdout_thread = threading.Thread(target=read_output, args=(self.tunnel_process.stdout, "stdout"), daemon=True)
+            stderr_thread = threading.Thread(target=read_output, args=(self.tunnel_process.stderr, "stderr"), daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # Wait for URL with timeout
+            if url_found.wait(timeout=20):
+                self._print_webhook_info()
+            else:
+                log_message("WARNING", "Zrok started but URL not detected yet")
+                print("\n⚠️  Zrok is starting...")
+                print("Check if zrok is installed: https://github.com/openziti/zrok/releases")
+                
+        except FileNotFoundError:
+            log_message("ERROR", "zrok command not found")
+            print("\n❌ Zrok command not found. Please install it:")
+            print("   Download from: https://github.com/openziti/zrok/releases/latest")
+            print("   Or follow instructions at: https://docs.zrok.io/docs/getting-started/")
+        except Exception as e:
+            log_message("ERROR", f"Failed to create zrok tunnel: {e}")
+            print(f"\n❌ Failed to create zrok tunnel: {e}")
+            print("   Make sure zrok is installed and configured:")
+            print("   1. Download: https://github.com/openziti/zrok/releases/latest")
+            print("   2. Run: zrok enable <token> (if using reserved shares)")
+
+
+# Convenience functions for integration
+def create_config_from_env() -> CommsConfig:
+    """Create configuration from environment variables"""
+    config = CommsConfig()
+    
+    # Parse recipient lists from env
+    sms_recipients = os.environ.get('SMS_RECIPIENTS', '')
+    if sms_recipients:
+        config.sms_recipients = [r.strip() for r in sms_recipients.split(',')]
+    
+    whatsapp_recipients = os.environ.get('WHATSAPP_RECIPIENTS', '')
+    if whatsapp_recipients:
+        config.whatsapp_recipients = [r.strip() for r in whatsapp_recipients.split(',')]
+    
+    return config
+
+
+def setup_communication(providers: List[str] = None, config: Optional[CommsConfig] = None) -> Optional[CommunicationManager]:
+    """Set up communication manager with specified providers and config"""
+    log_message("INFO", f"Setting up communication with providers: {providers}")
+    
+    if config is None:
+        config = create_config_from_env()
+    
+    if not providers:
+        # Auto-detect based on available credentials
+        providers = []
+        if config.twilio_account_sid and config.sms_recipients:
+            providers.append("sms")
+        if config.twilio_whatsapp_number and config.whatsapp_recipients:
+            providers.append("whatsapp")
+        if config.slack_bot_token and config.slack_app_token and config.slack_channel:
+            providers.append("slack")
+    
+    log_message("INFO", f"Detected/configured providers: {providers}")
+    
+    if not providers:
+        log_message("WARNING", "No communication providers configured or detected")
+        return None
+    
+    manager = CommunicationManager(config)
+    successfully_added = []
+    for provider in providers:
+        log_message("INFO", f"Adding provider: {provider}")
+        if manager.add_provider(provider):
+            successfully_added.append(provider)
+    
+    if not successfully_added:
+        log_message("ERROR", "No providers could be added")
+        return None
+    
+    manager.start()
+    log_message("INFO", f"Communication manager started with providers: {', '.join(successfully_added)}")
+    
+    return manager
+
+
+def run_interactive_mode(manager: CommunicationManager, providers: List[str]):
+    """Run interactive messaging mode."""
+    import sys
+    import time
+    import threading
+    import termios
+
+    providers_str = ', '.join(p.upper() for p in providers)
+    print(f"\n{providers_str} Communication Active")
+    if not manager.webhook_url:
+        print(f"Webhook server listening on port {manager.config.webhook_port}")
+
+    print("Waiting for incoming messages... (Ctrl+C to exit)")
+    print("Type messages to send, press Enter to send.")
+
+    # Wait for zrok to be ready
+    print("\nWaiting for tunnel to be ready...")
+    time.sleep(3)
+    
+    # Clear any buffered input and reset terminal
+    try:
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except:
+        pass
+        
+    # Now start interactive mode
+    print("\nReady for interactive messaging. Type your message and press Enter.")
+    print("> ", end='', flush=True)
+    
+    # Check if we can read from stdin
+    active = True
+    
+    def handle_incoming():
+        """Handle incoming messages in background"""
+        while active:
+            try:
+                incoming = manager.get_input(timeout=0.5)
+                if incoming:
+                    print(f"\n[RECEIVED] {incoming}")
+                    print("> ", end='', flush=True)
+            except:
+                pass
+    
+    # Start incoming message handler
+    incoming_thread = threading.Thread(target=handle_incoming, daemon=True)
+    incoming_thread.start()
+    
+    # Main thread handles stdin
+    try:
+        while True:
+            try:
+                # Direct stdin read - no threading for input
+                line = input()
+                if line:
+                    print(f"[SENDING] {line}")
+                    manager.send_output(line)
+                    print("> ", end='', flush=True)
+            except EOFError:
+                break
+                
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        active = False
+
+
+if __name__ == "__main__":
+    # Make module runnable: python -m talkito.comms sms --sms-recipients +16502150334 "hello"
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(
+        description="Send messages via Talkito communication providers",
+        usage='%(prog)s [options] [MESSAGE]'
+    )
+    parser.add_argument("message", nargs='?', default=None,
+                        help="Message to send (if not provided, enters interactive mode)")
+    
+    # Provider-specific options
+    parser.add_argument("--sms-recipients", 
+                        help="SMS recipient phone numbers (comma-separated)")
+    parser.add_argument("--whatsapp-recipients",
+                        help="WhatsApp recipient phone numbers (comma-separated)")
+    parser.add_argument("--slack-channel",
+                        help="Slack channel to send to")
+    parser.add_argument("--log-file", 
+                        help="Log file path (logging disabled if not specified)")
+    parser.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Logging level")
+    parser.add_argument("--webhook-port", type=int, default=8080,
+                        help="Port for webhook server (default: 8080)")
+    parser.add_argument("--zrok-reserved-token", 
+                        help="Zrok reserved share token (from 'zrok reserve public')")
+    parser.add_argument("--no-tunnel", action="store_true",
+                        help="Disable zrok tunnel for webhooks")
+    
+    args = parser.parse_args()
+    
+    # Set up logging
+    if args.log_file:
+        # Configure file logging
+        logging.basicConfig(
+            level=getattr(logging, args.log_level),
+            format='[%(asctime)s] [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            filename=args.log_file,
+            filemode='a',
+            force=True
+        )
+        set_logger(logging.getLogger())
+        
+        # Temporarily set DEBUG for zrok troubleshooting
+        if args.log_level != "DEBUG":
+            log_message("INFO", "Setting log level to DEBUG for zrok troubleshooting")
+        
+        # Suppress only the most verbose library outputs
+        import logging as stdlib_logging
+        stdlib_logging.getLogger('twilio.http_client').setLevel(stdlib_logging.WARNING)
+    
+    # Create config from environment
+    config = create_config_from_env()
+    
+    # Override with command line arguments
+    if args.sms_recipients:
+        config.sms_recipients = [r.strip() for r in args.sms_recipients.split(',')]
+    if args.whatsapp_recipients:
+        config.whatsapp_recipients = [r.strip() for r in args.whatsapp_recipients.split(',')]
+    if args.slack_channel:
+        config.slack_channel = args.slack_channel
+    if args.webhook_port:
+        config.webhook_port = args.webhook_port
+    if args.zrok_reserved_token:
+        config.zrok_reserved_token = args.zrok_reserved_token
+    if args.no_tunnel:
+        config.webhook_use_tunnel = False
+    
+    # Auto-detect providers based on recipients
+    providers = []
+    if config.sms_recipients:
+        providers.append("sms")
+    if config.whatsapp_recipients:
+        providers.append("whatsapp")
+    if config.slack_channel and config.slack_bot_token and config.slack_app_token:
+        providers.append("slack")
+    
+    if not providers:
+        print("Error: No recipients configured. Use one or more of:")
+        print("  --sms-recipients or set SMS_RECIPIENTS")
+        print("  --whatsapp-recipients or set WHATSAPP_RECIPIENTS")
+        print("  --slack-channel or set SLACK_CHANNEL")
+        sys.exit(1)
+    
+    # Set up communication
+    try:
+        manager = setup_communication(providers, config)
+        if not manager:
+            print(f"Error: Failed to set up providers: {', '.join(providers)}. Check credentials.")
+            sys.exit(1)
+        
+        # Get actual active providers
+        active_providers = manager.get_active_provider_types()
+        
+        # If message provided, send it
+        if args.message:
+            providers_str = ', '.join(active_providers)
+            print(f"Sending message via {providers_str}...")
+            manager.send_output(args.message)
+            time.sleep(2)
+            print("Message sent!")
+        
+        # Enter interactive mode
+        run_interactive_mode(manager, active_providers)
+        
+        manager.stop()
+        print("\nShutting down...")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
