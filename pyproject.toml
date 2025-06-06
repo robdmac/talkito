@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talkito"
+dynamic = ["version", "readme"]
+description = "Universal TTS wrapper and voice interaction library for command-line programs"
+requires-python = ">=3.8"
+license = {text = "AGPL-3.0-or-later"}
+authors = [
+    {name = "Robert Macrae", email = "rob.d.macrae@gmail.com"},
+]
+keywords = [
+    "tts",
+    "text-to-speech",
+    "asr", 
+    "speech-recognition",
+    "voice",
+    "terminal",
+    "cli",
+    "command-line",
+    "accessibility",
+    "ai",
+    "llm",
+    "claude",
+    "chatgpt",
+    "voice-assistant",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: System :: Shells",
+    "Topic :: Utilities",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: Console",
+]
+
+[project.urls]
+Homepage = "https://github.com/robdmac/talkito"
+Documentation = "https://github.com/robdmac/talkito/blob/main/README.md"
+Repository = "https://github.com/robdmac/talkito"
+Issues = "https://github.com/robdmac/talkito/issues"
+
+[project.scripts]
+talkito = "talkito.cli:main"
+
+[project.optional-dependencies]
+asr = [
+    "SpeechRecognition>=3.8.1",
+    "pyaudio>=0.2.11",
+]
+openai = ["openai>=1.0.0"]
+aws = ["boto3>=1.26.0"]
+azure = ["azure-cognitiveservices-speech>=1.24.0"]
+gcloud = [
+    "google-cloud-texttospeech>=2.14.0",
+    "google-cloud-speech>=2.20.0",
+]
+elevenlabs = ["elevenlabs>=0.2.0"]
+assemblyai = ["assemblyai>=0.5.0"]
+deepgram = ["deepgram-sdk>=2.0.0"]
+twilio = ["twilio>=8.0.0"]
+slack = ["slack-sdk>=3.19.0"]
+comms = ["twilio>=8.0.0", "flask>=2.0.0", "python-dotenv>=0.19.0", "waitress>=2.0.0"]
+mcp = ["mcp>=0.1.0"]
+env = ["python-dotenv>=0.19.0"]
+all = [
+    "SpeechRecognition>=3.8.1",
+    "pyaudio>=0.2.11",
+    "openai>=1.0.0",
+    "boto3>=1.26.0",
+    "azure-cognitiveservices-speech>=1.24.0",
+    "google-cloud-texttospeech>=2.14.0",
+    "google-cloud-speech>=2.20.0",
+    "elevenlabs>=0.2.0",
+    "assemblyai>=0.5.0",
+    "deepgram-sdk>=2.0.0",
+    "twilio>=8.0.0",
+    "slack-sdk>=3.19.0",
+    "flask>=2.0.0",
+    "waitress>=2.0.0",
+    "mcp>=0.1.0",
+    "python-dotenv>=0.19.0",
+]
+
+[tool.setuptools]
+packages = ["talkito"]
+
+[tool.setuptools.dynamic]
+version = {attr = "talkito.__version__.__version__"}
+readme = {file = ["README.md"], content-type = "text/markdown"}
