@@ -341,9 +341,10 @@ async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
     
-    # Handle MCP server mode synchronously
+    # Handle MCP server mode synchronously before entering async context
     if args.mcp_server:
-        run_mcp_server()
+        # MCP server has its own event loop, so we can't run it from within asyncio.run()
+        # This is handled in main() instead
         return 0
     
     try:
@@ -368,6 +369,13 @@ async def main_async() -> int:
 
 def main():
     """Main entry point for the CLI"""
+    # Handle MCP server mode before entering asyncio context
+    args = parse_arguments()
+    if args.mcp_server:
+        run_mcp_server()
+        sys.exit(0)
+    
+    # Run everything else in asyncio
     exit_code = asyncio.run(main_async())
     sys.exit(exit_code)
 
