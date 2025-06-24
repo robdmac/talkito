@@ -191,7 +191,7 @@ class ASRState:
     last_prompt_position: int = 0
     prompt_detected: bool = False
     refresh_spaces_added: int = 0
-    partial_enabled: bool = True
+    partial_enabled: bool = False
     question_mode: bool = False
 
 # State instances will be created by TalkitoCore
