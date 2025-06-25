@@ -128,6 +128,12 @@ def is_logging_enabled() -> bool:
     """Check if logging is enabled."""
     return _log_enabled
 
+def log_debug(message_func, logger_name: Optional[str] = None) -> None:
+    """Log a debug message using lazy evaluation - message_func is only called if logging is enabled."""
+    if not _log_enabled:
+        return
+    log_message("DEBUG", message_func(), logger_name)
+
 def get_log_file() -> Optional[Path]:
     """Get the current log file path."""
     return _log_file

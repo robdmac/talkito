@@ -42,7 +42,7 @@ from typing import Optional, List, Tuple, Dict, Union, Deque, Any
 
 from . import tts
 from .profiles import get_profile, Profile
-from .logs import setup_logging, get_logger, log_message, restore_stderr
+from .logs import setup_logging, get_logger, log_message, restore_stderr, log_debug, is_logging_enabled
 
 try:
     from . import asr
@@ -1063,7 +1063,8 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
                             asr_mode: str, recorder: SessionRecorder) -> Tuple[bytes, List[str], str, int]:
     """Process output data from PTY and queue text for speech"""
     # Log that we received data
-    log_message("DEBUG", f"[process_pty_output] Called with {len(data)} bytes of data")
+    if is_logging_enabled():
+        log_message("DEBUG", f"[process_pty_output] Called with {len(data)} bytes of data")
     if b'\xe2\x8f\xba' in data:
         log_message("INFO", f"[process_pty_output] Data contains response marker!")
     
@@ -1677,7 +1678,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             enabled_auto_listen, last_status_check = await periodic_status_check(
                 master_fd, asr_mode, last_status_check)
 
-            rlist, _, _ = select.select([sys.stdin, master_fd], [], [], 0.01)
+            rlist, _, _ = select.select([sys.stdin, master_fd], [], [], 0.001)
             
             # Check for input from communication channels
             comms_input = check_comms_input()
@@ -1778,20 +1779,20 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     if in_input and active_profile.input_start and active_profile.input_end:
                         if active_profile.input_end and active_profile.input_end in data_str:
                             end_idx = data_str.find(active_profile.input_end)
-                            log_message("DEBUG", f"Found input end at position {end_idx}")
+                            log_message("DEBUG", "Found input end at position", end_idx)
                             in_input = False
 
                     output_data = data_str.encode('utf-8')
                     output_data = output_data.replace(SPACE_THEN_BACK, b'')
-                    log_message("DEBUG", f"output_data {output_data}")
+                    # log_message("DEBUG", f"output_data {output_data}")
 
                     # Show microphone emoji if ASR is active
                     if asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input():
-                        log_message("DEBUG", f"ASR mic conditions met - asr_auto_started={asr_state.asr_auto_started}, waiting_for_input={asr_state.waiting_for_input}, asr_mode={asr_mode}")
+                        if is_logging_enabled():
+                            log_message("DEBUG", f"ASR mic conditions met - asr_auto_started={asr_state.asr_auto_started}, waiting_for_input={asr_state.waiting_for_input}, asr_mode={asr_mode}")
                         output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
 
                     try:
-                        log_message("DEBUG", f"output_data {output_data}")
                         sys.stdout.buffer.write(output_data)
                         sys.stdout.flush()
                     except BlockingIOError:
