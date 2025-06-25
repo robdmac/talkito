@@ -27,7 +27,7 @@ This package provides both a command-line interface and a Python API for:
 from .__version__ import __version__, __author__, __email__, __license__
 
 import warnings
-warnings.filterwarnings("ignore", message=r".*in sys\.modules.*talkito\.(asr|tts|comms).*", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message=r".*in sys\.modules.*talkito\.(asr|tts|comms|profiles).*", category=RuntimeWarning)
 
 from . import asr, comms, profiles, tts
 
