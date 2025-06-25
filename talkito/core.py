@@ -1986,6 +1986,13 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     send_pending_text()
 
     tts.wait_for_tts_to_finish()
+    
+    # Stop ASR if it was running
+    if ASR_AVAILABLE:
+        try:
+            asr.stop_dictation()
+        except Exception:
+            pass
 
     # Log final buffer statistics
     log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
