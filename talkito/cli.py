@@ -360,15 +360,8 @@ async def main_async() -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     finally:
-        # Clean up
-        if asr:
-            try:
-                asr.stop_dictation()
-            except:
-                pass
-        # Wait for TTS to finish before shutting down
-        tts.wait_for_tts_to_finish()
-        tts.shutdown_tts()
+        # All cleanup is now handled in run_command
+        pass
 
 
 def main():

@@ -273,6 +273,7 @@ CLAUDE_PROFILE = Profile(
         (4, r'\? for shortcuts'),
         (4, r'\(node:'),
         (4, r'^\['),
+        (4, r'Press Ctrl-C'),
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
