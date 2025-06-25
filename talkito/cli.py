@@ -65,6 +65,8 @@ def signal_handler(signum, frame):
             asr.stop_dictation()
         except:
             pass
+    # Wait for TTS to finish before shutting down
+    tts.wait_for_tts_to_finish()
     tts.shutdown_tts()
     
     # Exit with proper code for signal termination
@@ -96,7 +98,7 @@ def parse_arguments():
     # TTS options
     tts_group = parser.add_argument_group('TTS options')
     tts_group.add_argument('--tts-provider', type=str, 
-                           choices=['system', 'openai', 'polly', 'azure', 'gcloud', 'elevenlabs'],
+                           choices=['system', 'openai', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
                            help='TTS provider to use')
     tts_group.add_argument('--tts-voice', type=str, 
                            help='Voice to use (provider-specific)')
@@ -364,6 +366,8 @@ async def main_async() -> int:
                 asr.stop_dictation()
             except:
                 pass
+        # Wait for TTS to finish before shutting down
+        tts.wait_for_tts_to_finish()
         tts.shutdown_tts()
 
 

@@ -27,9 +27,10 @@ def read_readme():
 # Read version from __version__.py
 def get_version():
     version_file = os.path.join(os.path.dirname(__file__), "talkito", "__version__.py")
+    version_locals = {}
     with open(version_file, "r", encoding="utf-8") as f:
-        exec(compile(f.read(), version_file, "exec"))
-    return locals()["__version__"]
+        exec(compile(f.read(), version_file, "exec"), version_locals)
+    return version_locals["__version__"]
 
 # Core dependencies (minimal for basic functionality)
 install_requires = [
