@@ -109,6 +109,13 @@ class Profile:
         """Check if line should be skipped based on raw patterns"""
         return any(p.search(line) for p in self._compiled_raw_skip)
     
+    def get_raw_skip_reason(self, line: str) -> Optional[str]:
+        """Get the reason why a line would be skipped by raw patterns"""
+        for i, pattern in enumerate(self._compiled_raw_skip):
+            if pattern.search(line):
+                return f"Raw skip pattern: {self.raw_skip_patterns[i]}"
+        return None
+    
     def should_skip(self, line: str, verbosity: int = 0) -> bool:
         """Check if line should be skipped based on cleaned patterns and verbosity level"""
         # Check exception patterns first - these override all skip rules
@@ -140,6 +147,40 @@ class Profile:
             return True
         
         return False
+    
+    def get_skip_reason(self, line: str, verbosity: int = 0) -> Optional[str]:
+        """Get the reason why a line would be skipped, or None if it wouldn't be skipped"""
+        # Check exception patterns first - these override all skip rules
+        for min_verbosity, pattern in self._compiled_exceptions:
+            if pattern.search(line) and verbosity >= min_verbosity:
+                return None  # Exception pattern matched - line won't be skipped
+        
+        # Check speak patterns (should NOT skip)
+        for i, p in enumerate(self._compiled_speak):
+            if p.search(line):
+                return None  # Speak pattern matched - line won't be skipped
+        
+        # Check skip patterns with verbosity
+        for i, (min_verbosity, pattern) in enumerate(self._compiled_skip):
+            if pattern.search(line):
+                if verbosity < min_verbosity:
+                    # Find the original pattern string
+                    original_pattern = None
+                    for j, p in enumerate(self.skip_patterns):
+                        if isinstance(p, str) and j == i:
+                            original_pattern = p
+                            break
+                        elif isinstance(p, tuple) and j == i:
+                            original_pattern = p[1]
+                            break
+                    return f"Skip pattern (verbosity {min_verbosity}): {original_pattern or pattern.pattern}"
+        
+        # Check skip progress words
+        for word in self.skip_progress:
+            if word in line:
+                return f"Skip progress word: '{word}'"
+        
+        return None
 
     def is_continuation_line(self, line: str) -> bool:
         """Check if line is a continuation of the previous line"""
@@ -219,7 +260,7 @@ CLAUDE_PROFILE = Profile(
         (3, r'^\s{2,}\d+\s{2,}[a-zA-Z_#]'),   # Line numbers + code/comments
         (3, r'/usr/bin/'),                    # Skip shebang path prefix
         (3, r'^\s{2,}import\s+'),             # Skip indented import statements
-        (3, r'^\s{2,}[a-zA-Z_]+'),            # Skip any line starting with 2+ spaces followed by code
+        # (3, r'^\s{2,}[a-zA-Z_]+'),            # Skip any line starting with 2+ spaces followed by code
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'     '),                        # Indent usually means code
         (3, r'  - '),                         # Indent with dash usually means code
@@ -232,6 +273,7 @@ CLAUDE_PROFILE = Profile(
         (4, r'\? for shortcuts'),
         (4, r'\(node:'),
         (4, r'^\['),
+        (4, r'Press Ctrl-C'),
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
@@ -365,13 +407,17 @@ def test_line(profile: Profile, line: str, verbosity: int):
     print("-" * 50)
     
     # Test raw skip
-    if profile.should_skip_raw(line):
-        print("✗ RAW SKIP: Line matches raw skip pattern")
+    raw_skip_reason = profile.get_raw_skip_reason(line)
+    if raw_skip_reason:
+        print(f"✗ RAW SKIP: Line matches raw skip pattern")
+        print(f"  - {raw_skip_reason}")
         return
     
     # Test cleaned skip
-    if profile.should_skip(line, verbosity):
+    skip_reason = profile.get_skip_reason(line, verbosity)
+    if skip_reason:
         print(f"✗ SKIP: Line would be skipped at verbosity {verbosity}")
+        print(f"  - {skip_reason}")
     else:
         print(f"✓ SPEAK: Line would be spoken at verbosity {verbosity}")
     
