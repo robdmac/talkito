@@ -70,11 +70,12 @@ SCREEN_REDRAW_THRESHOLD = 2
 SCREEN_REDRAW_TIMEOUT = 5.0
 DEFAULT_TERMINAL_HEIGHT = 24
 DEFAULT_TERMINAL_WIDTH = 80
-PTY_READ_SIZE = 4096
+PTY_READ_SIZE = 16384
 SIMILARITY_THRESHOLD = 0.85
 RECENT_LINES_CACHE_SIZE = 50
 SCREEN_CONTENT_CACHE_SIZE = 100
 RESPONSE_PREFIX = '⏺'
+OUTPUT_BUFFER_MAX_SIZE = 1024 * 1024  # 1MB max buffer for non-blocking writes
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mGKHJ]')
 
@@ -198,6 +199,44 @@ class ASRState:
 active_profile: Optional[Profile] = None  # Will be initialized to default profile
 terminal = None  # Will be set by TalkitoCore
 asr_state: ASRState = ASRState()  # Will be set by TalkitoCore
+
+class OutputBuffer:
+    """Buffer for handling non-blocking stdout writes"""
+    def __init__(self, max_size: int = OUTPUT_BUFFER_MAX_SIZE):
+        self.buffer = bytearray()
+        self.max_size = max_size
+        self.dropped_bytes = 0
+    
+    def add(self, data: bytes) -> bool:
+        """Add data to buffer. Returns False if buffer is full."""
+        if len(self.buffer) + len(data) > self.max_size:
+            self.dropped_bytes += len(data)
+            log_message("WARNING", f"Output buffer full, dropping {len(data)} bytes (total dropped: {self.dropped_bytes})")
+            return False
+        self.buffer.extend(data)
+        return True
+    
+    def write_to_stdout(self) -> int:
+        """Try to write buffered data to stdout. Returns bytes written."""
+        if not self.buffer:
+            return 0
+        
+        try:
+            written = os.write(sys.stdout.fileno(), self.buffer)
+            if written > 0:
+                # Remove written bytes from buffer
+                self.buffer = self.buffer[written:]
+            return written
+        except BlockingIOError:
+            return 0
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return 0
+            raise
+    
+    def __len__(self):
+        return len(self.buffer)
+
 
 class LineBuffer:
     """Buffer that tracks all raw output lines with unique indices."""
@@ -1646,6 +1685,13 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
     # Use LineBuffer to track all output
     output_buffer = LineBuffer()
+    
+    # Initialize non-blocking output buffer
+    stdout_buffer = OutputBuffer()
+    
+    # Set stdout to non-blocking mode
+    stdout_flags = fcntl.fcntl(sys.stdout.fileno(), fcntl.F_GETFL)
+    fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags | os.O_NONBLOCK)
 
     # Cursor tracking
     current_cursor_row = 1
@@ -1671,14 +1717,23 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     try:
         while True:
             if process_pending_resize(master_fd):
-                await asyncio.sleep(0.1)
                 continue
                 
             # Periodic status update for dictation indicator and auto-listen check
             enabled_auto_listen, last_status_check = await periodic_status_check(
                 master_fd, asr_mode, last_status_check)
 
-            rlist, _, _ = select.select([sys.stdin, master_fd], [], [], 0.001)
+            # Check if we need to write buffered data
+            wlist = [sys.stdout] if len(stdout_buffer) > 0 else []
+            
+            # Reduced timeout from 0.01 to 0.001 for better responsiveness
+            rlist, wlist_ready, _ = select.select([sys.stdin, master_fd], wlist, [], 0.001)
+            
+            # Try to flush buffered output if stdout is writable
+            if sys.stdout in wlist_ready:
+                written = stdout_buffer.write_to_stdout()
+                if written > 0 and is_logging_enabled():
+                    log_message("DEBUG", f"Flushed {written} bytes from output buffer")
             
             # Check for input from communication channels
             comms_input = check_comms_input()
@@ -1717,7 +1772,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
             if master_fd in rlist or enabled_auto_listen:
                 try:
-                    data = os.read(master_fd, 4096)
+                    data = os.read(master_fd, PTY_READ_SIZE)
                     if not data:
                         break
 
@@ -1792,17 +1847,27 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                             log_message("DEBUG", f"ASR mic conditions met - asr_auto_started={asr_state.asr_auto_started}, waiting_for_input={asr_state.waiting_for_input}, asr_mode={asr_mode}")
                         output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
 
+                    # Try direct write first
                     try:
-                        sys.stdout.buffer.write(output_data)
-                        sys.stdout.flush()
+                        written = os.write(sys.stdout.fileno(), output_data)
+                        if written < len(output_data):
+                            # Partial write - buffer the rest
+                            stdout_buffer.add(output_data[written:])
+                            if is_logging_enabled():
+                                log_message("DEBUG", f"Partial write: {written}/{len(output_data)} bytes, buffered {len(output_data)-written}")
                     except BlockingIOError:
-                        # Terminal buffer is full, but we should still process the data for TTS
-                        log_message("DEBUG", f"Stdout blocked, continuing with processing")
-                        pass
-                    except Exception as e:
-                        log_message("ERROR", f"Error writing to stdout: {e}")
-                        import traceback
-                        log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+                        # Can't write at all - buffer everything
+                        stdout_buffer.add(output_data)
+                        if is_logging_enabled():
+                            log_message("DEBUG", f"Stdout blocked, buffered {len(output_data)} bytes")
+                    except OSError as e:
+                        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                            # Same as BlockingIOError
+                            stdout_buffer.add(output_data)
+                        else:
+                            log_message("ERROR", f"Error writing to stdout: {e}")
+                            import traceback
+                            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
                     
                     log_message("DEBUG", f"After stdout write/flush")
 
@@ -1842,7 +1907,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     # In record mode, drain and record any remaining output
                     try:
                         while True:
-                            data = os.read(master_fd, 4096)
+                            data = os.read(master_fd, PTY_READ_SIZE)
                             if not data:
                                 break
                             recorder.record_event('OUTPUT', data)
@@ -1932,6 +1997,23 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     recorder.save()
 
     await proc.wait()
+    
+    # Restore stdout to blocking mode
+    try:
+        fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags)
+        
+        # Flush any remaining buffered output
+        while len(stdout_buffer) > 0:
+            written = stdout_buffer.write_to_stdout()
+            if written == 0:
+                # Force flush by writing directly in blocking mode
+                remaining = bytes(stdout_buffer.buffer)
+                if remaining:
+                    sys.stdout.buffer.write(remaining)
+                    sys.stdout.flush()
+                break
+    except Exception as e:
+        log_message("ERROR", f"Error restoring stdout: {e}")
 
     return proc.returncode
 
