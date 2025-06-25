@@ -22,6 +22,8 @@ Contains pattern matching rules and behavior customization for different CLI pro
 """
 
 import re
+import argparse
+import sys
 from typing import Dict, List, Tuple, Optional, Pattern, Union
 from dataclasses import dataclass, field
 
@@ -209,6 +211,7 @@ CLAUDE_PROFILE = Profile(
         (2, r'\/help'),
         (2, r'cwd:'),
         (2, r'⎿'),                           # subheadings underneath an edit block like "Wrote 122 lines to x.py"
+        (2, r'^  \+'),
         
         # Level 3: Filter unless -vvv (code content, implementation details)
         (3, r'import\s+\w+…\)'),              # Skip import statements in tool output
@@ -228,6 +231,7 @@ CLAUDE_PROFILE = Profile(
         (4, r'(╭|╰)'),                        # Box drawing characters
         (4, r'\? for shortcuts'),
         (4, r'\(node:'),
+        (4, r'^\['),
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
@@ -334,3 +338,92 @@ def get_profile(name: str) -> Profile:
 def register_profile(profile: Profile):
     """Register a new profile"""
     PROFILES[profile.name] = profile
+
+
+def parse_arguments():
+    """Parse command-line arguments for profile testing"""
+    parser = argparse.ArgumentParser(
+        description='Test talkito profile filtering',
+        usage='python -m talkito.profiles [options] [line_to_test]'
+    )
+    parser.add_argument('--profile', '-p', type=str, default='default',
+                       choices=list(PROFILES.keys()),
+                       help='Profile to use for testing (default: default)')
+    parser.add_argument('--verbosity', '-v', action='count', default=0,
+                       help='Increase verbosity (can be used multiple times, up to -vvv)')
+    parser.add_argument('--list', '-l', action='store_true',
+                       help='List all available profiles')
+    parser.add_argument('line', nargs='*', 
+                       help='Line of text to test against the profile')
+    return parser.parse_args()
+
+
+def test_line(profile: Profile, line: str, verbosity: int):
+    """Test a line against a profile and show the results"""
+    print(f"\nTesting line: '{line}'")
+    print(f"Profile: {profile.name}, Verbosity: {verbosity}")
+    print("-" * 50)
+    
+    # Test raw skip
+    if profile.should_skip_raw(line):
+        print("✗ RAW SKIP: Line matches raw skip pattern")
+        return
+    
+    # Test cleaned skip
+    if profile.should_skip(line, verbosity):
+        print(f"✗ SKIP: Line would be skipped at verbosity {verbosity}")
+    else:
+        print(f"✓ SPEAK: Line would be spoken at verbosity {verbosity}")
+    
+    # Additional checks
+    if profile.is_continuation_line(line):
+        print("  - Is continuation line")
+    
+    if profile.is_question_line(line):
+        print("  - Is question line")
+    
+    if profile.is_input_start(line):
+        print("  - Is input start")
+    
+    # Test symbol stripping
+    stripped = profile.strip_symbols_from(line)
+    if stripped != line:
+        print(f"  - After symbol stripping: '{stripped}'")
+
+
+def main():
+    """Main entry point for profile testing"""
+    args = parse_arguments()
+    
+    # Handle --list option
+    if args.list:
+        print("Available profiles:")
+        for name in sorted(PROFILES.keys()):
+            print(f"  - {name}")
+        return
+    
+    # Get the selected profile
+    profile = get_profile(args.profile)
+    
+    # Test a line if provided
+    if args.line:
+        line = ' '.join(args.line)
+        test_line(profile, line, args.verbosity)
+    else:
+        # Interactive mode - read from stdin
+        print(f"Profile: {args.profile}, Verbosity: {args.verbosity}")
+        print("Enter lines to test (Ctrl+D to exit):")
+        print("-" * 50)
+        
+        try:
+            while True:
+                line = input("> ")
+                if line.strip():
+                    test_line(profile, line, args.verbosity)
+                    print()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting...")
+
+
+if __name__ == "__main__":
+    main()
