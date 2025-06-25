@@ -1916,6 +1916,11 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
         process_remaining_buffer(buffer, last_idx)
 
+    # Flush any pending speech text before command completes
+    send_pending_text()
+
+    tts.wait_for_tts_to_finish()
+
     # Log final buffer statistics
     log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
 
