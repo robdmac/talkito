@@ -27,6 +27,7 @@ from typing import Any
 import signal
 import atexit
 import logging
+import os
 
 # Import MCP SDK
 try:
@@ -108,6 +109,69 @@ def _signal_handler(signum, frame):
     _cleanup()
     sys.exit(0)
 
+# MCP Tools for talkito control
+
+@app.tool()
+async def turn_on() -> str:
+    """
+    Enable talkito voice interaction mode - activates voice workflow patterns
+    
+    Returns:
+        Instructions for voice mode activation
+    """
+    try:
+        _ensure_initialization()
+        
+        # Start with a voice announcement
+        tts.queue_for_speech("Voice interaction mode activated. I will now speak my responses and listen for your voice input.", None)
+        
+        return """✅ Voice interaction mode ACTIVATED!
+
+I'm now following the voice interaction patterns from TALKITO.md:
+- Speaking key conclusions after each response
+- Automatically listening for your voice input
+- Continuous hands-free conversation mode
+
+Say 'stop voice mode' or call turn_off to deactivate."""
+        
+    except Exception as e:
+        return f"Error enabling voice mode: {str(e)}"
+
+
+@app.tool()  
+async def turn_off() -> str:
+    """
+    Disable talkito voice interaction mode - deactivates voice workflow
+    
+    Returns:
+        Confirmation of deactivation
+    """
+    try:
+        _ensure_initialization()
+        
+        # Announce deactivation
+        tts.queue_for_speech("Voice interaction mode deactivated. Returning to text-only interaction.", None)
+        
+        # Stop any active voice input
+        if ASR_AVAILABLE and _asr_initialized:
+            try:
+                asr.stop_dictation()
+            except:
+                pass
+        
+        return """Voice interaction mode is now DISABLED.
+
+Returning to normal text-only interaction:
+- No automatic speech output
+- No automatic voice input
+- Standard Claude interaction restored
+
+You can re-enable voice mode at any time with the turn_on tool."""
+        
+    except Exception as e:
+        return f"Error disabling voice mode: {str(e)}"
+
+
 # MCP Tools for TTS functionality
 
 @app.tool()
@@ -127,12 +191,14 @@ async def speak_text(text: str, clean_text_flag: bool = True) -> str:
         
         # Clean text if requested
         processed_text = text
-        if clean_text_flag and _core_instance:
-            processed_text = _core_instance.clean_text(text)
-            processed_text = _core_instance.strip_profile_symbols(processed_text)
+        if clean_text_flag:
+            from .core import clean_text, strip_profile_symbols
+            processed_text = clean_text(text)
+            processed_text = strip_profile_symbols(processed_text)
         
         # Skip empty or unwanted text
-        if not processed_text.strip() or (_core_instance and _core_instance.should_skip_line(processed_text)):
+        from .core import should_skip_line
+        if not processed_text.strip() or should_skip_line(processed_text):
             return f"Skipped speaking: '{text[:50]}...' (filtered out)"
         
         # Queue for speech
@@ -444,7 +510,7 @@ async def get_all_dictated_text(clear_after_read: bool = True) -> dict[str, Any]
 
 # MCP Resources for TTS/ASR information
 
-@app.resource("talk://speech/status")
+@app.resource("talkito://speech/status")
 async def get_speech_status_resource() -> str:
     """Get current TTS status as a resource"""
     try:
@@ -461,27 +527,40 @@ async def get_speech_status_resource() -> str:
     except Exception as e:
         return f"Error getting TTS status: {str(e)}"
 
-@app.resource("talk://speech/engines")  
+@app.resource("talkito://speech/engines")  
 async def get_available_engines() -> str:
-    """Get list of available TTS engines"""
+    """Get list of available TTS engines with accessibility status"""
     try:
-        # Use talkito's detection logic
-        detected_engine = tts.detect_tts_engine()
+        accessible = tts.check_tts_provider_accessibility()
         
-        engines = []
-        if detected_engine != "none":
-            engines.append(f"system ({detected_engine})")
+        lines = ["TTS Engines (✓ = accessible, ✗ = needs configuration):"]
         
-        # Add cloud providers
-        cloud_engines = ["openai", "polly", "azure", "gcloud", "elevenlabs"]
-        engines.extend(cloud_engines)
+        for provider, info in accessible.items():
+            status = "✓" if info["available"] else "✗"
+            if provider == "system" and info["available"]:
+                lines.append(f"  {status} {provider} ({info['engine']}) - {info['note']}")
+            else:
+                lines.append(f"  {status} {provider} - {info['note']}")
         
-        return "Available TTS engines:\n" + "\n".join(f"  - {engine}" for engine in engines)
+        lines.append("\nCurrently accessible engines:")
+        accessible_count = 0
+        for provider, info in accessible.items():
+            if info["available"]:
+                accessible_count += 1
+                if provider == "system":
+                    lines.append(f"  - {provider} ({info['engine']})")
+                else:
+                    lines.append(f"  - {provider}")
+        
+        if accessible_count == 0:
+            lines.append("  (No engines currently accessible)")
+        
+        return "\n".join(lines)
         
     except Exception as e:
         return f"Error getting engines: {str(e)}"
 
-@app.resource("talk://voice/status")
+@app.resource("talkito://voice/status")
 async def get_voice_status_resource() -> str:
     """Get current ASR status as a resource"""
     try:
@@ -499,24 +578,32 @@ async def get_voice_status_resource() -> str:
     except Exception as e:
         return f"Error getting ASR status: {str(e)}"
 
-@app.resource("talk://voice/providers")
+@app.resource("talkito://voice/providers")
 async def get_available_asr_providers() -> str:
-    """Get list of available ASR providers"""
+    """Get list of available ASR providers with accessibility status"""
     try:
         if not ASR_AVAILABLE:
             return "ASR not available - install with: pip install talkito[asr]"
         
-        providers = [
-            "google (free, no API key required)",
-            "gcloud (Google Cloud Speech-to-Text)",
-            "assemblyai (AssemblyAI)",
-            "deepgram (Deepgram)",
-            "houndify (Houndify)",
-            "aws (AWS Transcribe)",
-            "bing (Microsoft Bing Speech)"
-        ]
+        accessible = asr.check_asr_provider_accessibility()
         
-        return "Available ASR providers:\n" + "\n".join(f"  - {provider}" for provider in providers)
+        lines = ["ASR Providers (✓ = accessible, ✗ = needs configuration):"]
+        
+        for provider, info in accessible.items():
+            status = "✓" if info["available"] else "✗"
+            lines.append(f"  {status} {provider} - {info['note']}")
+        
+        lines.append("\nCurrently accessible providers:")
+        accessible_count = 0
+        for provider, info in accessible.items():
+            if info["available"]:
+                accessible_count += 1
+                lines.append(f"  - {provider}")
+        
+        if accessible_count == 0:
+            lines.append("  (No providers currently accessible)")
+        
+        return "\n".join(lines)
         
     except Exception as e:
         return f"Error getting ASR providers: {str(e)}"
@@ -632,10 +719,24 @@ async def transcribe_audio() -> types.Prompt:
 def main():
     """Main entry point for the MCP server"""
     try:
-        # Run the MCP server using stdio transport
+        # Important: For stdio transport, we must use stderr for logging
+        # stdout is reserved for the MCP protocol communication
+        print("=" * 60, file=sys.stderr)
+        print("Talkito MCP server is starting...", file=sys.stderr)
+        print("Transport: stdio (communicating via stdin/stdout)", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # The server is ready immediately when run() executes
+        # This is a blocking call that handles all MCP communication
         app.run(transport='stdio')
+        
+        # This line only executes after the server shuts down
+        print("Talkito MCP server has stopped.", file=sys.stderr)
     except KeyboardInterrupt:
-        pass
+        print("\nTalkito MCP server interrupted by user.", file=sys.stderr)
+    except Exception as e:
+        print(f"Talkito MCP server error: {e}", file=sys.stderr)
+        raise
     finally:
         _cleanup()
 
