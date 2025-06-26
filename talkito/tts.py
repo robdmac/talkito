@@ -39,7 +39,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # Import centralized logging utilities
-from .logs import log_message as _base_log_message
+try:
+    from .logs import log_message as _base_log_message
+except ImportError:
+    # Fallback for standalone execution
+    def _base_log_message(level: str, message: str, logger_name: str = None):
+        print(f"[{level}] {message}")
 
 # Try to load .env files if available
 try:
@@ -85,7 +90,7 @@ TTS_PROVIDERS = {
         'install': 'pip install openai',
         'config_keys': ['voice']
     },
-    'polly': {
+    'aws': {
         'func': None,  # Will be set to speak_with_polly after function definition
         'env_var': None,  # AWS uses multiple env vars or config files
         'env_name': 'AWS credentials',
@@ -308,10 +313,12 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     except Exception:
         pass
     
-    accessible["polly"] = {
+    accessible["aws"] = {
         "available": polly_available,
         "note": polly_note
     }
+    # Keep 'polly' for backward compatibility
+    accessible["polly"] = accessible["aws"]
     
     # Azure
     accessible["azure"] = {
@@ -447,7 +454,7 @@ def validate_provider_config(provider: str) -> bool:
         return False
     
     # Special case for AWS Polly - check AWS credentials
-    if provider == 'polly':
+    if provider in ['aws', 'polly']:
         try:
             import boto3
             # Try to create a client to verify credentials
@@ -531,40 +538,48 @@ def speak_with_polly(text: str) -> bool:
         return _handle_provider_error("AWS Polly", e)
 
 
+def _synthesize_azure(text: str) -> Optional[bytes]:
+    """Synthesize speech using Microsoft Azure TTS API"""
+    import azure.cognitiveservices.speech as speechsdk
+    
+    # Check for API key and region
+    speech_key = os.environ.get('AZURE_SPEECH_KEY')
+    if not speech_key:
+        raise ValueError("AZURE_SPEECH_KEY environment variable not set")
+    
+    # Create speech configuration
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=azure_region)
+    speech_config.speech_synthesis_voice_name = azure_voice
+    
+    # Set output format to mp3
+    speech_config.set_speech_synthesis_output_format(
+        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+    )
+    
+    # Create synthesizer without audio output (we'll get the audio data)
+    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
+    
+    # Synthesize the text
+    result = synthesizer.speak_text_async(text).get()
+    
+    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        # Return the audio data
+        return bytes(result.audio_data)
+    elif result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = result.cancellation_details
+        error_msg = f"Azure TTS synthesis canceled: {cancellation_details.reason}"
+        if cancellation_details.reason == speechsdk.CancellationReason.Error:
+            error_msg += f" - {cancellation_details.error_details}"
+        raise Exception(error_msg)
+    else:
+        raise Exception(f"Azure TTS synthesis failed with reason: {result.reason}")
+
+
 def speak_with_azure(text: str) -> bool:
     """Speak text using Microsoft Azure TTS API"""
     try:
         import azure.cognitiveservices.speech as speechsdk
-        
-        # Check for API key and region
-        speech_key = os.environ.get('AZURE_SPEECH_KEY')
-        if not speech_key:
-            log_message("ERROR", "AZURE_SPEECH_KEY environment variable not set")
-            return False
-        
-        # Create speech configuration
-        speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=azure_region)
-        speech_config.speech_synthesis_voice_name = azure_voice
-        
-        # Create synthesizer with default speaker
-        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config)
-        
-        # Speak the text
-        result = synthesizer.speak_text_async(text).get()
-        
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            log_message("INFO", "Azure TTS synthesis completed")
-            return True
-        elif result.reason == speechsdk.ResultReason.Canceled:
-            cancellation_details = result.cancellation_details
-            log_message("ERROR", f"Azure TTS synthesis canceled: {cancellation_details.reason}")
-            if cancellation_details.reason == speechsdk.CancellationReason.Error:
-                log_message("ERROR", f"Azure TTS error details: {cancellation_details.error_details}")
-            return False
-        else:
-            log_message("ERROR", f"Azure TTS synthesis failed with reason: {result.reason}")
-            return False
-            
+        return synthesize_and_play(_synthesize_azure, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("Azure Speech SDK", "pip install azure-cognitiveservices-speech")
     except Exception as e:
@@ -736,11 +751,14 @@ def speak_with_deepgram(text: str) -> bool:
 
 # Initialize provider functions in the registry
 TTS_PROVIDERS['openai']['func'] = speak_with_openai
-TTS_PROVIDERS['polly']['func'] = speak_with_polly
+TTS_PROVIDERS['aws']['func'] = speak_with_polly
 TTS_PROVIDERS['azure']['func'] = speak_with_azure
 TTS_PROVIDERS['gcloud']['func'] = speak_with_gcloud
 TTS_PROVIDERS['elevenlabs']['func'] = speak_with_elevenlabs
 TTS_PROVIDERS['deepgram']['func'] = speak_with_deepgram
+
+# Add 'polly' as an alias for 'aws' for backward compatibility
+TTS_PROVIDERS['polly'] = TTS_PROVIDERS['aws']
 
 
 def context_aware_symbol_replacement(text: str) -> str:
@@ -1293,9 +1311,9 @@ def get_highest_spoken_line_number() -> int:
 def parse_arguments():
     """Parse command-line arguments for TTS provider selection"""
     parser = argparse.ArgumentParser(description='Text-to-Speech with multiple provider support')
-    parser.add_argument('--tts-provider', type=str, default='system',
-                       choices=['system', 'openai', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
-                       help='TTS provider to use (default: system)')
+    parser.add_argument('--tts-provider', type=str, default=None,
+                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
+                       help='TTS provider to use (default: auto-select best available)')
     parser.add_argument('--voice', type=str, default=None,
                        help='Voice to use (provider-specific)')
     parser.add_argument('--language', type=str, default='en-US',
@@ -1312,7 +1330,13 @@ def configure_tts_provider(args):
     """Configure TTS provider based on command-line arguments"""
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id
     
-    tts_provider = args.tts_provider
+    # Auto-select provider if not specified
+    provider = args.tts_provider
+    if provider is None:
+        provider = select_best_tts_provider()
+        print(f"Auto-selected TTS provider: {provider}")
+    
+    tts_provider = provider
     
     # Validate provider configuration
     if not validate_provider_config(tts_provider):
@@ -1331,7 +1355,7 @@ def configure_tts_provider(args):
             openai_voice = args.voice
         log_message("INFO", f"Using OpenAI TTS with voice: {openai_voice}")
         
-    elif tts_provider == 'polly':
+    elif tts_provider in ['aws', 'polly']:
         polly_region = args.region or 'us-east-1'
         if args.voice:
             polly_voice = args.voice
@@ -1378,6 +1402,44 @@ def configure_tts_provider(args):
     return True
 
 
+def select_best_tts_provider() -> str:
+    """Select the best available TTS provider based on accessibility and preferences.
+    
+    Order of preference:
+    1. TALKITO_PREFERRED_TTS_PROVIDER from environment (if accessible)
+    2. First accessible non-system provider (alphabetically)
+    3. System provider as fallback
+    """
+    preferred = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+    accessible = check_tts_provider_accessibility()
+    
+    # Check if preferred provider is accessible
+    if preferred and preferred in accessible and accessible[preferred]['available']:
+        log_message("INFO", f"Using preferred TTS provider: {preferred}")
+        return preferred
+    
+    # Get all accessible providers except system
+    available_providers = [
+        provider for provider, info in sorted(accessible.items())
+        if info['available'] and provider != 'system'
+    ]
+    
+    # Use first available non-system provider
+    if available_providers:
+        provider = available_providers[0]
+        log_message("INFO", f"Selected TTS provider: {provider} (first available)")
+        return provider
+    
+    # Fall back to system if available
+    if accessible.get('system', {}).get('available'):
+        log_message("INFO", "Falling back to system TTS provider")
+        return 'system'
+    
+    # No providers available
+    log_message("WARNING", "No TTS providers available")
+    return 'system'
+
+
 def configure_tts_from_dict(config: dict) -> bool:
     """Configure TTS provider from a configuration dictionary (for use by talkito.py)"""
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model
@@ -1402,7 +1464,7 @@ def configure_tts_from_dict(config: dict) -> bool:
             openai_voice = config['voice']
         log_message("INFO", f"Using OpenAI TTS with voice: {openai_voice}")
         
-    elif provider == 'polly':
+    elif provider in ['aws', 'polly']:
         # Additional AWS validation
         try:
             import boto3
@@ -1484,7 +1546,11 @@ if __name__ == "__main__":
     # Set up logging - if log-file is specified
     # Set up logging using centralized logging from logs module
     if args.log_file:
-        from .logs import setup_logging
+        try:
+            from .logs import setup_logging
+        except ImportError:
+            # Running standalone - try direct import
+            from logs import setup_logging
         setup_logging(args.log_file, mode='w')
         print(f"Logging to: {args.log_file}")
     
@@ -1499,16 +1565,38 @@ if __name__ == "__main__":
         text_to_speak = sys.stdin.read().strip()
     else:
         # Interactive mode - prompt for input
-        print("Enter text to speak (Ctrl+D to finish):")
+        print("Interactive TTS mode. Type text and press Enter to speak.")
+        print("Press Ctrl+D (EOF) or Ctrl+C to exit.")
+        
+        # Detect TTS engine based on provider
+        if tts_provider == 'system':
+            engine = detect_tts_engine()
+            if engine == "none":
+                print("Error: No TTS engine found on this system")
+                exit(1)
+        else:
+            engine = 'cloud'  # Use cloud engine for external providers
+        
+        # Start the TTS worker for interactive mode
+        start_tts_worker(engine)
+        
         try:
-            lines = []
             while True:
-                line = input()
-                lines.append(line)
-        except EOFError:
-            text_to_speak = '\n'.join(lines).strip()
+                try:
+                    line = input("> ")
+                    if line.strip():  # Only speak non-empty lines
+                        queue_for_speech(line)
+                        # Give a moment for speech to start
+                        time.sleep(0.1)
+                except EOFError:
+                    print("\nExiting interactive mode.")
+                    break
         except KeyboardInterrupt:
             print("\nCancelled.")
+        finally:
+            # Wait for any remaining speech to complete
+            wait_for_tts_to_finish()
+            shutdown_tts()
             exit(0)
     
     # Speak the text if we have any
