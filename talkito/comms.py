@@ -34,10 +34,13 @@ from queue import Queue, Empty
 # Import centralized logging utilities
 from .logs import log_message as _base_log_message
 
-# Try to load .env file if available
+# Try to load .env files if available
 try:
     from dotenv import load_dotenv
+    # Load .env first (takes precedence)
     load_dotenv()
+    # Also load .talkito.env (won't override existing vars from .env)
+    load_dotenv('.talkito.env')
 except ImportError:
     pass
 
