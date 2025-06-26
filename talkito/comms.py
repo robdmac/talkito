@@ -572,6 +572,18 @@ class CommunicationManager:
         except Empty:
             return None
     
+    def get_input_message(self, timeout: float = None) -> Optional[Message]:
+        """Get input message object from communication channels."""
+        try:
+            # Use non-blocking get to avoid freezing the terminal
+            if timeout == 0 or timeout is None:
+                message = self.input_queue.get_nowait()
+            else:
+                message = self.input_queue.get(timeout=timeout)
+            return message
+        except Empty:
+            return None
+    
     def get_active_provider_types(self) -> List[str]:
         """Get list of active provider types."""
         active_types = []

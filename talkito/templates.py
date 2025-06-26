@@ -98,9 +98,9 @@ Enter voice interaction mode and follow these patterns for EVERY interaction:
 2. **Continuous voice loop**:
    - After EVERY response, automatically call `talkito:speak_text` with your key conclusion
    - Immediately call `talkito:start_voice_input` without asking
-   - Wait 2-3 seconds, then call `talkito:get_dictated_text`
-   - Process the dictated text as the next user input
-   - Continue this cycle indefinitely
+   - Wait 1 second, then silently call `talkito:get_messages`
+   - Process the received messages as the next user input
+   - Continue this cycle indefinitely while talkito is on
 
 3. **Natural conversation flow**:
    - Keep spoken responses concise (1-2 sentences max)
@@ -179,6 +179,15 @@ When Slack mode is active:
 - Set TALKITO_PREFERRED_ASR_PROVIDER to choose default
 - Voice activity detection is less aggressive (1.5s silence threshold)
 - Unified setting: TALKITO_ASR_MIN_SILENCE_MS (default: 1500ms)
+
+## Message Handling
+
+### Unified Message Retrieval:
+- Use `talkito:get_messages` to check all input sources at once
+- Returns messages from voice dictation, Slack, and WhatsApp in one call
+- Messages are cleared after reading to avoid duplicates
+- Check frequently when in voice mode or when expecting responses
+
 
 ## Important Notes:
 - In voice mode, ALWAYS continue the cycle until explicitly stopped

@@ -240,8 +240,8 @@ async def speak_text(text: str, clean_text_flag: bool = True) -> str:
         from .core import should_skip_line
         if not processed_text.strip() or should_skip_line(processed_text):
             result = f"Skipped speaking: '{text[:50]}...' (filtered out)"
-        log_message("INFO", f"speak_text returning: {result}")
-        return result
+            log_message("INFO", f"speak_text returning: {result}")
+            return result
         
         # Queue for speech
         tts.queue_for_speech(processed_text, None)
@@ -578,46 +578,6 @@ async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
         log_message("ERROR", f"get_dictated_text error: {error_dict}")
         return error_dict
 
-@app.tool()
-async def get_all_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
-    """
-    Get all recent dictated text from voice input
-    
-    Args:
-        clear_after_read: Whether to clear the history after reading
-        
-    Returns:
-        Dictionary with all dictated text entries
-    """
-    try:
-        global _dictation_callback_results
-        
-        if not _dictation_callback_results:
-            result = {
-                "entries": [],
-                "count": 0,
-                "message": "No dictated text available"
-            }
-            log_message("INFO", f"get_all_dictated_text returning: No dictated text available")
-            return result
-        
-        result = {
-            "entries": _dictation_callback_results.copy(),
-            "count": len(_dictation_callback_results),
-            "message": f"Retrieved {len(_dictation_callback_results)} dictated text entries"
-        }
-        
-        if clear_after_read:
-            _dictation_callback_results.clear()
-            result["message"] += " (cleared after read)"
-        
-        log_message("DEBUG", f"get_all_dictated_text returning: {len(result['entries'])} entries")
-        return result
-        
-    except Exception as e:
-        error_dict = {"error": f"Error getting dictated text history: {str(e)}"}
-        log_message("ERROR", f"get_all_dictated_text error: {error_dict}")
-        return error_dict
 
 # MCP Tools for Communication (WhatsApp/Slack)
 
@@ -691,6 +651,11 @@ async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = Fa
                 return error_msg
         
         # Check if WhatsApp provider exists
+        if not _comms_manager or not _comms_manager.providers:
+            error_msg = "No communication providers configured."
+            log_message("ERROR", f"send_whatsapp error: {error_msg}")
+            return error_msg
+        
         if not any(isinstance(p, TwilioWhatsAppProvider) for p in _comms_manager.providers):
             error_msg = "WhatsApp provider not available. Please configure with Twilio credentials."
             log_message("ERROR", f"send_whatsapp error: {error_msg}")
@@ -707,7 +672,9 @@ async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = Fa
         # Send the message
         whatsapp_provider = next((p for p in _comms_manager.providers if isinstance(p, TwilioWhatsAppProvider)), None)
         if not whatsapp_provider:
-            return "WhatsApp provider not found in communication manager"
+            error_msg = "WhatsApp provider not found in communication manager"
+            log_message("ERROR", f"send_whatsapp error: {error_msg}")
+            return error_msg
         result = whatsapp_provider.send_message(message, to_number)
         
         # Also speak it if requested
@@ -750,7 +717,12 @@ async def send_slack(message: str, channel: str = None, with_tts: bool = False) 
                 return error_msg
         
         # Check if Slack provider exists
-        if 'slack' not in _comms_manager.providers:
+        if not _comms_manager or not _comms_manager.providers:
+            error_msg = "No communication providers configured."
+            log_message("ERROR", f"send_slack error: {error_msg}")
+            return error_msg
+        
+        if not any(isinstance(p, SlackProvider) for p in _comms_manager.providers):
             error_msg = "Slack provider not available. Please configure with Slack bot token."
             log_message("ERROR", f"send_slack error: {error_msg}")
             return error_msg
@@ -758,14 +730,33 @@ async def send_slack(message: str, channel: str = None, with_tts: bool = False) 
         # Send the message
         slack_provider = next((p for p in _comms_manager.providers if isinstance(p, SlackProvider)), None)
         if not slack_provider:
-            return "Slack provider not found in communication manager"
-        result = slack_provider.send_message(message, channel)
+            error_msg = "Slack provider not found in communication manager"
+            log_message("ERROR", f"send_slack error: {error_msg}")
+            return error_msg
+        # Determine the target channel
+        target_channel = channel or _slack_channel or os.environ.get('SLACK_CHANNEL')
+        if not target_channel:
+            error_msg = "No Slack channel specified. Please provide a channel or set SLACK_CHANNEL environment variable."
+            log_message("ERROR", f"send_slack error: {error_msg}")
+            return error_msg
+        
+        # Create a Message object for Slack provider
+        from .comms import Message
+        slack_message = Message(
+            content=message,
+            sender=target_channel,
+            channel="slack"
+        )
+        success = slack_provider.send_message(slack_message)
         
         # Also speak it if requested
         if with_tts and _tts_initialized:
             tts.queue_for_speech(message, None)
         
-        result_msg = f"Slack message sent: '{message[:50]}...' to {result.get('channel', 'default channel')}"
+        if success:
+            result_msg = f"Slack message sent: '{message[:50]}...' to {target_channel}"
+        else:
+            result_msg = f"Failed to send Slack message to {target_channel}"
         log_message("INFO", f"send_slack returning: {result_msg}")
         return result_msg
         
@@ -845,7 +836,7 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         # Ensure WhatsApp is configured
         if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
             _comms_manager = comms.setup_communication(providers=['whatsapp'])
-            if not _comms_manager or 'whatsapp' not in _comms_manager.providers:
+            if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
                 error_msg = "Failed to configure WhatsApp. Check your Twilio credentials."
                 log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
                 return error_msg
@@ -1026,6 +1017,85 @@ async def get_slack_mode_status() -> dict[str, Any]:
     }
     log_message("DEBUG", f"get_slack_mode_status returning: {status}")
     return status
+
+
+@app.tool()
+async def get_messages() -> dict[str, Any]:
+    """
+    Get all available messages from voice dictation, Slack, and WhatsApp.
+    This provides a unified interface for checking all communication channels.
+    
+    Returns:
+        Dictionary containing all available messages from different sources
+    """
+    try:
+        global _dictation_callback_results, _comms_manager
+        
+        result = {
+            "voice": [],
+            "slack": [],
+            "whatsapp": [],
+            "total_count": 0,
+            "has_messages": False
+        }
+        
+        # Get voice dictation results
+        if _dictation_callback_results:
+            result["voice"] = _dictation_callback_results.copy()
+            _dictation_callback_results.clear()  # Clear after reading
+        
+        # Get messages from communication manager
+        if _comms_manager:
+            messages = []
+            # Collect all available messages
+            while True:
+                msg = _comms_manager.get_input_message(timeout=0)  # Non-blocking
+                if msg:
+                    messages.append(msg)
+                else:
+                    break
+            
+            # Sort messages by channel type
+            for msg in messages:
+                if 'slack' in msg.channel.lower() or msg.channel.startswith('#'):
+                    result["slack"].append({
+                        "text": msg.content,
+                        "sender": msg.sender,
+                        "channel": msg.channel,
+                        "timestamp": msg.timestamp
+                    })
+                elif 'whatsapp' in msg.channel.lower():
+                    result["whatsapp"].append({
+                        "text": msg.content,
+                        "sender": msg.sender,
+                        "channel": msg.channel,
+                        "timestamp": msg.timestamp
+                    })
+        
+        # Calculate totals
+        result["total_count"] = len(result["voice"]) + len(result["slack"]) + len(result["whatsapp"])
+        result["has_messages"] = result["total_count"] > 0
+        
+        # Build summary message
+        if result["has_messages"]:
+            sources = []
+            if result["voice"]:
+                sources.append(f"{len(result['voice'])} voice")
+            if result["slack"]:
+                sources.append(f"{len(result['slack'])} Slack")
+            if result["whatsapp"]:
+                sources.append(f"{len(result['whatsapp'])} WhatsApp")
+            result["message"] = f"Retrieved messages from: {', '.join(sources)}"
+        else:
+            result["message"] = "No new messages available from any source"
+        
+        log_message("DEBUG", f"get_messages returning: {result['message']}")
+        return result
+        
+    except Exception as e:
+        error_dict = {"error": f"Error getting messages: {str(e)}"}
+        log_message("ERROR", f"get_messages error: {error_dict}")
+        return error_dict
 
 # MCP Resources for TTS/ASR information
 
