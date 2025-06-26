@@ -61,19 +61,26 @@ def temp_audio_file(audio_data: bytes, suffix: str = '.wav'):
     tmp_path = None
     try:
         tmp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        tmp_file.write(audio_data)
-        tmp_path = tmp_file.name
-        tmp_file.close()
+        try:
+            tmp_file.write(audio_data)
+            tmp_file.flush()  # Ensure data is written
+            tmp_path = tmp_file.name
+        finally:
+            # Always close the file, even if write fails
+            tmp_file.close()
         yield tmp_path
     finally:
-        if tmp_file and not tmp_file.closed:
-            tmp_file.close()
+        # Clean up the file if it was created
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except Exception as e:
                 log_message("WARNING", f"Failed to delete temp file {tmp_path}: {e}")
 
+
+# Unified VAD configuration
+# Default minimum silence duration before ending utterance (in milliseconds)
+DEFAULT_MIN_SILENCE_MS = int(os.environ.get('TALKITO_ASR_MIN_SILENCE_MS', '1500'))
 
 @dataclass
 class ASRConfig:
@@ -280,7 +287,10 @@ class AudioCaptureThread:
                         
                     if audio_data:
                         # Check if we should ignore input (e.g., during TTS playback)
-                        if not _ignore_input:
+                        with _ignore_input_lock:
+                            should_ignore = _ignore_input
+                        
+                        if not should_ignore:
                             self.queue.put(audio_data)
                         else:
                             # Silently discard audio while ignoring input
@@ -664,12 +674,27 @@ class AssemblyAIProvider(ASRProvider):
                 client.on(StreamingEvents.Error, on_error)
                 
                 # Connect with parameters
-                client.connect(
-                    StreamingParameters(
-                        sample_rate=16000,
-                        format_turns=False,  # We handle formatting ourselves
-                    )
+                # Configure voice activity detection parameters
+                params = StreamingParameters(
+                    sample_rate=16000,
+                    format_turns=False,  # We handle formatting ourselves
                 )
+                
+                # Add configurable VAD parameters for less aggressive end-of-turn detection
+                # Use unified setting for minimum silence
+                params.end_of_turn_confidence_threshold = float(os.environ.get('ASSEMBLYAI_END_OF_TURN_CONFIDENCE', '0.5'))
+                params.min_end_of_turn_silence_when_confident = DEFAULT_MIN_SILENCE_MS
+                
+                if os.environ.get('ASSEMBLYAI_MAX_SILENCE_MS'):
+                    params.max_turn_silence = int(os.environ.get('ASSEMBLYAI_MAX_SILENCE_MS'))
+                else:
+                    params.max_turn_silence = 5000  # Higher = less aggressive (default: 2400ms)
+                
+                log_message("INFO", f"AssemblyAI VAD settings: confidence={params.end_of_turn_confidence_threshold}, "
+                           f"min_silence={params.min_end_of_turn_silence_when_confident}ms (unified), "
+                           f"max_silence={params.max_turn_silence}ms")
+                
+                client.connect(params)
                 
                 log_message("INFO", "AssemblyAI v3 connection established")
                 
@@ -908,16 +933,30 @@ class AWSTranscribeProvider(ASRProvider):
                         
                         # The event IS the transcript event directly
                         try:
+                            # Check if event has transcript attribute
+                            if not hasattr(event, 'transcript') or event.transcript is None:
+                                log_message("DEBUG", f"Event has no transcript: {type(event).__name__}")
+                                continue
+                            
+                            # Check if transcript has results
+                            if not hasattr(event.transcript, 'results') or not event.transcript.results:
+                                log_message("DEBUG", "Transcript has no results")
+                                continue
+                                
                             results = event.transcript.results
                             log_message("DEBUG", f"Transcript event with {len(results)} results")
                             
                             for result in results:
-                                if not result.alternatives:
+                                if not result or not hasattr(result, 'alternatives') or not result.alternatives:
                                     continue
                                 
+                                # Check if alternatives list is not empty
+                                if len(result.alternatives) == 0:
+                                    continue
+                                    
                                 transcript = result.alternatives[0].transcript
                                 
-                                if result.is_partial:
+                                if hasattr(result, 'is_partial') and result.is_partial:
                                     log_message("DEBUG", f"Partial transcript: {transcript}")
                                     handler.handle_partial(transcript)
                                 else:
@@ -1100,18 +1139,23 @@ class DeepgramProvider(ASRProvider):
                 dg_connection.on(LiveTranscriptionEvents.Close, on_close)
                 
                 # Configure options
+                # Use unified setting for utterance end delay
+                utterance_end_ms = DEFAULT_MIN_SILENCE_MS
+                
                 options = LiveOptions(
                     model="nova-3",
                     language=self.config.language,
                     punctuate = True,
                     smart_format = True,
                     interim_results = True,
-                    utterance_end_ms = 1000,
+                    utterance_end_ms = utterance_end_ms,
                     vad_events = True,
                     encoding = "linear16",
                     sample_rate = 16000
                 )
                 
+                log_message("INFO", f"Deepgram VAD settings: utterance_end_ms={utterance_end_ms}ms (unified)")
+
                 # Start connection
                 if not dg_connection.start(options):
                     log_message("ERROR", "Failed to start Deepgram connection")
@@ -1261,6 +1305,44 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     return accessible
 
 
+def select_best_asr_provider() -> str:
+    """Select the best available ASR provider based on accessibility and preferences.
+    
+    Order of preference:
+    1. TALKITO_PREFERRED_ASR_PROVIDER from environment (if accessible)
+    2. First accessible non-google provider (alphabetically)
+    3. Google free as fallback
+    """
+    preferred = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
+    accessible = check_asr_provider_accessibility()
+    
+    # Check if preferred provider is accessible
+    if preferred and preferred in accessible and accessible[preferred]['available']:
+        log_message("INFO", f"Using preferred ASR provider: {preferred}")
+        return preferred
+    
+    # Get all accessible providers except google (free)
+    available_providers = [
+        provider for provider, info in sorted(accessible.items())
+        if info['available'] and provider != 'google'
+    ]
+    
+    # Use first available non-google provider
+    if available_providers:
+        provider = available_providers[0]
+        log_message("INFO", f"Selected ASR provider: {provider} (first available)")
+        return provider
+    
+    # Fall back to google if available
+    if accessible.get('google', {}).get('available'):
+        log_message("INFO", "Falling back to Google free ASR provider")
+        return 'google'
+    
+    # No providers available
+    log_message("WARNING", "No ASR providers available, defaulting to google")
+    return 'google'
+
+
 # Provider registry
 PROVIDERS = {
     'assemblyai': AssemblyAIProvider,
@@ -1282,7 +1364,7 @@ class DictationEngine:
     
     def __init__(self, text_callback: Callable[[str], None], 
                  energy_threshold: int = 4000,
-                 pause_threshold: float = 0.8,
+                 pause_threshold: float = None,
                  phrase_time_limit: Optional[float] = 5.0,
                  partial_callback: Optional[Callable[[str], None]] = None,
                  provider_config: Optional[ASRConfig] = None):
@@ -1296,9 +1378,13 @@ class DictationEngine:
         self.is_active = False
         self.is_stopped = False  # Track if already stopped
         self.audio_queue = queue.Queue()
+        self._stop_lock = threading.Lock()  # Prevent race condition in stop()
         
         # Configure recognizer
         self.recognizer.energy_threshold = energy_threshold
+        # Use unified setting, converting from ms to seconds for speech_recognition
+        if pause_threshold is None:
+            pause_threshold = DEFAULT_MIN_SILENCE_MS / 1000.0  # Convert to seconds
         self.recognizer.pause_threshold = pause_threshold
         self.phrase_time_limit = phrase_time_limit
         
@@ -1384,31 +1470,38 @@ class DictationEngine:
     
     def stop(self):
         """Stop dictation"""
-        if self.is_stopped:
-            log_message("DEBUG", "Dictation engine already fully stopped, skipping")
-            return
+        with self._stop_lock:  # Prevent concurrent stop() calls
+            if self.is_stopped:
+                log_message("DEBUG", "Dictation engine already fully stopped, skipping")
+                return
+                
+            if not self.is_active:
+                log_message("DEBUG", "Dictation engine already inactive, skipping")
+                self.is_stopped = True  # Mark as stopped even if inactive
+                return
             
-        if not self.is_active:
-            log_message("DEBUG", "Dictation engine already inactive, skipping")
-            return
-        
-        log_message("INFO", "Stopping dictation engine...")
-        self.is_active = False
-        self.stop_event.set()
-        
-        # Wait for threads
-        if self.listener_thread:
-            self.listener_thread.join(timeout=1.0)
+            log_message("INFO", "Stopping dictation engine...")
+            self.is_active = False
+            self.stop_event.set()
+            
+            # Wait for threads outside the lock to avoid deadlock
+            listener_thread = self.listener_thread
+            processor_thread = self.processor_thread
             self.listener_thread = None
-        if self.processor_thread:
-            self.processor_thread.join(timeout=1.0)
             self.processor_thread = None
+        
+        # Join threads outside the lock
+        if listener_thread:
+            listener_thread.join(timeout=1.0)
+        if processor_thread:
+            processor_thread.join(timeout=1.0)
         
         # Note: We don't manually close the microphone stream here because
         # it's managed by the context manager in AudioCaptureThread and
         # _phrase_worker. Manually closing it here causes a double-free error.
         
-        self.is_stopped = True
+        with self._stop_lock:
+            self.is_stopped = True
         log_message("INFO", "Stopped dictation engine")
     
     def _streaming_worker(self):
@@ -1547,27 +1640,33 @@ class DictationEngine:
 # Simplified configuration functions
 def create_config_from_args(args) -> ASRConfig:
     """Create ASR config from command line arguments"""
+    # Use provider selection if not specified
+    provider = args.asr_provider
+    if provider is None:
+        provider = select_best_asr_provider()
+        print(f"Auto-selected ASR provider: {provider}")
+    
     config = ASRConfig(
-        provider=args.asr_provider,
+        provider=provider,
         language=args.language
     )
     
     # Provider-specific settings
-    if args.asr_provider == 'assemblyai':
+    if provider == 'assemblyai':
         config.api_key = args.assemblyai_api_key
-    elif args.asr_provider == 'houndify':
+    elif provider == 'houndify':
         config.client_id = args.houndify_client_id
         config.client_key = args.houndify_client_key
         config.user_id = args.houndify_user_id
-    elif args.asr_provider == 'aws':
+    elif provider == 'aws':
         config.region = args.aws_region
-    elif args.asr_provider == 'whisper':
+    elif provider == 'whisper':
         config.api_key = args.openai_api_key
         config.model = args.whisper_model
-    elif args.asr_provider == 'azure':
+    elif provider == 'azure':
         config.api_key = args.azure_speech_key
         config.region = args.azure_speech_region
-    elif args.asr_provider == 'deepgram':
+    elif provider == 'deepgram':
         config.api_key = args.deepgram_api_key
         config.model = args.deepgram_model
     
@@ -1591,6 +1690,7 @@ def create_config_from_dict(data: dict) -> ASRConfig:
 # Global engine management (simplified)
 _engine: Optional[DictationEngine] = None
 _ignore_input: bool = False  # Flag to temporarily ignore ASR input
+_ignore_input_lock = threading.Lock()  # Thread safety for _ignore_input
 
 
 def start_dictation(text_callback, partial_callback=None, config: Optional[ASRConfig] = None):
@@ -1691,13 +1791,15 @@ def start_dictation(text_callback, partial_callback=None, config: Optional[ASRCo
 def set_ignore_input(ignore: bool):
     """Set whether to temporarily ignore ASR input"""
     global _ignore_input
-    _ignore_input = ignore
+    with _ignore_input_lock:
+        _ignore_input = ignore
     log_message("DEBUG", f"ASR ignore_input set to: {ignore}")
 
 
 def is_ignoring_input() -> bool:
     """Check if ASR is currently ignoring input"""
-    return _ignore_input
+    with _ignore_input_lock:
+        return _ignore_input
 
 
 def is_dictation_active() -> bool:
@@ -1708,8 +1810,9 @@ def is_dictation_active() -> bool:
 def main():
     """Example usage"""
     parser = argparse.ArgumentParser()
-    parser.add_argument('--asr-provider', default='google_free',
-                       choices=list(PROVIDERS.keys()))
+    parser.add_argument('--asr-provider', default=None,
+                       choices=list(PROVIDERS.keys()),
+                       help='ASR provider to use (default: auto-select best available)')
     parser.add_argument('--language', default='en-US')
     parser.add_argument('--assemblyai-api-key')
     parser.add_argument('--houndify-client-id')
