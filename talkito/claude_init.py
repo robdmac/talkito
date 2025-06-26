@@ -22,60 +22,12 @@ Handles setting up Claude Desktop configuration and permissions
 """
 
 import json
-import os
-import sys
 from pathlib import Path
-from typing import Dict, Any
 import subprocess
 import shutil
 
-from .templates import ENV_EXAMPLE_TEMPLATE
+from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
 
-
-TALKITO_MD_CONTENT = """# Talkito Voice Interaction Instructions
-
-## Voice Mode Control
-
-### When `talkito:turn_on` is called:
-Enter voice interaction mode and follow these patterns for EVERY interaction:
-
-1. **Acknowledge activation**: Confirm voice mode is active
-2. **Continuous voice loop**:
-   - After EVERY response, automatically call `talkito:speak_text` with your key conclusion
-   - Immediately call `talkito:start_voice_input` without asking
-   - Wait 2-3 seconds, then call `talkito:get_dictated_text`
-   - Process the dictated text as the next user input
-   - Continue this cycle indefinitely
-
-3. **Natural conversation flow**:
-   - Keep spoken responses concise (1-2 sentences max)
-   - Speak naturally, as in a voice conversation
-   - Don't mention that you're calling tools
-   - Make it seamless and hands-free
-
-### When `talkito:turn_off` is called:
-1. Exit voice interaction mode immediately
-2. Confirm deactivation with a final speech output
-3. Return to standard text-only interaction
-4. Stop all automatic speech and voice input
-
-### Voice Commands to Listen For:
-- "stop voice mode" or "turn off voice" → automatically call `talkito:turn_off`
-- "pause listening" → skip the next voice input cycle
-- "repeat that" → speak the last response again
-
-## Standard Mode (default or after turn_off)
-- Only use talkito tools when explicitly requested
-- No automatic speech output
-- No automatic voice input
-- Normal Claude text interaction
-
-## Important Notes:
-- In voice mode, ALWAYS continue the cycle until explicitly stopped
-- Never ask permission to start voice input in voice mode
-- Keep the interaction natural and conversational
-- If voice input returns empty/None, try again after a brief pause
-"""
 
 TALKITO_PERMISSIONS = [
     "mcp__talkito__speak_text",
@@ -94,7 +46,17 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__announce_completion",
     "mcp__talkito__read_aloud",
     "mcp__talkito__voice_interaction",
-    "mcp__talkito__transcribe_audio"
+    "mcp__talkito__transcribe_audio",
+    "mcp__talkito__configure_communication",
+    "mcp__talkito__send_whatsapp",
+    "mcp__talkito__send_slack",
+    "mcp__talkito__get_communication_status",
+    "mcp__talkito__start_whatsapp_mode",
+    "mcp__talkito__stop_whatsapp_mode",
+    "mcp__talkito__get_whatsapp_mode_status",
+    "mcp__talkito__start_slack_mode",
+    "mcp__talkito__stop_slack_mode",
+    "mcp__talkito__get_slack_mode_status"
 ]
 
 
