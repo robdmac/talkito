@@ -59,6 +59,16 @@ def setup_logging(log_file_path: Optional[str] = None, mode: str = 'w') -> None:
     logging.getLogger('s3transfer').setLevel(logging.WARNING)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     
+    # Suppress websocket and AssemblyAI debug messages
+    logging.getLogger('websocket').setLevel(logging.ERROR)
+    logging.getLogger('websockets').setLevel(logging.ERROR)
+    logging.getLogger('websocket.client').setLevel(logging.ERROR)
+    logging.getLogger('websockets.client').setLevel(logging.ERROR)
+    logging.getLogger('websockets.protocol').setLevel(logging.ERROR)
+    logging.getLogger('assemblyai').setLevel(logging.INFO)
+    logging.getLogger('assemblyai.streaming').setLevel(logging.INFO)
+    logging.getLogger('assemblyai.websocket').setLevel(logging.ERROR)
+    
     # Redirect stderr to separate .err file if requested
     # _redirect_stderr(log_file_path)
     
