@@ -23,9 +23,26 @@ Template files for Talkito initialization
 ENV_EXAMPLE_TEMPLATE = """# Talkito environment configuration template
 # Copy settings from this file to your .env file and fill in the API keys you want to use
 
+# Preferred Providers
+# When no --tts-provider or --asr-provider flags are specified, talkito will:
+# 1. Use these preferred providers if they're accessible
+# 2. Otherwise, use the first accessible non-default provider (alphabetically)
+# 3. Fall back to system TTS or google ASR if no other providers are available
+
+# TALKITO_PREFERRED_TTS_PROVIDER=openai  # Options: system, openai, aws, polly, azure, gcloud, elevenlabs, deepgram
+# TALKITO_PREFERRED_ASR_PROVIDER=assemblyai  # Options: google, gcloud, assemblyai, deepgram, openai, azure, aws, bing
+
 ASR_LANGUAGE=en-US
 
+# Unified VAD Configuration
+# Minimum silence duration (in milliseconds) before ending utterance
+# This affects all ASR providers to make them less aggressive about cutting off speech
+# Default: 1500ms (1.5 seconds)
+# TALKITO_ASR_MIN_SILENCE_MS=1500
+
 # ASSEMBLYAI_API_KEY=your-assemby-key
+# ASSEMBLYAI_END_OF_TURN_CONFIDENCE=0.5  # Lower = less aggressive (default: 0.5, range: 0.0-1.0)
+# ASSEMBLYAI_MAX_SILENCE_MS=5000  # Maximum silence before end-of-turn (default: 5000ms)
 
 # AWS_ACCESS_KEY_ID=your-aws-access-key-id
 # AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
@@ -68,4 +85,156 @@ ASR_LANGUAGE=en-US
 # SLACK_APP_TOKEN=xapp-your-slack-app-token  # For socket mode (optional)
 
 # ZROK_RESERVED_TOKEN
+"""
+
+TALKITO_MD_CONTENT = """# Talkito Voice Interaction Instructions
+
+## Voice Mode Control
+
+### When `talkito:turn_on` is called:
+Enter voice interaction mode and follow these patterns for EVERY interaction:
+
+1. **Acknowledge activation**: Confirm voice mode is active
+2. **Continuous voice loop**:
+   - After EVERY response, automatically call `talkito:speak_text` with your key conclusion
+   - Immediately call `talkito:start_voice_input` without asking
+   - Wait 2-3 seconds, then call `talkito:get_dictated_text`
+   - Process the dictated text as the next user input
+   - Continue this cycle indefinitely
+
+3. **Natural conversation flow**:
+   - Keep spoken responses concise (1-2 sentences max)
+   - Speak naturally, as in a voice conversation
+   - Don't mention that you're calling tools
+   - Make it seamless and hands-free
+
+### When `talkito:turn_off` is called:
+1. Exit voice interaction mode immediately
+2. Confirm deactivation with a final speech output
+3. Return to standard text-only interaction
+4. Stop all automatic speech and voice input
+
+### Voice Commands to Listen For:
+- "stop voice mode" or "turn off voice" → automatically call `talkito:turn_off`
+- "pause listening" → skip the next voice input cycle
+- "repeat that" → speak the last response again
+- "whatsapp me at [phone number]" → call `talkito:start_whatsapp_mode` with the extracted phone number
+- "start whatsapp mode" → call `talkito:start_whatsapp_mode` (uses TWILIO_WHATSAPP_NUMBER)
+- "stop whatsapp mode" → call `talkito:stop_whatsapp_mode`
+- "slack me at [channel]" → call `talkito:start_slack_mode` with the extracted channel
+- "start slack mode" → call `talkito:start_slack_mode` (uses SLACK_CHANNEL)
+- "stop slack mode" → call `talkito:stop_slack_mode`
+- "send to WhatsApp" → use `talkito:send_whatsapp` for the last response
+- "send to Slack" → use `talkito:send_slack` for the last response
+
+## Standard Mode (default or after turn_off)
+- Only use talkito tools when explicitly requested
+- No automatic speech output
+- No automatic voice input
+- Normal Claude text interaction
+
+## Communication Channels
+
+### WhatsApp Integration:
+- Use `talkito:send_whatsapp` to send messages via WhatsApp
+- Can combine with TTS: set `with_tts=true` to also speak the message
+- Configure with `talkito:configure_communication` or via TWILIO environment variables
+
+### Slack Integration:
+- Use `talkito:send_slack` to send messages to Slack channels
+- Can combine with TTS: set `with_tts=true` to also speak the message
+- Configure with `talkito:configure_communication` or via SLACK_BOT_TOKEN
+
+### Communication Status:
+- Check channel availability with `talkito:get_communication_status`
+- View configuration in resource: `talkito://communication/status`
+
+### WhatsApp Mode:
+When WhatsApp mode is active:
+- All your responses are automatically sent to WhatsApp
+- Voice commands trigger immediate WhatsApp messages
+- Perfect for hands-free messaging while driving or cooking
+- Use `talkito:start_whatsapp_mode` to activate
+- Use `talkito:stop_whatsapp_mode` to deactivate
+- Check status with `talkito:get_whatsapp_mode_status`
+
+### Slack Mode:
+When Slack mode is active:
+- All your responses are automatically sent to a Slack channel
+- Voice commands trigger immediate Slack messages
+- Great for team collaboration and hands-free updates
+- Use `talkito:start_slack_mode` to activate
+- Use `talkito:stop_slack_mode` to deactivate
+- Check status with `talkito:get_slack_mode_status`
+
+## Provider Selection
+
+### TTS Providers:
+- Automatic selection prefers non-system providers (aws, openai, azure, etc.)
+- Set TALKITO_PREFERRED_TTS_PROVIDER to choose default
+- 'polly' is now an alias for 'aws' (both work identically)
+
+### ASR Providers:
+- Automatic selection prefers authenticated providers over free Google
+- Set TALKITO_PREFERRED_ASR_PROVIDER to choose default
+- Voice activity detection is less aggressive (1.5s silence threshold)
+- Unified setting: TALKITO_ASR_MIN_SILENCE_MS (default: 1500ms)
+
+## Important Notes:
+- In voice mode, ALWAYS continue the cycle until explicitly stopped
+- Never ask permission to start voice input in voice mode
+- Keep the interaction natural and conversational
+- If voice input returns empty/None, try again after a brief pause
+- VAD settings are optimized for natural speech with pauses
+"""
+
+SLACK_BOT_MANIFEST = """
+{
+    "display_information": {
+        "name": "TalkiTo",
+        "description": "Voice-enabled command execution via TalkiTo"
+    },
+    "features": {
+        "bot_user": {
+            "display_name": "TalkiTo",
+            "always_online": false
+        },
+        "slash_commands": [
+            {
+                "command": "/talkito",
+                "description": "Send commands to TalkiTo",
+                "usage_hint": "[command]",
+                "should_escape": false
+            }
+        ]
+    },
+    "oauth_config": {
+        "scopes": {
+            "bot": [
+                "channels:history",
+                "chat:write",
+                "groups:history",
+                "im:history",
+                "mpim:history",
+                "channels:read"
+            ]
+        }
+    },
+    "settings": {
+        "event_subscriptions": {
+            "bot_events": [
+                "message.channels",
+                "message.groups",
+                "message.im",
+                "message.mpim"
+            ]
+        },
+        "interactivity": {
+            "is_enabled": true
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": true,
+        "token_rotation_enabled": false
+    }
+}
 """

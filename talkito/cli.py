@@ -101,7 +101,7 @@ def parse_arguments():
     # TTS options
     tts_group = parser.add_argument_group('TTS options')
     tts_group.add_argument('--tts-provider', type=str, 
-                           choices=['system', 'openai', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
+                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
                            help='TTS provider to use')
     tts_group.add_argument('--tts-voice', type=str, 
                            help='Voice to use (provider-specific)')
@@ -341,7 +341,12 @@ async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
 def run_mcp_server():
     """Run the MCP server"""
     try:
-        from .mcp_server import main as mcp_main
+        from .mcp import main as mcp_main
+        # Pass through the original sys.argv to the MCP server
+        # but remove the --mcp-server argument itself
+        import sys
+        original_argv = sys.argv[:]
+        sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-server']
         mcp_main()
     except ImportError:
         print("Error: MCP SDK not found. Install with: pip install mcp", file=sys.stderr)

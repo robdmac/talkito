@@ -304,6 +304,7 @@ class SlackProvider(CommsProvider):
         self.channel = config.slack_channel
         self.socket_client = None
         self.input_callback = None
+        self.connected_event = threading.Event()  # Event to signal when connected
         
         # Enable Socket Mode if app token is provided
         if config.slack_app_token:
@@ -390,17 +391,24 @@ class SlackProvider(CommsProvider):
                 try:
                     self.socket_client.connect()
                     log_message("INFO", "Slack Socket Mode connected")
+                    self.connected_event.set()  # Signal that we're connected
                     # Keep the connection alive
                     while self.active:
                         time.sleep(1)
                 except Exception as e:
                     log_message("ERROR", f"Slack Socket Mode error: {e}")
+                    self.connected_event.set()  # Also set on error to unblock waiters
             
             socket_thread = threading.Thread(target=run_socket_mode, daemon=True)
             socket_thread.start()
             log_message("INFO", "Slack provider started with Socket Mode")
         else:
+            self.connected_event.set()  # No async connection needed for send-only mode
             log_message("INFO", "Slack provider started (send-only mode)")
+    
+    def wait_for_connection(self, timeout: float = 5.0) -> bool:
+        """Wait for connection to be established."""
+        return self.connected_event.wait(timeout)
     
     def stop(self):
         """Stop the provider."""
