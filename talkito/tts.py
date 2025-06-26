@@ -41,10 +41,13 @@ from datetime import datetime
 # Import centralized logging utilities
 from .logs import log_message as _base_log_message
 
-# Try to load .env file if available
+# Try to load .env files if available
 try:
     from dotenv import load_dotenv
+    # Load .env first (takes precedence)
     load_dotenv()
+    # Also load .talkito.env (won't override existing vars from .env)
+    load_dotenv('.talkito.env')
 except ImportError:
     # python-dotenv not installed, continue without it
     pass
@@ -263,6 +266,72 @@ highest_spoken_line_number = -1
 def log_message(level: str, message: str):
     """Log a message using centralized logging"""
     _base_log_message(level, message, __name__)
+
+
+def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
+    """Check which TTS providers are accessible based on API keys and environment"""
+    accessible = {}
+    
+    # System TTS
+    detected_engine = detect_tts_engine()
+    if detected_engine != "none":
+        accessible["system"] = {
+            "available": True,
+            "engine": detected_engine,
+            "note": "System TTS engine detected"
+        }
+    else:
+        accessible["system"] = {
+            "available": False,
+            "note": "No system TTS engine found"
+        }
+    
+    # OpenAI
+    accessible["openai"] = {
+        "available": bool(os.environ.get("OPENAI_API_KEY")),
+        "note": "Requires OPENAI_API_KEY environment variable"
+    }
+    
+    # Amazon Polly - Check using boto3's credential chain
+    polly_available = False
+    polly_note = "Requires AWS credentials (env vars, ~/.aws/credentials, or IAM role)"
+    try:
+        import boto3
+        # Try to create a session to check if credentials are available
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        if credentials is not None:
+            polly_available = True
+            polly_note = "AWS credentials detected"
+    except ImportError:
+        polly_note = "Requires boto3 package (pip install boto3)"
+    except Exception:
+        pass
+    
+    accessible["polly"] = {
+        "available": polly_available,
+        "note": polly_note
+    }
+    
+    # Azure
+    accessible["azure"] = {
+        "available": bool(os.environ.get("AZURE_SPEECH_KEY") and os.environ.get("AZURE_SPEECH_REGION")),
+        "note": "Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION"
+    }
+    
+    # Google Cloud
+    accessible["gcloud"] = {
+        "available": bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GCLOUD_SERVICE_ACCOUNT_JSON")),
+        "note": "Requires GOOGLE_APPLICATION_CREDENTIALS or GCLOUD_SERVICE_ACCOUNT_JSON"
+    }
+    
+    # ElevenLabs
+    accessible["elevenlabs"] = {
+        "available": bool(os.environ.get("ELEVENLABS_API_KEY")),
+        "note": "Requires ELEVENLABS_API_KEY environment variable"
+    }
+    
+    return accessible
 
 
 def detect_tts_engine() -> str:

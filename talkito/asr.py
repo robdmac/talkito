@@ -37,10 +37,13 @@ from pathlib import Path
 
 from .logs import log_message as _base_log_message
 
-# Try to load .env file if available
+# Try to load .env files if available
 try:
     from dotenv import load_dotenv
+    # Load .env first (takes precedence)
     load_dotenv()
+    # Also load .talkito.env (won't override existing vars from .env)
+    load_dotenv('.talkito.env')
 except ImportError:
     # python-dotenv not installed, continue without it
     pass
@@ -1192,6 +1195,70 @@ class WhisperProvider(ASRProvider):
     def stream(self, engine, microphone) -> None:
         """Whisper doesn't support streaming - will use phrase-based mode"""
         raise NotImplementedError("Whisper doesn't support streaming")
+
+
+def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
+    """Check which ASR providers are accessible based on API keys and environment"""
+    accessible = {}
+    
+    # Google (free)
+    accessible["google"] = {
+        "available": True,
+        "note": "Free, no API key required"
+    }
+    
+    # Google Cloud
+    accessible["gcloud"] = {
+        "available": bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GCLOUD_SERVICE_ACCOUNT_JSON")),
+        "note": "Requires GOOGLE_APPLICATION_CREDENTIALS or GCLOUD_SERVICE_ACCOUNT_JSON"
+    }
+    
+    # AssemblyAI
+    accessible["assemblyai"] = {
+        "available": bool(os.environ.get("ASSEMBLYAI_API_KEY")),
+        "note": "Requires ASSEMBLYAI_API_KEY environment variable"
+    }
+    
+    # Deepgram
+    accessible["deepgram"] = {
+        "available": bool(os.environ.get("DEEPGRAM_API_KEY")),
+        "note": "Requires DEEPGRAM_API_KEY environment variable"
+    }
+    
+    # Houndify
+    accessible["houndify"] = {
+        "available": bool(os.environ.get("HOUNDIFY_CLIENT_ID") and os.environ.get("HOUNDIFY_CLIENT_KEY")),
+        "note": "Requires HOUNDIFY_CLIENT_ID and HOUNDIFY_CLIENT_KEY"
+    }
+    
+    # AWS Transcribe - Check using boto3's credential chain
+    aws_available = False
+    aws_note = "Requires AWS credentials (env vars, ~/.aws/credentials, or IAM role)"
+    try:
+        import boto3
+        # Try to create a session to check if credentials are available
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        if credentials is not None:
+            aws_available = True
+            aws_note = "AWS credentials detected"
+    except ImportError:
+        aws_note = "Requires boto3 package (pip install boto3)"
+    except Exception:
+        pass
+    
+    accessible["aws"] = {
+        "available": aws_available,
+        "note": aws_note
+    }
+    
+    # Microsoft Bing
+    accessible["bing"] = {
+        "available": bool(os.environ.get("BING_KEY")),
+        "note": "Requires BING_KEY environment variable"
+    }
+    
+    return accessible
 
 
 # Provider registry

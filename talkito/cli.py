@@ -26,10 +26,13 @@ import asyncio
 from typing import List, Optional, Union, Tuple
 from pathlib import Path
 
-# Try to load .env file if available
+# Try to load .env files if available
 try:
     from dotenv import load_dotenv
+    # Load .env first (takes precedence)
     load_dotenv()
+    # Also load .talkito.env (won't override existing vars from .env)
+    load_dotenv('.talkito.env')
 except ImportError:
     # python-dotenv not installed, continue without it
     pass
@@ -77,7 +80,7 @@ def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='TalkiTo - Speak command output using TTS',
-        usage='%(prog)s [options] <command> [arguments...]'
+        usage='%(prog)s [options] <command> [arguments...]\n       %(prog)s init claude'
     )
     
     # Basic options
@@ -164,6 +167,12 @@ def parse_arguments():
     # Handle verbosity levels
     if args.verbosity is not None:
         args.verbose = args.verbosity
+    
+    # Handle special commands
+    if args.command == "init" and args.arguments and args.arguments[0] == "claude":
+        # This is the 'init claude' command
+        args.init_claude = True
+        return args
     
     # Validate arguments
     if not args.replay and not args.command and not args.mcp_server:
@@ -375,6 +384,13 @@ def main():
     """Main entry point for the CLI"""
     # Handle MCP server mode before entering asyncio context
     args = parse_arguments()
+    
+    # Handle special commands that don't need async
+    if hasattr(args, 'init_claude') and args.init_claude:
+        from .claude_init import init_claude
+        success = init_claude()
+        sys.exit(0 if success else 1)
+    
     if args.mcp_server:
         run_mcp_server()
         sys.exit(0)
