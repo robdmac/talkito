@@ -39,7 +39,6 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__stop_voice_input",
     "mcp__talkito__get_voice_input_status",
     "mcp__talkito__get_dictated_text",
-    "mcp__talkito__get_all_dictated_text",
     "mcp__talkito__turn_on",
     "mcp__talkito__turn_off",
     "mcp__talkito__initialize_talkito",
@@ -56,7 +55,9 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__get_whatsapp_mode_status",
     "mcp__talkito__start_slack_mode",
     "mcp__talkito__stop_slack_mode",
-    "mcp__talkito__get_slack_mode_status"
+    "mcp__talkito__get_slack_mode_status",
+    "mcp__talkito__get_slack_messages",
+    "mcp__talkito__get_messages"
 ]
 
 

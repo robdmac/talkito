@@ -156,6 +156,10 @@ def parse_arguments():
     parser.add_argument('--mcp-server', action='store_true',
                         help='Run as MCP (Model Context Protocol) server')
     
+    # Setup helpers
+    parser.add_argument('--setup-slack', action='store_true',
+                        help='Show instructions for setting up Slack bot')
+    
     # Command and arguments
     parser.add_argument('command', nargs='?', 
                         help='Command to run')
@@ -174,9 +178,14 @@ def parse_arguments():
         args.init_claude = True
         return args
     
+    # Handle setup helpers
+    if args.setup_slack:
+        args.show_slack_setup = True
+        return args
+    
     # Validate arguments
-    if not args.replay and not args.command and not args.mcp_server:
-        parser.error('Command is required unless using --replay or --mcp-server')
+    if not args.replay and not args.command and not args.mcp_server and not args.setup_slack:
+        parser.error('Command is required unless using --replay, --mcp-server, --setup-slack or init claude')
     
     return args
 
@@ -353,6 +362,77 @@ def run_mcp_server():
         sys.exit(1)
 
 
+def show_slack_setup():
+    """Show instructions for setting up Slack bot"""
+    from .templates import SLACK_BOT_MANIFEST
+    import json
+    import shutil
+    
+    print("🚀 Talkito Slack Bot Setup Instructions")
+    print("=" * 60)
+    print()
+    print("Follow these steps to set up your Slack bot for Talkito:")
+    print()
+    print("1. Create a new Slack app:")
+    print("   • Go to https://api.slack.com/apps")
+    print("   • Click 'Create New App'")
+    print("   • Choose 'From an app manifest'")
+    print("   • Select your workspace")
+    print("   • Paste the manifest below when prompted")
+    print()
+    print("2. Install the app to your workspace:")
+    print("   • After creating the app, go to 'Install App' in the sidebar")
+    print("   • Click 'Install to Workspace'")
+    print("   • Authorize the requested permissions")
+    print()
+    print("3. Get your tokens:")
+    print("   • Bot User OAuth Token: Settings → Install App → Bot User OAuth Token")
+    print("   • App-Level Token: Settings → Basic Information → App-Level Tokens")
+    print("     - Click 'Generate Token and Scopes'")
+    print("     - Name: 'Socket Mode'")
+    print("     - Add scope: 'connections:write'")
+    print("     - Click 'Generate'")
+    print()
+    print("4. Set environment variables:")
+    print("   export SLACK_BOT_TOKEN='xoxb-...'  # Bot User OAuth Token")
+    print("   export SLACK_APP_TOKEN='xapp-...'  # App-Level Token")
+    print("   export SLACK_CHANNEL='#talkito-comms'  # Your default channel")
+    print()
+    print("=" * 60)
+    print("SLACK APP MANIFEST:")
+    print("=" * 60)
+    print()
+    
+    # Pretty print the manifest
+    try:
+        manifest_dict = json.loads(SLACK_BOT_MANIFEST)
+        manifest_pretty = json.dumps(manifest_dict, indent=2)
+        print(manifest_pretty)
+    except:
+        print(SLACK_BOT_MANIFEST)
+    
+    print()
+    print("=" * 60)
+    
+    # Check if pbcopy is available on macOS
+    if shutil.which('pbcopy'):
+        try:
+            import subprocess
+            subprocess.run(['pbcopy'], input=SLACK_BOT_MANIFEST.encode(), check=True)
+            print("✅ Manifest copied to clipboard! (macOS)")
+        except:
+            pass
+    #
+    # print()
+    # print("After setup, test with:")
+    # print("  talkito --slack-channel '#your-channel' echo 'Hello Slack!'")
+    # print()
+    # print("Or use with Claude:")
+    # print("  talkito claude")
+    # print("  Then: /talkito:start_slack_mode")
+    # print()
+
+
 async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
@@ -395,6 +475,10 @@ def main():
         from .claude_init import init_claude
         success = init_claude()
         sys.exit(0 if success else 1)
+    
+    if hasattr(args, 'show_slack_setup') and args.show_slack_setup:
+        show_slack_setup()
+        sys.exit(0)
     
     if args.mcp_server:
         run_mcp_server()

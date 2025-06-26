@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__talkito__turn_on"
+    ],
+    "deny": []
+  }
+}
