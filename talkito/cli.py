@@ -22,6 +22,7 @@ import sys
 import os
 import argparse
 import asyncio
+import signal
 from typing import List, Optional, Union, Tuple
 
 # Try to load .env files if available
@@ -66,9 +67,24 @@ def signal_handler(signum, frame):
             asr.stop_dictation()
         except:
             pass
-    # Wait for TTS to finish before shutting down
-    tts.wait_for_tts_to_finish()
-    tts.shutdown_tts()
+    
+    # For interrupt signals, shutdown immediately without waiting
+    if signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            tts.shutdown_tts()  # Shutdown immediately
+        except:
+            pass
+    else:
+        # For other signals, wait for TTS to finish
+        try:
+            tts.wait_for_tts_to_finish()
+            tts.shutdown_tts()
+        except:
+            # If interrupted during cleanup, just shutdown
+            try:
+                tts.shutdown_tts()
+            except:
+                pass
     
     # Exit with proper code for signal termination
     sys.exit(128 + signum)
@@ -78,7 +94,7 @@ def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='TalkiTo - Speak command output using TTS',
-        usage='%(prog)s [options] <command> [arguments...]\n       %(prog)s init claude'
+        usage='%(prog)s [options] <command> [arguments...]\n       %(prog)s claude'
     )
     
     # Basic options
@@ -161,6 +177,8 @@ def parse_arguments():
     # Setup helpers
     parser.add_argument('--setup-slack', action='store_true',
                         help='Show instructions for setting up Slack bot')
+    parser.add_argument('--setup-whatsapp', action='store_true',
+                        help='Show instructions for setting up WhatsApp with Twilio')
     
     # Command and arguments
     parser.add_argument('command', nargs='?', 
@@ -185,9 +203,13 @@ def parse_arguments():
         args.show_slack_setup = True
         return args
     
+    if args.setup_whatsapp:
+        args.show_whatsapp_setup = True
+        return args
+    
     # Validate arguments
-    if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack:
-        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack or init claude')
+    if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp:
+        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp or init claude')
     
     return args
 
@@ -276,7 +298,7 @@ def print_configuration_status():
     
     # Check communication channels
     channels = []
-    if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN'):
+    if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('ZROK_RESERVED_TOKEN'):
         if os.environ.get('TWILIO_WHATSAPP_NUMBER'):
             channels.append('WhatsApp')
         if os.environ.get('TWILIO_PHONE_NUMBER'):
@@ -649,6 +671,63 @@ def show_slack_setup():
     # print()
 
 
+def show_whatsapp_setup():
+    """Show instructions for setting up WhatsApp with Twilio"""
+    print("📱 Talkito WhatsApp Setup Instructions")
+    print("=" * 60)
+    print()
+    print("Follow these steps to set up WhatsApp messaging for Talkito:")
+    print()
+    print("1. Create a Twilio account:")
+    print("   • Sign up at https://www.twilio.com/")
+    print("   • Note your Account SID and Auth Token from the dashboard")
+    print()
+    print("2. Set up WhatsApp Sandbox (for testing):")
+    print("   • Go to https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn")
+    print("   • Note the Twilio WhatsApp number (usually +1 415 523 8886)")
+    print("   • Send the join code shown (e.g., 'join <code>') to the WhatsApp number")
+    print("   • NOTE you will need to re send that join <code> very 24 hours")
+    print("   • You'll receive a confirmation message")
+    print()
+    print("3. Configure Zrok webhook:")
+    print("   • Install zrok: https://github.com/openziti/zrok/releases/latest")
+    print("   • Enable zrok: zrok enable <token> (get token from https://zrok.io)")
+    print("   • Reserve a share: zrok reserve public http://localhost:8080")
+    print("   • Note the reserved token (e.g., 'es5hi3nzrstm')")
+    print("   • This token MUST be set as ZROK_RESERVED_TOKEN for WhatsApp to work")
+    print("   • Set webhook URL in Twilio Console:")
+    print("     - Go to Messaging → Settings → WhatsApp Sandbox Settings")
+    print("     - Set 'When a message comes in' to: https://<token>.share.zrok.io/whatsapp")
+    print("     - Method: POST")
+    print()
+    print("4. Set environment variables:")
+    print("   export TWILIO_ACCOUNT_SID='ACxxxxxx'          # Your Account SID")
+    print("   export TWILIO_AUTH_TOKEN='xxxxxx'             # Your Auth Token")
+    print("   export TWILIO_WHATSAPP_NUMBER='+14155238886'  # Twilio's WhatsApp number")
+    print("   export WHATSAPP_RECIPIENTS='+1234567890'      # Your WhatsApp number")
+    print("   export ZROK_RESERVED_TOKEN='xxxxx'            # Your zrok token (see step 4)")
+    print()
+    print("5. Test the setup:")
+    print("   # Send a test message")
+    print("   talkito --whatsapp-recipients '+1234567890' echo 'Hello WhatsApp!'")
+    print()
+    print("   # Or use with Claude")
+    print("   talkito claude")
+    print("   Then: /talkito:start_whatsapp_mode")
+    print()
+    print("=" * 60)
+    print("IMPORTANT NOTES:")
+    print("=" * 60)
+    print()
+    print("• For production use, upgrade to a Twilio WhatsApp Business API account")
+    print("• The sandbox is limited to approved contacts who have joined")
+    print("• Messages expire after 24 hours of inactivity in the sandbox")
+    print("• Reply to WhatsApp messages to keep the session active")
+    print()
+    print("For detailed webhook setup instructions, see WEBHOOK_SETUP.md")
+    print()
+
+
 async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
@@ -665,20 +744,38 @@ async def main_async() -> int:
         else:
             return await run_talkito_command(args)
     except KeyboardInterrupt:
-        return 130  # Standard exit code for Ctrl+C
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    finally:
-        # Clean up
+        # Clean up quickly without waiting
         if asr:
             try:
                 asr.stop_dictation()
             except:
                 pass
-        # Wait for TTS to finish before shutting down
-        tts.wait_for_tts_to_finish()
-        tts.shutdown_tts()
+        try:
+            tts.shutdown_tts()  # Shutdown immediately without waiting
+        except:
+            pass
+        return 130  # Standard exit code for Ctrl+C
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        # Clean up only if not interrupted
+        if 'KeyboardInterrupt' not in str(type(sys.exc_info()[1])):
+            if asr:
+                try:
+                    asr.stop_dictation()
+                except:
+                    pass
+            # Wait for TTS to finish before shutting down
+            try:
+                tts.wait_for_tts_to_finish()
+                tts.shutdown_tts()
+            except KeyboardInterrupt:
+                # If interrupted during cleanup, just shutdown immediately
+                try:
+                    tts.shutdown_tts()
+                except:
+                    pass
 
 
 def main():
@@ -694,6 +791,10 @@ def main():
     
     if hasattr(args, 'show_slack_setup') and args.show_slack_setup:
         show_slack_setup()
+        sys.exit(0)
+    
+    if hasattr(args, 'show_whatsapp_setup') and args.show_whatsapp_setup:
+        show_whatsapp_setup()
         sys.exit(0)
     
     if args.mcp_server:
