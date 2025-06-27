@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Suppress AWS credential messages globally (even before logging is configured)
+logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
+
 # Global state for logging configuration
 _log_enabled = False
 _log_file = None
@@ -56,6 +59,7 @@ def setup_logging(log_file_path: Optional[str] = None, mode: str = 'w') -> None:
     # Suppress noisy AWS boto3 logs
     logging.getLogger('boto3').setLevel(logging.WARNING)
     logging.getLogger('botocore').setLevel(logging.WARNING)
+    logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
     logging.getLogger('s3transfer').setLevel(logging.WARNING)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     
@@ -68,6 +72,15 @@ def setup_logging(log_file_path: Optional[str] = None, mode: str = 'w') -> None:
     logging.getLogger('assemblyai').setLevel(logging.INFO)
     logging.getLogger('assemblyai.streaming').setLevel(logging.INFO)
     logging.getLogger('assemblyai.websocket').setLevel(logging.ERROR)
+    
+    # Suppress noisy uvicorn/FastMCP logs
+    logging.getLogger('uvicorn').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
+    logging.getLogger('fastmcp').setLevel(logging.WARNING)
+    logging.getLogger('mcp').setLevel(logging.WARNING)
+    logging.getLogger('starlette').setLevel(logging.WARNING)
+    logging.getLogger('anyio').setLevel(logging.WARNING)
     
     # Redirect stderr to separate .err file if requested
     # _redirect_stderr(log_file_path)

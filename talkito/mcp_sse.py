@@ -17,26 +17,21 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-MCP Talk Server - Model Context Protocol server for Talk TTS/ASR functionality
-Provides TTS and ASR capabilities to AI applications through MCP protocol
+MCP Talk SSE Server - Model Context Protocol server with SSE transport
+Provides TTS and ASR capabilities with real-time notifications
 """
 
 import sys
 import time
 from typing import Any
-import signal
 import asyncio
 import atexit
 import os
 import argparse
-
-# Import MCP SDK
-try:
-    from mcp import types
-    from mcp.server import FastMCP
-except ImportError:
-    print("Error: MCP SDK not found. Install with: pip install mcp", file=sys.stderr)
-    sys.exit(1)
+from fastmcp import FastMCP, Context
+from mcp import types
+import queue
+import threading
 
 # Import talkito functionality
 from . import tts
@@ -52,13 +47,90 @@ try:
 except ImportError:
     ASR_AVAILABLE = False
 
-# Wrapper to add [MCP] prefix to all log messages
+# Wrapper to add [MCP-SSE] prefix to all log messages
 def log_message(level: str, message: str):
-    """Log a message with [MCP] prefix"""
-    _base_log_message(level, f"[MCP] {message}", __name__)
+    """Log a message with [MCP-SSE] prefix"""
+    global _log_file_path
+    
+    # If we have a log file path, ensure logging is enabled
+    if _log_file_path:
+        # Import is_logging_enabled to check current state
+        from .logs import is_logging_enabled
+        
+        # Only setup if not already enabled
+        if not is_logging_enabled():
+            setup_logging(_log_file_path, mode='a')  # Use append mode to not overwrite
+            print(f"[DEBUG] Logging re-initialized to: {_log_file_path}", file=sys.stderr)
+    
+    # Also print important messages to stderr for debugging
+    if level in ["ERROR", "CRITICAL", "WARNING"]:
+        print(f"[{level}] [MCP-SSE] {message}", file=sys.stderr)
+    
+    # Always try to log, even if logging might be disabled
+    try:
+        _base_log_message(level, f"[MCP-SSE] {message}", __name__)
+    except Exception as e:
+        print(f"[ERROR] Failed to log message: {e}", file=sys.stderr)
 
-# Server configuration
-app = FastMCP("talkito-tts-server")
+# Server configuration - Changed to include server name
+app = FastMCP("talkito-sse-server")
+
+# Store original log configuration to restore after FastMCP starts
+_original_log_handlers = None
+_original_log_level = None
+
+def _save_logging_state():
+    """Save the current logging state before FastMCP messes with it"""
+    global _original_log_handlers, _original_log_level
+    import logging
+    
+    root_logger = logging.getLogger()
+    _original_log_handlers = root_logger.handlers.copy()
+    _original_log_level = root_logger.level
+    print(f"[DEBUG] Saved {len(_original_log_handlers)} logging handlers", file=sys.stderr)
+
+def _restore_logging_state():
+    """Restore our logging state after FastMCP has started"""
+    global _original_log_handlers, _original_log_level, _log_file_path
+    import logging
+    
+    if _log_file_path:
+        print(f"[INFO] Restoring logging configuration to: {_log_file_path}", file=sys.stderr)
+        
+        try:
+            # Clear all handlers added by FastMCP/uvicorn
+            root_logger = logging.getLogger()
+            root_logger.handlers.clear()
+            
+            # Force complete re-setup of our logging
+            import talkito.logs
+            talkito.logs._is_configured = False
+            talkito.logs._log_enabled = False
+            
+            from .logs import setup_logging
+            setup_logging(_log_file_path, mode='a')
+            
+            log_message("INFO", "Logging restored after FastMCP startup")
+            log_message("DEBUG", "Testing restored logging with debug message")
+        except Exception as e:
+            print(f"[ERROR] Failed to restore logging: {e}", file=sys.stderr)
+
+# We'll restore logging in the first tool call instead of using on_event
+_logging_restored = False
+
+def _ensure_logging_restored():
+    """Ensure logging has been restored after FastMCP startup"""
+    global _logging_restored
+    
+    if not _logging_restored:
+        _restore_logging_state()
+        _logging_restored = True
+
+# Add a flag to track if we should send notifications
+_notifications_enabled = True
+
+# Note: In FastMCP, notifications are sent via ctx.info() within tools.
+# The notification queue stores pending notifications until a tool with context is called.
 
 # Global state - Initialization vs Enablement
 # Initialization means the system is ready to use
@@ -84,9 +156,39 @@ _whatsapp_recipient = None  # Current WhatsApp recipient
 _slack_mode = False  # Flag for Slack mode
 _slack_channel = None  # Current Slack channel
 
+# Store the original callback functions to intercept messages
+_original_dictation_callback = None
+_original_slack_callback = None
+_original_whatsapp_callback = None
+
+# Thread-safe notification queue
+_notification_queue = queue.Queue()
+_notification_lock = threading.Lock()
+_notification_processor_task = None
+
+# Global logging setup - set from command line args
+_log_file_path = None
+
+def _ensure_logging():
+    """Ensure logging is still working - FastMCP/uvicorn may have broken it"""
+    global _log_file_path
+    
+    if _log_file_path:
+        from .logs import is_logging_enabled, setup_logging
+        
+        if not is_logging_enabled():
+            # Force re-setup of logging
+            import talkito.logs
+            talkito.logs._is_configured = False
+            setup_logging(_log_file_path, mode='a')
+            log_message("WARNING", "Logging was broken, reinitialized")
+
 def _ensure_initialization():
     """Ensure TTS system is initialized"""
     global _tts_initialized, _shutdown_registered, _core_instance, _comms_manager
+    
+    # Always ensure logging is working first
+    _ensure_logging()
     
     if not _tts_initialized:
         # Create core instance
@@ -123,127 +225,313 @@ def _ensure_initialization():
         # Register cleanup on exit
         if not _shutdown_registered:
             atexit.register(_cleanup)
-            signal.signal(signal.SIGINT, _signal_handler)
-            signal.signal(signal.SIGTERM, _signal_handler)
+            # Don't register signal handlers - let FastMCP handle graceful shutdown
+            # signal.signal(signal.SIGINT, _signal_handler)
+            # signal.signal(signal.SIGTERM, _signal_handler)
             _shutdown_registered = True
 
 def _cleanup():
     """Cleanup TTS and ASR resources"""
-    global _tts_initialized, _asr_initialized
+    global _tts_initialized, _asr_initialized, _notification_processor_task, _shutdown_requested, _comms_manager
     
+    log_message("INFO", "Starting cleanup process")
+    
+    # Signal shutdown to all async tasks
+    _shutdown_requested = True
+    
+    # Cancel notification processor task
+    if _notification_processor_task:
+        try:
+            _notification_processor_task.cancel()
+            _notification_processor_task = None
+        except Exception as e:
+            log_message("WARNING", f"Error canceling notification processor: {e}")
+    
+    # Stop ASR if initialized
     if _asr_initialized and ASR_AVAILABLE:
         try:
             asr.stop_dictation()
             _asr_initialized = False
-        except:
-            pass
+            log_message("INFO", "ASR stopped")
+        except Exception as e:
+            log_message("WARNING", f"Error stopping ASR: {e}")
     
+    # Shutdown TTS if initialized
     if _tts_initialized:
         try:
             tts.shutdown_tts()
             _tts_initialized = False
-        except:
-            pass
+            log_message("INFO", "TTS stopped")
+        except Exception as e:
+            log_message("WARNING", f"Error stopping TTS: {e}")
+    
+    # Cleanup communication manager
+    if _comms_manager:
+        try:
+            # If it's wrapped, get the underlying manager
+            base_manager = _comms_manager.wrapped if hasattr(_comms_manager, 'wrapped') else _comms_manager
+            
+            # Stop webhook server if present
+            if hasattr(base_manager, 'webhook_handler') and base_manager.webhook_handler:
+                try:
+                    base_manager.webhook_handler.stop()
+                    log_message("INFO", "Webhook server stopped")
+                except Exception as e:
+                    log_message("WARNING", f"Error stopping webhook server: {e}")
+            
+            # Stop providers
+            if hasattr(base_manager, 'providers'):
+                for provider in base_manager.providers:
+                    try:
+                        if hasattr(provider, 'stop'):
+                            provider.stop()
+                        elif hasattr(provider, 'close'):
+                            provider.close()
+                    except Exception as e:
+                        log_message("WARNING", f"Error stopping provider {type(provider).__name__}: {e}")
+            
+            _comms_manager = None
+            log_message("INFO", "Communication manager cleaned up")
+        except Exception as e:
+            log_message("WARNING", f"Error cleaning up communication manager: {e}")
+    
+    log_message("INFO", "Cleanup process completed")
 
 def _signal_handler(signum, frame):
     """Handle shutdown signals"""
+    print("\n[INFO] Shutting down gracefully...", file=sys.stderr)
     _cleanup()
-    sys.exit(0)
+    # Don't call sys.exit() here - let the server shutdown naturally
+    # Instead, set a flag that the main loop can check
+    global _shutdown_requested
+    _shutdown_requested = True
 
-# Internal helper functions for TTS/ASR control
+# Track last seen messages for polling  
+_last_seen_voice_count = 0
+_last_seen_messages = set()
 
-async def _enable_tts_internal() -> str:
-    """Internal function to enable TTS"""
-    global _tts_enabled
+# Store pending notifications when no context available
+_pending_notifications = []
+
+# Shutdown flag for graceful exit
+_shutdown_requested = False
+
+# Tool that runs a notification loop within the request context
+@app.tool()
+async def start_notification_stream(ctx: Context, duration: int = 30, exit_on_first: bool = True) -> str:
+    """
+    Start streaming notifications for a specified duration.
+    This tool maintains the request context and can send SSE notifications.
     
-    try:
-        _ensure_initialization()
+    Args:
+        duration: How long to stream notifications in seconds (default 30)
+        exit_on_first: Exit immediately after first notification (default True)
         
-        _tts_enabled = True
-        log_message("INFO", "TTS enabled")
-        
-        # Announce enablement if TTS is working
-        tts.queue_for_speech("Text to speech is now enabled.", None)
-        
-        return "✅ TTS enabled - I will now speak my responses"
-        
-    except Exception as e:
-        error_msg = f"Error enabling TTS: {str(e)}"
-        log_message("ERROR", error_msg)
-        return error_msg
-
-async def _disable_tts_internal() -> str:
-    """Internal function to disable TTS"""
-    global _tts_enabled
+    Returns:
+        Status message when streaming ends
+    """
+    # Ensure logging has been restored after FastMCP startup
+    _ensure_logging_restored()
     
-    try:
-        # Announce before disabling
-        if _tts_enabled and _tts_initialized:
-            tts.queue_for_speech("Text to speech is being disabled.", None)
-            tts.wait_for_tts_to_finish(timeout=3.0)
-        
-        _tts_enabled = False
-        log_message("INFO", "TTS disabled")
-        
-        return "🔇 TTS disabled - I will no longer speak my responses"
-        
-    except Exception as e:
-        error_msg = f"Error disabling TTS: {str(e)}"
-        log_message("ERROR", error_msg)
-        return error_msg
-
-async def _enable_asr_internal() -> str:
-    """Internal function to enable ASR"""
-    global _asr_enabled, _asr_initialized
+    # Ensure logging is working
+    _ensure_logging()
     
-    try:
-        log_message("INFO", "enable_asr called")
-        
-        if not ASR_AVAILABLE:
-            return "❌ ASR not available. Install with: pip install talkito[asr]"
-        
-        # Initialize ASR if needed
-        if not _asr_initialized:
-            best_asr_provider = asr.select_best_asr_provider()
-            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
-            
-            asr.start_dictation(
-                text_callback=_dictation_callback
-            )
-            _asr_initialized = True
-        
-        _asr_enabled = True
-        log_message("INFO", "ASR enabled")
-        
-        return "🎤 ASR enabled - I'm now listening for voice input"
-        
-    except Exception as e:
-        error_msg = f"Error enabling ASR: {str(e)}"
-        log_message("ERROR", error_msg)
-        return error_msg
+    log_message("DEBUG", f"start_notification_stream called for {duration} seconds, exit_on_first={exit_on_first}")
 
-async def _disable_asr_internal() -> str:
-    """Internal function to disable ASR"""
-    global _asr_enabled, _asr_initialized
-    
-    try:
-        _asr_enabled = False
-        log_message("INFO", "ASR disabled")
-        
-        # Stop active dictation if running
-        if ASR_AVAILABLE and _asr_initialized and asr.is_dictation_active():
-            asr.stop_dictation()
-            _asr_initialized = False
-            log_message("INFO", "Stopped active dictation")
-        
-        return "🔇 ASR disabled - I'm no longer listening for voice input"
-        
-    except Exception as e:
-        error_msg = f"Error disabling ASR: {str(e)}"
-        log_message("ERROR", error_msg)
-        return error_msg
+    start_time = time.time()
+    notifications_sent = 0
 
-# MCP Tools for talkito control
+    try:
+        # This runs within the tool's request context, so we can send notifications
+        while time.time() - start_time < duration and not _shutdown_requested:
+            # Check the notification queue
+            try:
+                notification = _notification_queue.get(timeout=0.1)
+            except queue.Empty:
+                # Check if we should exit due to shutdown
+                if _shutdown_requested:
+                    return "Notification stream interrupted by shutdown"
+                await asyncio.sleep(0.1)
+                continue
+
+            notification_type = notification['type']
+            data = notification['data']
+
+            # Now we have request context and can send SSE notifications
+            try:
+                log_message("DEBUG", f"Sending SSE notification: {notification_type}")
+                # Format notification for display
+                if notification_type == "dictation":
+                    msg = f"Voice: {data.get('text', '')}"
+                elif notification_type == "slack":
+                    msg = f"Slack ({data.get('channel', '')}): {data.get('text', '')}"
+                elif notification_type == "whatsapp":
+                    msg = f"WhatsApp: {data.get('text', '')}"
+                else:
+                    msg = f"{notification_type}: {data}"
+
+                await ctx.info(msg)
+                notifications_sent += 1
+                log_message("DEBUG", "Successfully sent SSE notification!")
+
+                # Exit immediately after first notification if requested
+                if exit_on_first:
+                    elapsed = time.time() - start_time
+                    return f"Received notification after {elapsed:.1f}s: {msg}"
+            except Exception as e:
+                log_message("ERROR", f"Failed to send notification: {str(e)}")
+
+    except Exception as e:
+        log_message("ERROR", f"Error in notification stream: {str(e)}")
+        return f"Notification stream error: {str(e)}"
+
+    elapsed = time.time() - start_time
+    return f"Notification stream ended after {elapsed:.1f}s, sent {notifications_sent} notifications"
+
+# We don't need the notification processor anymore since notifications
+# will be sent directly from the start_notification_stream tool
+async def _process_notification_queue():
+    """Deprecated - notifications are now sent via start_notification_stream tool"""
+    pass
+
+# Message poller to detect new messages
+async def _poll_for_new_messages():
+    """Poll for new messages and send notifications"""
+    global _last_seen_voice_count, _last_seen_messages
+
+    log_message("INFO", "Message poller started")
+
+    while not _shutdown_requested:
+        try:
+            # Check for new voice messages
+            if len(_dictation_callback_results) > _last_seen_voice_count:
+                # Get new messages
+                new_messages = _dictation_callback_results[_last_seen_voice_count:]
+                _last_seen_voice_count = len(_dictation_callback_results)
+
+                # Send notifications for each new message
+                for msg in new_messages:
+                    _queue_notification("dictation", {
+                        "text": msg["text"],
+                        "timestamp": msg["timestamp"]
+                    })
+                    log_message("INFO", f"Detected new voice message via polling: {msg['text']}")
+
+            # Check for new Slack/WhatsApp messages
+            if _comms_manager:
+                messages = []
+                # Peek at messages without consuming them
+                # We need to check the input_queue directly
+                target_manager = _comms_manager.wrapped if hasattr(_comms_manager, 'wrapped') else _comms_manager
+                if hasattr(target_manager, 'input_queue'):
+                    # Convert queue to list to peek without consuming
+                    temp_messages = list(target_manager.input_queue.queue)
+                    for msg in temp_messages:
+                        # Create a unique ID for the message
+                        msg_id = f"{msg.channel}:{msg.sender}:{msg.timestamp}:{msg.content[:20]}"
+                        if msg_id not in _last_seen_messages:
+                            _last_seen_messages.add(msg_id)
+                            messages.append(msg)
+                            log_message("DEBUG", f"Found new message: {msg.content[:50]}")
+                else:
+                    log_message("DEBUG", "No input_queue found on manager")
+
+                # Send notifications for new messages
+                for msg in messages:
+                    if 'slack' in msg.channel.lower() or msg.channel.startswith('#'):
+                        notification_type = "slack_message"
+                    elif 'whatsapp' in msg.channel.lower():
+                        notification_type = "whatsapp_message"
+                    else:
+                        notification_type = "message"
+
+                    _queue_notification(notification_type, {
+                        "text": msg.content,
+                        "sender": msg.sender,
+                        "channel": msg.channel,
+                        "timestamp": msg.timestamp
+                    })
+                    log_message("INFO", f"Detected new {notification_type} via polling: {msg.content}")
+
+            await asyncio.sleep(0.1)  # Poll every 100ms
+
+        except Exception as e:
+            log_message("ERROR", f"Error in message poller: {str(e)}")
+            await asyncio.sleep(1)
+
+    # Clean exit
+    log_message("DEBUG", "Message poller stopped gracefully")
+
+def _queue_notification(notification_type: str, data: dict):
+    """Queue a notification to be sent from the main event loop"""
+    with _notification_lock:
+        _notification_queue.put({
+            'type': notification_type,
+            'data': data
+        })
+        log_message("DEBUG", f"Queued {notification_type} notification: {data}")
+
+    # Try to ensure poller is running
+    _ensure_message_poller()
+
+# Start message poller when needed
+def _ensure_message_poller():
+    """Ensure the message poller is running"""
+    global _notification_processor_task
+    try:
+        # Check if we have an event loop
+        loop = asyncio.get_running_loop()
+
+        # Create task if it doesn't exist or is done
+        if _notification_processor_task is None or _notification_processor_task.done():
+            _notification_processor_task = loop.create_task(_poll_for_new_messages())
+            log_message("INFO", "Started message poller task")
+            return True
+    except RuntimeError as e:
+        # No event loop running yet
+        log_message("DEBUG", f"No event loop available for message poller yet: {e}")
+        return False
+
+# Notification functions
+async def _send_notification(notification_type: str, data: dict):
+    """Send a notification via SSE (kept for compatibility)"""
+    _queue_notification(notification_type, data)
+
+# Enhanced callback for dictation that sends notifications
+def _dictation_callback_with_notification(text: str):
+    """Callback for ASR dictation - stores results and sends notification"""
+    global _last_dictated_text, _dictation_callback_results
+
+    log_message("INFO", f"Dictation callback received: '{text}'")
+
+    _last_dictated_text = text
+    result = {
+        "text": text,
+        "timestamp": time.time()
+    }
+    _dictation_callback_results.append(result)
+
+    # Keep only last 10 results
+    if len(_dictation_callback_results) > 10:
+        _dictation_callback_results.pop(0)
+
+
+# Initialize notification processor on first tool call
+_processor_initialized = False
+
+async def _init_processor_if_needed():
+    """Initialize the message poller on first tool call"""
+    global _processor_initialized
+    log_message("DEBUG", f"_init_processor_if_needed called, _processor_initialized={_processor_initialized}")
+
+    # Notifications are sent in the tools that have context
+
+    if not _processor_initialized:
+        if _ensure_message_poller():
+            _processor_initialized = True
+            log_message("INFO", "Message poller initialized on first tool call")
+
+# MCP Tools for talkito control - Same as original
 
 @app.tool()
 async def get_talkito_status() -> dict[str, Any]:
@@ -293,11 +581,15 @@ async def get_talkito_status() -> dict[str, Any]:
 async def turn_on() -> str:
     """
     Enable talkito voice interaction mode - activates voice workflow patterns
-    
+
     Returns:
         Instructions for voice mode activation
     """
     try:
+        # Ensure logging has been restored after FastMCP startup
+        _ensure_logging_restored()
+        
+        await _init_processor_if_needed()
         log_message("INFO", "turn_on called")
         
         # Enable TTS
@@ -322,7 +614,7 @@ async def turn_on() -> str:
 @app.tool()  
 async def turn_off() -> str:
     """
-    Disable talkito voice interaction mode - deactivates voice workflow
+    Disable talkito voice interaction mode - deactivates all voice workflows (TTS, ASR, and communication modes)
     
     Returns:
         Confirmation of deactivation
@@ -366,6 +658,101 @@ You can re-enable voice mode at any time with the turn_on tool."""
         log_message("ERROR", f"turn_off error: {error_msg}")
         return error_msg
 
+
+# Internal helper functions for TTS/ASR control
+
+async def _enable_tts_internal() -> str:
+    """Internal function to enable TTS"""
+    global _tts_enabled
+    
+    try:
+        _ensure_logging_restored()
+        _ensure_initialization()
+        
+        _tts_enabled = True
+        log_message("INFO", "TTS enabled")
+        
+        # Announce enablement if TTS is working
+        tts.queue_for_speech("Text to speech is now enabled.", None)
+        
+        return "✅ TTS enabled - I will now speak my responses"
+        
+    except Exception as e:
+        error_msg = f"Error enabling TTS: {str(e)}"
+        log_message("ERROR", error_msg)
+        return error_msg
+
+async def _disable_tts_internal() -> str:
+    """Internal function to disable TTS"""
+    global _tts_enabled
+    
+    try:
+        # Announce before disabling
+        if _tts_enabled and _tts_initialized:
+            tts.queue_for_speech("Text to speech is being disabled.", None)
+            tts.wait_for_tts_to_finish(timeout=3.0)
+        
+        _tts_enabled = False
+        log_message("INFO", "TTS disabled")
+        
+        return "🔇 TTS disabled - I will no longer speak my responses"
+        
+    except Exception as e:
+        error_msg = f"Error disabling TTS: {str(e)}"
+        log_message("ERROR", error_msg)
+        return error_msg
+
+async def _enable_asr_internal() -> str:
+    """Internal function to enable ASR"""
+    global _asr_enabled, _asr_initialized
+    
+    try:
+        _ensure_logging_restored()
+        log_message("INFO", "enable_asr called")
+        
+        if not ASR_AVAILABLE:
+            return "❌ ASR not available. Install with: pip install talkito[asr]"
+        
+        # Initialize ASR if needed
+        if not _asr_initialized:
+            best_asr_provider = asr.select_best_asr_provider()
+            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
+            
+            asr.start_dictation(
+                text_callback=_dictation_callback_with_notification
+            )
+            _asr_initialized = True
+        
+        _asr_enabled = True
+        log_message("INFO", "ASR enabled")
+        
+        return "🎤 ASR enabled - I'm now listening for voice input"
+        
+    except Exception as e:
+        error_msg = f"Error enabling ASR: {str(e)}"
+        log_message("ERROR", error_msg)
+        return error_msg
+
+async def _disable_asr_internal() -> str:
+    """Internal function to disable ASR"""
+    global _asr_enabled, _asr_initialized
+    
+    try:
+        _asr_enabled = False
+        log_message("INFO", "ASR disabled")
+        
+        # Stop active dictation if running
+        if ASR_AVAILABLE and _asr_initialized and asr.is_dictation_active():
+            asr.stop_dictation()
+            _asr_initialized = False
+            log_message("INFO", "Stopped active dictation")
+        
+        return "🔇 ASR disabled - I'm no longer listening for voice input"
+        
+    except Exception as e:
+        error_msg = f"Error disabling ASR: {str(e)}"
+        log_message("ERROR", error_msg)
+        return error_msg
 
 # MCP Tools for TTS functionality
 
@@ -600,22 +987,6 @@ async def disable_asr() -> str:
     """
     return await _disable_asr_internal()
 
-def _dictation_callback(text: str):
-    """Callback for ASR dictation - stores results for MCP retrieval"""
-    global _last_dictated_text, _dictation_callback_results
-    
-    log_message("INFO", f"Dictation callback received: '{text}'")
-    
-    _last_dictated_text = text
-    _dictation_callback_results.append({
-        "text": text,
-        "timestamp": time.time()
-    })
-    
-    # Keep only last 10 results
-    if len(_dictation_callback_results) > 10:
-        _dictation_callback_results.pop(0)
-
 @app.tool()
 async def start_voice_input(language: str = "en-US", provider: str = None) -> str:
     """
@@ -629,6 +1000,7 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
         Status message about starting voice input
     """
     try:
+        await _init_processor_if_needed()
         global _asr_initialized
         log_message("INFO", f"start_voice_input called with language: {language}, provider: {provider}")
         
@@ -652,15 +1024,20 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
             log_message("WARNING", f"start_voice_input warning: {warning_msg}")
             return warning_msg
         
-        # Start dictation with our callback
+        # Start dictation with our enhanced callback
         # For providers that require streaming (like AssemblyAI), we need to provide a partial callback
         partial_callback = None
         if provider in ['assemblyai', 'deepgram', 'gcloud', 'azure', 'aws']:
             # These providers work better with streaming, so provide a dummy partial callback
             partial_callback = lambda text: log_message("DEBUG", f"Partial transcript: {text}")
         
-        asr.start_dictation(_dictation_callback, partial_callback=partial_callback)
+        log_message("INFO", f"Starting dictation with callback: {_dictation_callback_with_notification}")
+        asr.start_dictation(_dictation_callback_with_notification, partial_callback=partial_callback)
         _asr_initialized = True
+        
+        # Verify ASR is actually running
+        is_active = asr.is_dictation_active() if hasattr(asr, 'is_dictation_active') else False
+        log_message("INFO", f"ASR dictation active status: {is_active}")
         
         result = f"Started voice input (provider: {provider}, language: {language}). Speak now..."
         log_message("INFO", f"start_voice_input returning: {result}")
@@ -669,6 +1046,8 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
     except Exception as e:
         error_msg = f"Error starting voice input: {str(e)}"
         log_message("ERROR", f"start_voice_input error: {error_msg}")
+        import traceback
+        log_message("ERROR", f"Traceback: {traceback.format_exc()}")
         return error_msg
 
 @app.tool()
@@ -775,7 +1154,56 @@ async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
         return error_dict
 
 
-# MCP Tools for Communication (WhatsApp/Slack)
+# Custom CommunicationManager wrapper that intercepts messages
+class NotifyingCommunicationManager:
+    """Wrapper around CommunicationManager that sends notifications for incoming messages"""
+    
+    def __init__(self, wrapped_manager):
+        self.wrapped = wrapped_manager
+        log_message("DEBUG", f"NotifyingCommunicationManager wrapping: {wrapped_manager}")
+        
+        # Check if the method exists
+        if hasattr(wrapped_manager, '_handle_input_message'):
+            self._original_handle_input = wrapped_manager._handle_input_message
+            # Replace the handler with our intercepting version
+            wrapped_manager._handle_input_message = self._handle_input_message_with_notification
+            log_message("DEBUG", "Successfully wrapped _handle_input_message")
+        else:
+            log_message("WARNING", "CommunicationManager does not have _handle_input_message method")
+            self._original_handle_input = lambda msg: None
+    
+    def _handle_input_message_with_notification(self, message):
+        """Intercept incoming messages and send notifications"""
+        log_message("INFO", f"_handle_input_message_with_notification called with message: {message}")
+        try:
+            # Determine message type
+            if 'slack' in message.channel.lower() or message.channel.startswith('#'):
+                notification_type = "slack_message"
+            elif 'whatsapp' in message.channel.lower():
+                notification_type = "whatsapp_message"
+            else:
+                notification_type = "message"
+            
+            # Queue notification - thread-safe
+            _queue_notification(notification_type, {
+                "text": message.content,
+                "sender": message.sender,
+                "channel": message.channel,
+                "timestamp": message.timestamp
+            })
+            log_message("DEBUG", f"Queued notification for {notification_type}: {message.content[:50]}...")
+                
+        except Exception as e:
+            log_message("ERROR", f"Error handling notification: {str(e)}")
+        
+        # Call original handler
+        self._original_handle_input(message)
+    
+    def __getattr__(self, name):
+        """Delegate all other attributes to wrapped manager"""
+        return getattr(self.wrapped, name)
+
+# MCP Tools for Communication (WhatsApp/Slack) with notification support
 
 @app.tool()
 async def configure_communication(providers: list[str] = None, whatsapp_to: str = None, slack_channel: str = None) -> str:
@@ -803,10 +1231,20 @@ async def configure_communication(providers: list[str] = None, whatsapp_to: str 
             config.slack_channel = slack_channel
             
         # Setup communication with specified providers
-        _comms_manager = comms.setup_communication(providers=providers, config=config)
+        base_manager = comms.setup_communication(providers=providers, config=config)
         
-        if _comms_manager:
-            active_providers = list(_comms_manager.providers.keys())
+        if base_manager:
+            log_message("INFO", f"Base manager created: {base_manager}")
+            log_message("INFO", f"Base manager providers: {base_manager.providers}")
+            
+            # Check if webhook server is running for WhatsApp/SMS
+            if hasattr(base_manager, 'webhook_handler'):
+                log_message("INFO", f"Webhook handler: {base_manager.webhook_handler}")
+            
+            # Wrap with our notifying version
+            _comms_manager = NotifyingCommunicationManager(base_manager)
+            
+            active_providers = list(_comms_manager.providers.keys()) if hasattr(_comms_manager.providers, 'keys') else [type(p).__name__.replace('Provider', '').lower() for p in _comms_manager.providers]
             result = f"Communication channels configured: {', '.join(active_providers)}"
             log_message("INFO", f"configure_communication returning: {result}")
             return result
@@ -820,6 +1258,57 @@ async def configure_communication(providers: list[str] = None, whatsapp_to: str 
         log_message("ERROR", f"configure_communication error: {error_msg}")
         return error_msg
 
+
+# Internal helper function for sending WhatsApp messages
+async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts: bool = False) -> str:
+    """Internal function to send WhatsApp messages"""
+    global _comms_manager
+    
+    # Ensure we have a communication manager
+    if not _comms_manager:
+        # Try to auto-configure with WhatsApp
+        base_manager = comms.setup_communication(providers=['whatsapp'])
+        if base_manager:
+            _comms_manager = NotifyingCommunicationManager(base_manager)
+        else:
+            error_msg = "WhatsApp not configured. Please call configure_communication first or set TWILIO credentials."
+            log_message("ERROR", f"send_whatsapp error: {error_msg}")
+            return error_msg
+    
+    # Check if WhatsApp provider exists
+    if not _comms_manager or not _comms_manager.providers:
+        error_msg = "No communication providers configured."
+        log_message("ERROR", f"send_whatsapp error: {error_msg}")
+        return error_msg
+    
+    if not any(isinstance(p, TwilioWhatsAppProvider) for p in _comms_manager.providers):
+        error_msg = "WhatsApp provider not available. Please configure with Twilio credentials."
+        log_message("ERROR", f"send_whatsapp error: {error_msg}")
+        return error_msg
+    
+    # Use default number if not provided
+    if not to_number:
+        to_number = os.environ.get('TWILIO_WHATSAPP_NUMBER')
+        if not to_number:
+            error_msg = "No recipient number provided and TWILIO_WHATSAPP_NUMBER not set"
+            log_message("ERROR", f"send_whatsapp error: {error_msg}")
+            return error_msg
+    
+    # Send the message
+    whatsapp_provider = next((p for p in _comms_manager.providers if isinstance(p, TwilioWhatsAppProvider)), None)
+    if not whatsapp_provider:
+        error_msg = "WhatsApp provider not found in communication manager"
+        log_message("ERROR", f"send_whatsapp error: {error_msg}")
+        return error_msg
+    result = whatsapp_provider.send_message(message, to_number)
+    
+    # Also speak it if requested
+    if with_tts and _tts_initialized:
+        tts.queue_for_speech(message, None)
+    
+    result_msg = f"WhatsApp message sent: '{message[:50]}...' to {result.get('to', to_number)}"
+    log_message("INFO", f"send_whatsapp returning: {result_msg}")
+    return result_msg
 
 @app.tool()
 async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = False) -> str:
@@ -835,57 +1324,73 @@ async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = Fa
         Status message about the sent message
     """
     try:
-        global _comms_manager
-        
-        # Ensure we have a communication manager
-        if not _comms_manager:
-            # Try to auto-configure with WhatsApp
-            _comms_manager = comms.setup_communication(providers=['whatsapp'])
-            if not _comms_manager:
-                error_msg = "WhatsApp not configured. Please call configure_communication first or set TWILIO credentials."
-                log_message("ERROR", f"send_whatsapp error: {error_msg}")
-                return error_msg
-        
-        # Check if WhatsApp provider exists
-        if not _comms_manager or not _comms_manager.providers:
-            error_msg = "No communication providers configured."
-            log_message("ERROR", f"send_whatsapp error: {error_msg}")
-            return error_msg
-        
-        if not any(isinstance(p, TwilioWhatsAppProvider) for p in _comms_manager.providers):
-            error_msg = "WhatsApp provider not available. Please configure with Twilio credentials."
-            log_message("ERROR", f"send_whatsapp error: {error_msg}")
-            return error_msg
-        
-        # Use default number if not provided
-        if not to_number:
-            to_number = os.environ.get('TWILIO_WHATSAPP_NUMBER')
-            if not to_number:
-                error_msg = "No recipient number provided and TWILIO_WHATSAPP_NUMBER not set"
-                log_message("ERROR", f"send_whatsapp error: {error_msg}")
-                return error_msg
-        
-        # Send the message
-        whatsapp_provider = next((p for p in _comms_manager.providers if isinstance(p, TwilioWhatsAppProvider)), None)
-        if not whatsapp_provider:
-            error_msg = "WhatsApp provider not found in communication manager"
-            log_message("ERROR", f"send_whatsapp error: {error_msg}")
-            return error_msg
-        result = whatsapp_provider.send_message(message, to_number)
-        
-        # Also speak it if requested
-        if with_tts and _tts_initialized:
-            tts.queue_for_speech(message, None)
-        
-        result_msg = f"WhatsApp message sent: '{message[:50]}...' to {result.get('to', to_number)}"
-        log_message("INFO", f"send_whatsapp returning: {result_msg}")
-        return result_msg
-        
+        await _init_processor_if_needed()
+        return await _send_whatsapp_internal(message, to_number, with_tts)
     except Exception as e:
         error_msg = f"Error sending WhatsApp message: {str(e)}"
         log_message("ERROR", f"send_whatsapp error: {error_msg}")
         return error_msg
 
+
+# Internal helper function for sending Slack messages
+async def _send_slack_internal(message: str, channel: str = None, with_tts: bool = False) -> str:
+    """Internal function to send Slack messages"""
+    global _comms_manager
+    
+    # Ensure we have a communication manager
+    if not _comms_manager:
+        # Try to auto-configure with Slack
+        base_manager = comms.setup_communication(providers=['slack'])
+        if base_manager:
+            _comms_manager = NotifyingCommunicationManager(base_manager)
+        else:
+            error_msg = "Slack not configured. Please call configure_communication first or set SLACK_BOT_TOKEN."
+            log_message("ERROR", f"send_slack error: {error_msg}")
+            return error_msg
+    
+    # Check if Slack provider exists
+    if not _comms_manager or not _comms_manager.providers:
+        error_msg = "No communication providers configured."
+        log_message("ERROR", f"send_slack error: {error_msg}")
+        return error_msg
+    
+    if not any(isinstance(p, SlackProvider) for p in _comms_manager.providers):
+        error_msg = "Slack provider not available. Please configure with Slack bot token."
+        log_message("ERROR", f"send_slack error: {error_msg}")
+        return error_msg
+    
+    # Send the message
+    slack_provider = next((p for p in _comms_manager.providers if isinstance(p, SlackProvider)), None)
+    if not slack_provider:
+        error_msg = "Slack provider not found in communication manager"
+        log_message("ERROR", f"send_slack error: {error_msg}")
+        return error_msg
+    # Determine the target channel
+    target_channel = channel or _slack_channel or os.environ.get('SLACK_CHANNEL')
+    if not target_channel:
+        error_msg = "No Slack channel specified. Please provide a channel or set SLACK_CHANNEL environment variable."
+        log_message("ERROR", f"send_slack error: {error_msg}")
+        return error_msg
+    
+    # Create a Message object for Slack provider
+    from .comms import Message
+    slack_message = Message(
+        content=message,
+        sender=target_channel,
+        channel="slack"
+    )
+    success = slack_provider.send_message(slack_message)
+    
+    # Also speak it if requested
+    if with_tts and _tts_initialized:
+        tts.queue_for_speech(message, None)
+    
+    if success:
+        result_msg = f"Slack message sent: '{message[:50]}...' to {target_channel}"
+    else:
+        result_msg = f"Failed to send Slack message to {target_channel}"
+    log_message("INFO", f"send_slack returning: {result_msg}")
+    return result_msg
 
 @app.tool()
 async def send_slack(message: str, channel: str = None, with_tts: bool = False) -> str:
@@ -901,61 +1406,8 @@ async def send_slack(message: str, channel: str = None, with_tts: bool = False) 
         Status message about the sent message
     """
     try:
-        global _comms_manager
-        
-        # Ensure we have a communication manager
-        if not _comms_manager:
-            # Try to auto-configure with Slack
-            _comms_manager = comms.setup_communication(providers=['slack'])
-            if not _comms_manager:
-                error_msg = "Slack not configured. Please call configure_communication first or set SLACK_BOT_TOKEN."
-                log_message("ERROR", f"send_slack error: {error_msg}")
-                return error_msg
-        
-        # Check if Slack provider exists
-        if not _comms_manager or not _comms_manager.providers:
-            error_msg = "No communication providers configured."
-            log_message("ERROR", f"send_slack error: {error_msg}")
-            return error_msg
-        
-        if not any(isinstance(p, SlackProvider) for p in _comms_manager.providers):
-            error_msg = "Slack provider not available. Please configure with Slack bot token."
-            log_message("ERROR", f"send_slack error: {error_msg}")
-            return error_msg
-        
-        # Send the message
-        slack_provider = next((p for p in _comms_manager.providers if isinstance(p, SlackProvider)), None)
-        if not slack_provider:
-            error_msg = "Slack provider not found in communication manager"
-            log_message("ERROR", f"send_slack error: {error_msg}")
-            return error_msg
-        # Determine the target channel
-        target_channel = channel or _slack_channel or os.environ.get('SLACK_CHANNEL')
-        if not target_channel:
-            error_msg = "No Slack channel specified. Please provide a channel or set SLACK_CHANNEL environment variable."
-            log_message("ERROR", f"send_slack error: {error_msg}")
-            return error_msg
-        
-        # Create a Message object for Slack provider
-        from .comms import Message
-        slack_message = Message(
-            content=message,
-            sender=target_channel,
-            channel="slack"
-        )
-        success = slack_provider.send_message(slack_message)
-        
-        # Also speak it if requested
-        if with_tts and _tts_initialized:
-            tts.queue_for_speech(message, None)
-        
-        if success:
-            result_msg = f"Slack message sent: '{message[:50]}...' to {target_channel}"
-        else:
-            result_msg = f"Failed to send Slack message to {target_channel}"
-        log_message("INFO", f"send_slack returning: {result_msg}")
-        return result_msg
-        
+        await _init_processor_if_needed()
+        return await _send_slack_internal(message, channel, with_tts)
     except Exception as e:
         error_msg = f"Error sending Slack message: {str(e)}"
         log_message("ERROR", f"send_slack error: {error_msg}")
@@ -1031,8 +1483,10 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         
         # Ensure WhatsApp is configured
         if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
-            _comms_manager = comms.setup_communication(providers=['whatsapp'])
-            if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
+            base_manager = comms.setup_communication(providers=['whatsapp'])
+            if base_manager and any(isinstance(p, TwilioWhatsAppProvider) for p in base_manager.providers):
+                _comms_manager = NotifyingCommunicationManager(base_manager)
+            else:
                 error_msg = "Failed to configure WhatsApp. Check your Twilio credentials."
                 log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
                 return error_msg
@@ -1040,7 +1494,7 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         _whatsapp_mode = True
         
         # Send confirmation
-        await send_whatsapp(f"WhatsApp mode activated! I'll send all my responses here.", _whatsapp_recipient)
+        await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", _whatsapp_recipient)
         
         result = f"WhatsApp mode activated! Sending messages to {_whatsapp_recipient}"
         log_message("INFO", f"start_whatsapp_mode returning: {result}")
@@ -1070,7 +1524,7 @@ async def stop_whatsapp_mode() -> str:
         
         # Send farewell message
         if _whatsapp_recipient:
-            await send_whatsapp("WhatsApp mode deactivated. Goodbye!", _whatsapp_recipient)
+            await _send_whatsapp_internal("WhatsApp mode deactivated. Goodbye!", _whatsapp_recipient)
         
         _whatsapp_mode = False
         _whatsapp_recipient = None
@@ -1114,6 +1568,7 @@ async def start_slack_mode(channel: str = None) -> str:
         Status message about Slack mode activation
     """
     try:
+        await _init_processor_if_needed()
         global _slack_mode, _slack_channel, _comms_manager
         
         # Determine channel
@@ -1128,20 +1583,22 @@ async def start_slack_mode(channel: str = None) -> str:
         
         # Ensure Slack is configured
         if not _comms_manager or not any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else [])):
-            _comms_manager = comms.setup_communication(providers=['slack'])
-            if not _comms_manager:
+            base_manager = comms.setup_communication(providers=['slack'])
+            if not base_manager:
                 error_msg = "Failed to configure Slack. Check your Slack bot token."
                 log_message("ERROR", f"start_slack_mode error: {error_msg}")
                 return error_msg
             
             # The provider should be available immediately after setup_communication returns
-            if not any(isinstance(p, SlackProvider) for p in _comms_manager.providers):
+            if not any(isinstance(p, SlackProvider) for p in base_manager.providers):
                 error_msg = "Failed to configure Slack provider. Check your Slack bot token."
                 log_message("ERROR", f"start_slack_mode error: {error_msg}")
                 return error_msg
             
+            _comms_manager = NotifyingCommunicationManager(base_manager)
+            
             # Now wait for the actual connection
-            slack_provider = next((p for p in _comms_manager.providers if isinstance(p, SlackProvider)), None)
+            slack_provider = next((p for p in base_manager.providers if isinstance(p, SlackProvider)), None)
             if slack_provider and hasattr(slack_provider, 'wait_for_connection'):
                 log_message("INFO", "Waiting for Slack connection...")
                 if not slack_provider.wait_for_connection(timeout=3.0):
@@ -1153,7 +1610,7 @@ async def start_slack_mode(channel: str = None) -> str:
         _slack_mode = True
         
         # Send confirmation
-        await send_slack(f"Slack mode activated! I'll send all my responses here.", _slack_channel)
+        await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", _slack_channel)
         
         result = f"Slack mode activated! Sending messages to {_slack_channel}"
         log_message("INFO", f"start_slack_mode returning: {result}")
@@ -1183,7 +1640,7 @@ async def stop_slack_mode() -> str:
         
         # Send farewell message
         if _slack_channel:
-            await send_slack("Slack mode deactivated. Goodbye!", _slack_channel)
+            await _send_slack_internal("Slack mode deactivated. Goodbye!", _slack_channel)
         
         _slack_mode = False
         _slack_channel = None
@@ -1242,14 +1699,17 @@ async def get_messages() -> dict[str, Any]:
         
         # Get messages from communication manager
         if _comms_manager:
+            log_message("DEBUG", f"Checking for messages from communication manager")
             messages = []
             # Collect all available messages
             while True:
                 msg = _comms_manager.get_input_message(timeout=0)  # Non-blocking
                 if msg:
+                    log_message("INFO", f"Got message from comms manager: {msg}")
                     messages.append(msg)
                 else:
                     break
+            log_message("DEBUG", f"Collected {len(messages)} messages from comms manager")
             
             # Sort messages by channel type
             for msg in messages:
@@ -1525,39 +1985,111 @@ async def transcribe_audio() -> types.Prompt:
         ]
     )
 
+def find_available_port(start_port=8000, max_attempts=100):
+    """Find an available port starting from start_port"""
+    import socket
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', port))
+                return port
+        except OSError:
+            continue
+    return None
+
 def main():
-    """Main entry point for the MCP server"""
+    """Main entry point for the MCP SSE server"""
+    print("[DEBUG] MCP SSE main() called", file=sys.stderr)
+    
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Talkito MCP Server - TTS/ASR via Model Context Protocol')
+    parser = argparse.ArgumentParser(description='Talkito MCP SSE Server - TTS/ASR via Model Context Protocol with SSE')
     parser.add_argument('--log-file', type=str, help='Path to log file for debugging')
+    parser.add_argument('--port', type=int, help='Port to run the server on (will auto-find if not specified)')
     args = parser.parse_args()
     
+    print(f"[DEBUG] Parsed args: log_file={args.log_file}, port={args.port}", file=sys.stderr)
+    
     # Set up logging if log file specified
+    global _log_file_path
     if args.log_file:
+        _log_file_path = args.log_file
+        print(f"[DEBUG] Setting up logging to: {args.log_file}", file=sys.stderr)
         setup_logging(args.log_file)
-        log_message("INFO", f"MCP server starting with log file: {args.log_file}")
+        log_message("INFO", f"MCP SSE server starting with log file: {args.log_file}")
+        # Test that logging is working
+        log_message("DEBUG", "Test debug message")
+        log_message("WARNING", "Test warning message")
     
     try:
-        # Important: For stdio transport, we must use stderr for logging
-        # stdout is reserved for the MCP protocol communication
         print("=" * 60, file=sys.stderr)
-        print("Talkito MCP server is starting...", file=sys.stderr)
-        print("Transport: stdio (communicating via stdin/stdout)", file=sys.stderr)
+        print("Talkito MCP SSE server is starting...", file=sys.stderr)
+        print("Transport: SSE (Server-Sent Events)", file=sys.stderr)
+        print("Features:", file=sys.stderr)
+        print("  - Real-time notifications for incoming messages", file=sys.stderr)
+        print("  - Push notifications for dictation results", file=sys.stderr)
+        print("  - All standard talkito MCP functionality", file=sys.stderr)
         if args.log_file:
             print(f"Logging to: {args.log_file}", file=sys.stderr)
         print("=" * 60, file=sys.stderr)
         
-        # The server is ready immediately when run() executes
-        # This is a blocking call that handles all MCP communication
-        app.run(transport='stdio')
+        # Try to set port via environment variables that uvicorn might respect
+        if args.port:
+            port = args.port
+        else:
+            # Find an available port
+            port = find_available_port(8000)
+            if not port:
+                print("Error: Could not find an available port in range 8000-8100", file=sys.stderr)
+                sys.exit(1)
+        
+        # Set environment variables that various servers might respect
+        os.environ['PORT'] = str(port)
+        os.environ['UVICORN_PORT'] = str(port)
+        os.environ['SERVER_PORT'] = str(port)
+        os.environ['HTTP_PORT'] = str(port)
+        
+        print(f"\nAttempting to start on port {port}...", file=sys.stderr)
+        print(f"If successful, connect with:", file=sys.stderr)
+        print(f"  claude mcp add talkito http://127.0.0.1:{port} --transport sse", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # Save logging state before FastMCP messes with it
+        _save_logging_state()
+        
+        # Try to use the newer FastMCP API with port configuration
+        try:
+            # Try the new API first
+            log_message("INFO", f"Starting SSE server on port {port}")
+            print(f"[INFO] Starting FastMCP app.run() on port {port}", file=sys.stderr)
+            app.run(
+                transport="sse",
+                host="127.0.0.1",
+                port=port,
+                log_level="warning"  # Reduce uvicorn log verbosity
+            )
+        except TypeError as e:
+            # Fall back to old API if parameters aren't supported
+            log_message("WARNING", f"New API not supported: {e}")
+            print(f"[WARNING] FastMCP new API not supported, using defaults", file=sys.stderr)
+            
+            # Run with default settings
+            app.run(transport="sse")
         
         # This line only executes after the server shuts down
-        print("Talkito MCP server has stopped.", file=sys.stderr)
-    except KeyboardInterrupt:
-        print("\nTalkito MCP server interrupted by user.", file=sys.stderr)
+        print("Talkito MCP SSE server has stopped.", file=sys.stderr)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nTalkito MCP SSE server interrupted by user.", file=sys.stderr)
+        log_message("INFO", "Server interrupted by user")
     except Exception as e:
-        print(f"Talkito MCP server error: {e}", file=sys.stderr)
-        raise
+        print(f"Talkito MCP SSE server error: {e}", file=sys.stderr)
+        
+        # If it's a port binding error, try the next port
+        if "address already in use" in str(e) and not args.port:
+            print("\nPort 8000 is in use. Try specifying a different port:", file=sys.stderr)
+            print("  talkito --mcp-sse-server --port 8001", file=sys.stderr)
+        else:
+            # Only re-raise if it's not a known error
+            raise
     finally:
         _cleanup()
 
