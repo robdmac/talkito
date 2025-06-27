@@ -21,10 +21,9 @@
 import sys
 import os
 import argparse
-import signal
 import asyncio
+import signal
 from typing import List, Optional, Union, Tuple
-from pathlib import Path
 
 # Try to load .env files if available
 try:
@@ -68,9 +67,24 @@ def signal_handler(signum, frame):
             asr.stop_dictation()
         except:
             pass
-    # Wait for TTS to finish before shutting down
-    tts.wait_for_tts_to_finish()
-    tts.shutdown_tts()
+    
+    # For interrupt signals, shutdown immediately without waiting
+    if signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            tts.shutdown_tts()  # Shutdown immediately
+        except:
+            pass
+    else:
+        # For other signals, wait for TTS to finish
+        try:
+            tts.wait_for_tts_to_finish()
+            tts.shutdown_tts()
+        except:
+            # If interrupted during cleanup, just shutdown
+            try:
+                tts.shutdown_tts()
+            except:
+                pass
     
     # Exit with proper code for signal termination
     sys.exit(128 + signum)
@@ -80,7 +94,7 @@ def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='TalkiTo - Speak command output using TTS',
-        usage='%(prog)s [options] <command> [arguments...]\n       %(prog)s init claude'
+        usage='%(prog)s [options] <command> [arguments...]\n       %(prog)s claude'
     )
     
     # Basic options
@@ -155,10 +169,16 @@ def parse_arguments():
     # MCP server mode
     parser.add_argument('--mcp-server', action='store_true',
                         help='Run as MCP (Model Context Protocol) server')
+    parser.add_argument('--mcp-sse-server', action='store_true',
+                        help='Run as MCP server with SSE transport for real-time notifications')
+    parser.add_argument('--port', type=int, metavar='PORT',
+                        help='Port to run the MCP SSE server on (default: auto-find from 8000)')
     
     # Setup helpers
     parser.add_argument('--setup-slack', action='store_true',
                         help='Show instructions for setting up Slack bot')
+    parser.add_argument('--setup-whatsapp', action='store_true',
+                        help='Show instructions for setting up WhatsApp with Twilio')
     
     # Command and arguments
     parser.add_argument('command', nargs='?', 
@@ -183,9 +203,13 @@ def parse_arguments():
         args.show_slack_setup = True
         return args
     
+    if args.setup_whatsapp:
+        args.show_whatsapp_setup = True
+        return args
+    
     # Validate arguments
-    if not args.replay and not args.command and not args.mcp_server and not args.setup_slack:
-        parser.error('Command is required unless using --replay, --mcp-server, --setup-slack or init claude')
+    if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp:
+        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp or init claude')
     
     return args
 
@@ -257,9 +281,199 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     return config
 
 
+def print_configuration_status():
+    """Print the current TTS/ASR and communication configuration"""
+    import os
+    
+    # Get the best available TTS provider
+    tts_provider = tts.select_best_tts_provider()
+    
+    # Get the best available ASR provider
+    asr_provider = 'N/A'
+    if asr:
+        try:
+            asr_provider = asr.select_best_asr_provider()
+        except:
+            asr_provider = 'unavailable'
+    
+    # Check communication channels
+    channels = []
+    if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('ZROK_RESERVED_TOKEN'):
+        if os.environ.get('TWILIO_WHATSAPP_NUMBER'):
+            channels.append('WhatsApp')
+        if os.environ.get('TWILIO_PHONE_NUMBER'):
+            channels.append('SMS')
+    if os.environ.get('SLACK_BOT_TOKEN') and os.environ.get('SLACK_APP_TOKEN'):
+        channels.append('Slack')
+    
+    # Build status line
+    status_parts = [
+        f"TTS: {tts_provider}",
+        f"ASR: {asr_provider}"
+    ]
+    
+    if channels:
+        status_parts.append(f"Available Msgs: {', '.join(channels)}")
+    else:
+        status_parts.append("Available Msgs: none")
+    
+    print(f"Configuration: {' | '.join(status_parts)} (configure with .talkito.env)")
+
+
+async def run_claude_with_sse(args) -> int:
+    """Run Claude with SSE MCP server support with fallback mechanisms"""
+    import subprocess
+    import time
+
+    from .mcp_sse import find_available_port
+    
+    # Use specified port or find an available one
+    if args.port:
+        port = args.port
+    else:
+        port = find_available_port(8000)
+    address = "http://127.0.0.1:"
+    sse_process = None
+    claude_process = None
+    
+    # Helper to kill processes
+    def kill_process(proc):
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    
+    try:
+        # Step A: Run talkito --mcp-sse-server in background
+        print(f"Starting talkito MCP (SSE) server on port {port}...")
+        # Use the installed talkito command if available, otherwise use -m
+        import shutil
+        talkito_cmd = shutil.which('talkito')
+        if talkito_cmd:
+            sse_cmd = [talkito_cmd, "--mcp-sse-server", "--port", str(port)]
+        else:
+            # Fallback to module execution
+            sse_cmd = [sys.executable, "-m", "talkito", "--mcp-sse-server", "--port", str(port)]
+        
+        # Add log file if specified
+        if args.log_file:
+            sse_cmd.extend(["--log-file", args.log_file + ".sse"])
+
+        sse_process = subprocess.Popen(
+            sse_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True
+        )
+        
+        # Wait a bit for the server to start
+        time.sleep(2)
+        
+        # Check if server started successfully
+        if sse_process.poll() is not None:
+            # Read error output
+            stdout, stderr = sse_process.communicate()
+            error_msg = "SSE server failed to start"
+            if stderr:
+                error_msg += f"\nError: {stderr.decode('utf-8', errors='replace')}"
+            if stdout:
+                error_msg += f"\nOutput: {stdout.decode('utf-8', errors='replace')}"
+            raise Exception(error_msg)
+        
+        # Step C: Run init_claude with SSE configuration
+        from .claude_init import init_claude
+        if not init_claude(transport="sse", address=address, port=port):
+            raise Exception("Failed to configure Claude for SSE")
+        
+        # Step D: Show configuration status
+        print_configuration_status()
+        
+        # Step E: Run Claude
+        print("Starting Claude...")
+        claude_cmd = ["claude"] + args.arguments
+        claude_process = subprocess.run(claude_cmd)
+        
+        return claude_process.returncode
+        
+    except Exception as e:
+        print(f"SSE mode failed: {e}", file=sys.stderr)
+        
+        # Step E: Fallback to stdio mode
+        print("Falling back to stdio mode...")
+        kill_process(sse_process)
+        
+        try:
+            from .claude_init import init_claude
+            if not init_claude(transport="stdio"):
+                raise Exception("Failed to configure Claude for stdio")
+            
+            # Try Claude again with stdio
+            claude_cmd = ["claude"] + args.arguments
+            claude_process = subprocess.run(claude_cmd)
+            return claude_process.returncode
+            
+        except Exception as e2:
+            print(f"Stdio mode failed: {e2}", file=sys.stderr)
+            
+            # Step F: Fall back to traditional talkito wrapper
+            print("Falling back to traditional talkito wrapper...")
+            cmd = [args.command] + args.arguments
+            
+            # Build kwargs for run_with_talkito
+            kwargs = {
+                'verbosity': args.verbose,
+                'asr_mode': args.asr_mode,
+                'record_file': args.record,
+            }
+            
+            # Add other configurations...
+            if args.log_file:
+                kwargs['log_file'] = args.log_file
+            
+            if args.profile:
+                kwargs['profile'] = args.profile
+            else:
+                kwargs['profile'] = 'claude'
+            
+            # Add TTS config
+            tts_config = build_tts_config(args)
+            if tts_config:
+                kwargs['tts_config'] = tts_config
+            
+            # Add ASR config
+            if asr:
+                asr_config = build_asr_config(args)
+                if asr_config:
+                    kwargs['asr_config'] = asr_config
+            
+            # Add communications config
+            comms_config = build_comms_config(args)
+            if comms_config:
+                kwargs['comms_config'] = comms_config
+            
+            # Handle TTS disable
+            if args.disable_tts:
+                tts.disable_tts = True
+            
+            # Use the high-level API from core
+            from .core import run_with_talkito
+            return await run_with_talkito(cmd, **kwargs)
+    
+    finally:
+        # Clean up any remaining processes
+        kill_process(sse_process)
+
+
 async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
+    
+    # Special handling for 'claude' command
+    if args.command == 'claude':
+        return await run_claude_with_sse(args)
     
     # Build command list
     cmd = [args.command] + args.arguments
@@ -362,6 +576,30 @@ def run_mcp_server():
         sys.exit(1)
 
 
+def run_mcp_sse_server():
+    """Run the MCP SSE server"""
+    try:
+        from .mcp_sse import main as mcp_sse_main
+        # Pass through the original sys.argv to the MCP SSE server
+        # but remove the --mcp-sse-server argument itself
+        import sys
+        original_argv = sys.argv[:]
+        sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-sse-server']
+        print(f"[DEBUG] Running MCP SSE server with args: {sys.argv}", file=sys.stderr)
+        mcp_sse_main()
+    except ImportError as e:
+        print(f"Error: Failed to import MCP SSE server: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        print("Make sure the MCP SDK is installed: pip install mcp", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error running MCP SSE server: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def show_slack_setup():
     """Show instructions for setting up Slack bot"""
     from .templates import SLACK_BOT_MANIFEST
@@ -433,13 +671,70 @@ def show_slack_setup():
     # print()
 
 
+def show_whatsapp_setup():
+    """Show instructions for setting up WhatsApp with Twilio"""
+    print("📱 Talkito WhatsApp Setup Instructions")
+    print("=" * 60)
+    print()
+    print("Follow these steps to set up WhatsApp messaging for Talkito:")
+    print()
+    print("1. Create a Twilio account:")
+    print("   • Sign up at https://www.twilio.com/")
+    print("   • Note your Account SID and Auth Token from the dashboard")
+    print()
+    print("2. Set up WhatsApp Sandbox (for testing):")
+    print("   • Go to https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn")
+    print("   • Note the Twilio WhatsApp number (usually +1 415 523 8886)")
+    print("   • Send the join code shown (e.g., 'join <code>') to the WhatsApp number")
+    print("   • NOTE you will need to re send that join <code> very 24 hours")
+    print("   • You'll receive a confirmation message")
+    print()
+    print("3. Configure Zrok webhook:")
+    print("   • Install zrok: https://github.com/openziti/zrok/releases/latest")
+    print("   • Enable zrok: zrok enable <token> (get token from https://zrok.io)")
+    print("   • Reserve a share: zrok reserve public http://localhost:8080")
+    print("   • Note the reserved token (e.g., 'es5hi3nzrstm')")
+    print("   • This token MUST be set as ZROK_RESERVED_TOKEN for WhatsApp to work")
+    print("   • Set webhook URL in Twilio Console:")
+    print("     - Go to Messaging → Settings → WhatsApp Sandbox Settings")
+    print("     - Set 'When a message comes in' to: https://<token>.share.zrok.io/whatsapp")
+    print("     - Method: POST")
+    print()
+    print("4. Set environment variables:")
+    print("   export TWILIO_ACCOUNT_SID='ACxxxxxx'          # Your Account SID")
+    print("   export TWILIO_AUTH_TOKEN='xxxxxx'             # Your Auth Token")
+    print("   export TWILIO_WHATSAPP_NUMBER='+14155238886'  # Twilio's WhatsApp number")
+    print("   export WHATSAPP_RECIPIENTS='+1234567890'      # Your WhatsApp number")
+    print("   export ZROK_RESERVED_TOKEN='xxxxx'            # Your zrok token (see step 4)")
+    print()
+    print("5. Test the setup:")
+    print("   # Send a test message")
+    print("   talkito --whatsapp-recipients '+1234567890' echo 'Hello WhatsApp!'")
+    print()
+    print("   # Or use with Claude")
+    print("   talkito claude")
+    print("   Then: /talkito:start_whatsapp_mode")
+    print()
+    print("=" * 60)
+    print("IMPORTANT NOTES:")
+    print("=" * 60)
+    print()
+    print("• For production use, upgrade to a Twilio WhatsApp Business API account")
+    print("• The sandbox is limited to approved contacts who have joined")
+    print("• Messages expire after 24 hours of inactivity in the sandbox")
+    print("• Reply to WhatsApp messages to keep the session active")
+    print()
+    print("For detailed webhook setup instructions, see WEBHOOK_SETUP.md")
+    print()
+
+
 async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
     
-    # Handle MCP server mode synchronously before entering async context
-    if args.mcp_server:
-        # MCP server has its own event loop, so we can't run it from within asyncio.run()
+    # Handle MCP server modes synchronously before entering async context
+    if args.mcp_server or args.mcp_sse_server:
+        # MCP servers have their own event loops, so we can't run them from within asyncio.run()
         # This is handled in main() instead
         return 0
     
@@ -449,13 +744,38 @@ async def main_async() -> int:
         else:
             return await run_talkito_command(args)
     except KeyboardInterrupt:
+        # Clean up quickly without waiting
+        if asr:
+            try:
+                asr.stop_dictation()
+            except:
+                pass
+        try:
+            tts.shutdown_tts()  # Shutdown immediately without waiting
+        except:
+            pass
         return 130  # Standard exit code for Ctrl+C
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     finally:
-        # All cleanup is now handled in run_command
-        pass
+        # Clean up only if not interrupted
+        if 'KeyboardInterrupt' not in str(type(sys.exc_info()[1])):
+            if asr:
+                try:
+                    asr.stop_dictation()
+                except:
+                    pass
+            # Wait for TTS to finish before shutting down
+            try:
+                tts.wait_for_tts_to_finish()
+                tts.shutdown_tts()
+            except KeyboardInterrupt:
+                # If interrupted during cleanup, just shutdown immediately
+                try:
+                    tts.shutdown_tts()
+                except:
+                    pass
 
 
 def main():
@@ -473,8 +793,16 @@ def main():
         show_slack_setup()
         sys.exit(0)
     
+    if hasattr(args, 'show_whatsapp_setup') and args.show_whatsapp_setup:
+        show_whatsapp_setup()
+        sys.exit(0)
+    
     if args.mcp_server:
         run_mcp_server()
+        sys.exit(0)
+    
+    if args.mcp_sse_server:
+        run_mcp_sse_server()
         sys.exit(0)
     
     # Run everything else in asyncio

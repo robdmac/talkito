@@ -2,20 +2,7 @@
 
 TalkiTo lets developers interact with AI systems through speech across multiple channels (terminal, API, phone). It can be used as both a command-line tool and a Python library.
 
-## Installation
-
-### From PyPI
-
-```bash
-# Basic installation
-pip install talkito
-
-# With ASR support
-pip install talkito[asr]
-
-# With all optional features
-pip install talkito[all]
-```
+## Quick Start Guide using Claude
 
 ### From Source
 
@@ -24,17 +11,62 @@ pip install talkito[all]
 git clone https://github.com/robdmac/talkito.git
 cd talkito
 
-# Install in development mode
-pip install -e .
-
-# Or install with optional dependencies
-pip install -e ".[asr]"  # ASR support
 pip install -e ".[all]"  # All features
 
-# Make talkito command available (if not using pip install):
-chmod +x talkito.sh
-sudo ln -s $PWD/talkito.sh /usr/local/bin/talkito
+talkito claude
 ```
+
+### How It Works with Claude
+
+When you run `talkito claude`, it automatically:
+
+1. **Starts an MCP SSE server** in the background for real-time notifications
+2. **Configures Claude** to connect to the talkito MCP server
+3. **Falls back gracefully** if SSE isn't supported (SSE → stdio → traditional wrapper)
+
+### Voice Mode
+
+Once Claude is running with talkito, you can activate voice mode:
+
+1. **Enable voice mode**: Use the `talkito:turn_on` or simply "talkito on" in Claude
+2. **Continuous listening**: Claude will then automatically:
+   - Speak its responses using TTS
+   - Start listening for your voice input
+   - Process your speech as the next command
+   - Continue this loop until you say "stop voice mode"
+
+3. **Unified input handling**: All messages are treated as user input:
+   - Voice dictation: Processed as spoken commands
+   - Slack messages: Processed as typed commands (when connected)
+   - WhatsApp messages: Processed as typed commands (when connected)
+
+### Real-Time Notifications
+
+The SSE server enables Claude to receive notifications when:
+- New voice input is available
+- Messages arrive from Slack or WhatsApp
+- You can use `talkito:start_notification_stream` to begin receiving updates
+
+### Communication Channels
+
+Configure environment variables to enable remote messaging:
+
+```bash
+# WhatsApp setup (run `talkito --setup-whatsapp` for full instructions)
+export TWILIO_ACCOUNT_SID='your_sid'
+export TWILIO_AUTH_TOKEN='your_token'
+export TWILIO_WHATSAPP_NUMBER='whatsapp:+14155238886'
+
+# Slack setup (run `talkito --setup-slack` for full instructions)
+export SLACK_BOT_TOKEN='xoxb-...'
+export SLACK_APP_TOKEN='xapp-...'
+export SLACK_CHANNEL='#talkito-dev'
+```
+
+Then in Claude voice mode:
+- Say "slack me at #channel" to enable Slack mode
+- Say "whatsapp me at +1234567890" to enable WhatsApp mode
+- All your responses will be automatically sent to the configured channel
 
 ## Usage
 
@@ -43,9 +75,6 @@ sudo ln -s $PWD/talkito.sh /usr/local/bin/talkito
 The primary way to use this tool is through the `talkito` command, which wraps any command and speaks its output:
 
 ```bash
-# Basic usage - speaks command output
-talkito echo "Hello, World!"
-
 # Use with interactive programs
 talkito python
 talkito claude  # If you have Claude CLI installed
@@ -272,13 +301,18 @@ Configure your AI application to connect to the talkito MCP server for voice cap
 
 #### Twilio WhatsApp
 - **Get Started**: https://www.twilio.com/whatsapp
-- **Setup**:
-  -  Set Twilio credentials and `TWILIO_WHATSAPP_NUMBER`.
-  - If you are messaging just yourself you can join the Twilio WhatsApp Sandbox.
-  - Go to: https://www.twilio.com/console/sms/whatsapp/sandbox.
-  - Follow the instructions to send a join code via WhatsApp to +1 415 523 8886.
-  - Add the number provided in `TWILIO_WHATSAPP_NUMBER`
-  - **important** you need to reply to the whatsapp message to enable the required free form (non templated) communications.
+- **Setup Instructions**: Run `talkito --setup-whatsapp` for detailed setup guide
+- **Required Environment Variables**:
+  - `TWILIO_ACCOUNT_SID`: Your Twilio account SID
+  - `TWILIO_AUTH_TOKEN`: Your Twilio auth token
+  - `TWILIO_WHATSAPP_NUMBER`: Twilio's WhatsApp number (usually +14155238886)
+  - `WHATSAPP_RECIPIENTS`: Your WhatsApp number
+  - `ZROK_RESERVED_TOKEN`: Your zrok reserved share token
+- **Quick Setup**:
+  - Join Twilio WhatsApp Sandbox at https://www.twilio.com/console/sms/whatsapp/sandbox
+  - Send the join code via WhatsApp to +1 415 523 8886
+  - Install zrok and create a reserved share: `zrok reserve public http://localhost:8080`
+  - Set webhook URL in Twilio Console to: `https://YOUR-TOKEN.share.zrok.io/whatsapp`
 - **Usage**: `--comms whatsapp --whatsapp-recipients +1234567890`
 
 #### Slack

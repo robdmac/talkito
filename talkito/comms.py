@@ -64,7 +64,6 @@ except ImportError:
 # For webhook server - using Python's built-in HTTP server
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import json
 
 # Tunnel support (using zrok - free, open source, zero trust)
 
@@ -452,6 +451,13 @@ class CommunicationManager:
                 return True
             
             elif provider_type == "whatsapp" and TWILIO_AVAILABLE:
+                # Check if ZROK_RESERVED_TOKEN is set (required for WhatsApp)
+                if not os.environ.get('ZROK_RESERVED_TOKEN'):
+                    log_message("ERROR", "ZROK_RESERVED_TOKEN is required for WhatsApp support")
+                    print("\n❌ WhatsApp requires ZROK_RESERVED_TOKEN to be set!")
+                    print("   Run 'talkito --setup-whatsapp' for setup instructions")
+                    return False
+                
                 provider = TwilioWhatsAppProvider(self.config)
                 self.providers.append(provider)
                 log_message("INFO", "Added WhatsApp provider")
