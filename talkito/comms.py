@@ -64,7 +64,6 @@ except ImportError:
 # For webhook server - using Python's built-in HTTP server
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import json
 
 # Tunnel support (using zrok - free, open source, zero trust)
 

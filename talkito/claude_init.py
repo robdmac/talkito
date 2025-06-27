@@ -41,11 +41,6 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__get_dictated_text",
     "mcp__talkito__turn_on",
     "mcp__talkito__turn_off",
-    "mcp__talkito__initialize_talkito",
-    "mcp__talkito__announce_completion",
-    "mcp__talkito__read_aloud",
-    "mcp__talkito__voice_interaction",
-    "mcp__talkito__transcribe_audio",
     "mcp__talkito__configure_communication",
     "mcp__talkito__send_whatsapp",
     "mcp__talkito__send_slack",
@@ -56,8 +51,13 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__start_slack_mode",
     "mcp__talkito__stop_slack_mode",
     "mcp__talkito__get_slack_mode_status",
-    "mcp__talkito__get_slack_messages",
-    "mcp__talkito__get_messages"
+    "mcp__talkito__get_messages",
+    "mcp__talkito__start_notification_stream",
+    "mcp__talkito__get_talkito_status",
+    "mcp__talkito__enable_tts",
+    "mcp__talkito__disable_tts",
+    "mcp__talkito__enable_asr",
+    "mcp__talkito__disable_asr"
 ]
 
 
@@ -98,9 +98,9 @@ def update_claude_settings():
         json.dump(settings, f, indent=2)
     
     if added > 0:
-        print(f"✓ Added {added} talkito permissions to .claude/settings.local.json")
+        print(f"Added {added} talkito permissions to .claude/settings.local.json")
     else:
-        print(f"✓ All permissions needed for talkito were already found in .claude/settings.local.json")
+        print(f"All permissions needed for talkito were already found in .claude/settings.local.json")
     return True
 
 
@@ -108,15 +108,21 @@ def create_talkito_md():
     """Create TALKITO.md in current directory"""
     talkito_md_path = Path("TALKITO.md")
     
-    existed = talkito_md_path.exists()
+    exists = talkito_md_path.exists()
+
+    if exists:
+        print("TALKITO.md already exists")
+        return True
     
     with open(talkito_md_path, 'w') as f:
         f.write(TALKITO_MD_CONTENT)
     
-    if existed:
-        print("✓ Rewrote TALKITO.md")
-    else:
-        print("✓ Created TALKITO.md")
+    # if existed:
+    #     print("✓ Rewrote TALKITO.md")
+    # else:
+
+    print("Created TALKITO.md")
+
     return True
 
 
@@ -131,7 +137,7 @@ def create_talkito_env():
     with open(talkito_env_path, 'w') as f:
         f.write(ENV_EXAMPLE_TEMPLATE)
     
-    print("✓ Created .talkito.env (copy settings to .env as needed)")
+    print("Created .talkito.env (copy settings to .env as needed)")
     return True
 
 
@@ -145,14 +151,14 @@ def update_claude_md():
             content = f.read()
         
         if "@TALKITO.md" in content:
-            print("✓ CLAUDE.md already contains talkito import")
+            print("CLAUDE.md already contains talkito import")
             return True  # Already exists, nothing to do
         else:
             # Add talkito section to existing CLAUDE.md
             with open(claude_md_path, 'a') as f:
                 f.write("\n## Talkito MCP Voice Mode\n")
                 f.write("- @TALKITO.md\n")
-            print("✓ Updated CLAUDE.md with talkito import")
+            print("Updated CLAUDE.md with talkito import")
     else:
         # Create new CLAUDE.md with talkito section
         content = """# CLAUDE.md
@@ -164,7 +170,7 @@ This file provides guidance to Claude Code when working in this project.
 """
         with open(claude_md_path, 'w') as f:
             f.write(content)
-        print("✓ Created CLAUDE.md with talkito import")
+        print("Created CLAUDE.md with talkito import")
     
     return True
 
@@ -191,10 +197,8 @@ def find_talkito_command():
 
 
 
-def init_claude():
+def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
     """Initialize Claude integration for talkito"""
-    print("Talkito Claude integration setup")
-    print("-" * 40)
     
     success = True
     
@@ -232,16 +236,23 @@ def init_claude():
         claude_path = shutil.which('claude')
         if claude_path:
             # Run the claude mcp add command
-            result = subprocess.run(
-                ['claude', 'mcp', 'add', 'talkito', 'talkito', '--', '--mcp-server'],
-                capture_output=True,
-                text=True
-            )
+            if transport == "sse":
+                result = subprocess.run(
+                    ['claude', 'mcp', 'add', 'talkito', address+str(port)+"/sse", '--transport', transport,],
+                    capture_output=True,
+                    text=True
+                )
+            else:
+                result = subprocess.run(
+                    ['claude', 'mcp', 'add', 'talkito', 'talkito', '--', '--mcp-server'],
+                    capture_output=True,
+                    text=True
+                )
             if result.returncode == 0:
-                print("✓ Added talkito MCP server to Claude")
+                print("Added talkito MCP server to Claude")
             else:
                 if "already exists" in result.stderr:
-                    print("✓ Talkito MCP server already configured")
+                    print("Talkito MCP server already configured")
                 else:
                     print(f"✗ Failed to add MCP server: {result.stderr}")
                     print("  Run manually: claude mcp add talkito talkito -- --mcp-server")
@@ -253,18 +264,6 @@ def init_claude():
     except Exception as e:
         print(f"✗ Error adding MCP server: {e}")
         success = False
-    
-    # Print summary
-    print("" + "-" * 40)
-    if success:
-        print("✓ Setup complete!")
-        print("\nTo use voice mode:")
-        print("  • Type: /talkito:turn_on")
-        print("  • Say: 'turn on voice mode'")
-        print("  • To stop: 'stop voice mode' or /talkito:turn_off")
-    else:
-        print("✗ Setup completed with errors")
-        print("  Please check the messages above")
     
     return success
 
