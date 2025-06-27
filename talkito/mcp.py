@@ -84,6 +84,10 @@ _whatsapp_recipient = None  # Current WhatsApp recipient
 _slack_mode = False  # Flag for Slack mode
 _slack_channel = None  # Current Slack channel
 
+# Message tracking to prevent duplicates
+_last_message_id = None  # Track the last processed message ID
+_last_message_timestamp = None  # Track the last processed message timestamp
+
 def _ensure_initialization():
     """Ensure TTS system is initialized"""
     global _tts_initialized, _shutdown_registered, _core_instance, _comms_manager
@@ -1262,21 +1266,40 @@ async def get_messages() -> dict[str, Any]:
                 else:
                     break
             
-            # Sort messages by channel type
+            # Sort messages by channel type and filter out duplicates
             for msg in messages:
+                global _last_message_id, _last_message_timestamp
+                
+                # Skip if this is the same as the last processed message
+                if msg.message_id and msg.message_id == _last_message_id:
+                    log_message("DEBUG", f"Skipping duplicate message ID: {msg.message_id}")
+                    continue
+                
+                # Also check timestamp if no message ID (within 0.5 seconds)
+                if not msg.message_id and _last_message_timestamp and abs(msg.timestamp - _last_message_timestamp) < 0.5:
+                    log_message("DEBUG", f"Skipping duplicate message by timestamp: {msg.content[:30]}...")
+                    continue
+                
+                # Update tracking
+                if msg.message_id:
+                    _last_message_id = msg.message_id
+                _last_message_timestamp = msg.timestamp
+                
                 if 'slack' in msg.channel.lower() or msg.channel.startswith('#'):
                     result["slack"].append({
                         "text": msg.content,
                         "sender": msg.sender,
                         "channel": msg.channel,
-                        "timestamp": msg.timestamp
+                        "timestamp": msg.timestamp,
+                        "message_id": msg.message_id
                     })
                 elif 'whatsapp' in msg.channel.lower():
                     result["whatsapp"].append({
                         "text": msg.content,
                         "sender": msg.sender,
                         "channel": msg.channel,
-                        "timestamp": msg.timestamp
+                        "timestamp": msg.timestamp,
+                        "message_id": msg.message_id
                     })
         
         # Calculate totals

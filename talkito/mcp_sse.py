@@ -146,6 +146,10 @@ _asr_enabled = False  # Whether ASR should listen
 _last_dictated_text = ""
 _dictation_callback_results = []
 
+# Message tracking to prevent duplicates
+_last_message_id = None  # Track the last processed message ID
+_last_message_timestamp = None  # Track the last processed message timestamp
+
 # Core instances
 _core_instance = None
 _comms_manager = None  # Communication manager for WhatsApp/Slack
@@ -1176,6 +1180,27 @@ class NotifyingCommunicationManager:
         """Intercept incoming messages and send notifications"""
         log_message("INFO", f"_handle_input_message_with_notification called with message: {message}")
         try:
+            global _last_message_id, _last_message_timestamp
+            
+            # Skip if this is the same as the last processed message
+            if message.message_id and message.message_id == _last_message_id:
+                log_message("DEBUG", f"Skipping duplicate notification for message ID: {message.message_id}")
+                # Still call original handler to add to queue, but don't notify
+                self._original_handle_input(message)
+                return
+            
+            # Also check timestamp if no message ID (within 0.5 seconds)
+            if not message.message_id and _last_message_timestamp and abs(message.timestamp - _last_message_timestamp) < 0.5:
+                log_message("DEBUG", f"Skipping duplicate notification by timestamp: {message.content[:30]}...")
+                # Still call original handler to add to queue, but don't notify
+                self._original_handle_input(message)
+                return
+            
+            # Update tracking
+            if message.message_id:
+                _last_message_id = message.message_id
+            _last_message_timestamp = message.timestamp
+            
             # Determine message type
             if 'slack' in message.channel.lower() or message.channel.startswith('#'):
                 notification_type = "slack_message"
@@ -1189,7 +1214,8 @@ class NotifyingCommunicationManager:
                 "text": message.content,
                 "sender": message.sender,
                 "channel": message.channel,
-                "timestamp": message.timestamp
+                "timestamp": message.timestamp,
+                "message_id": message.message_id
             })
             log_message("DEBUG", f"Queued notification for {notification_type}: {message.content[:50]}...")
                 
@@ -1480,6 +1506,9 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         Status message about WhatsApp mode activation
     """
     try:
+        # Ensure message poller is initialized
+        await _init_processor_if_needed()
+        
         global _whatsapp_mode, _whatsapp_recipient, _comms_manager
         
         # Determine recipient
