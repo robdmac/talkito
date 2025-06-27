@@ -1300,13 +1300,24 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
         error_msg = "WhatsApp provider not found in communication manager"
         log_message("ERROR", f"send_whatsapp error: {error_msg}")
         return error_msg
-    result = whatsapp_provider.send_message(message, to_number)
+    
+    # Create a Message object for WhatsApp provider
+    from .comms import Message
+    whatsapp_message = Message(
+        content=message,
+        sender=to_number,
+        channel="whatsapp"
+    )
+    success = whatsapp_provider.send_message(whatsapp_message)
     
     # Also speak it if requested
     if with_tts and _tts_initialized:
         tts.queue_for_speech(message, None)
     
-    result_msg = f"WhatsApp message sent: '{message[:50]}...' to {result.get('to', to_number)}"
+    if success:
+        result_msg = f"WhatsApp message sent: '{message[:50]}...' to {to_number}"
+    else:
+        result_msg = f"Failed to send WhatsApp message to {to_number}"
     log_message("INFO", f"send_whatsapp returning: {result_msg}")
     return result_msg
 
@@ -1494,7 +1505,7 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         _whatsapp_mode = True
         
         # Send confirmation
-        await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", _whatsapp_recipient)
+        # await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
         
         result = f"WhatsApp mode activated! Sending messages to {_whatsapp_recipient}"
         log_message("INFO", f"start_whatsapp_mode returning: {result}")
@@ -1524,7 +1535,7 @@ async def stop_whatsapp_mode() -> str:
         
         # Send farewell message
         if _whatsapp_recipient:
-            await _send_whatsapp_internal("WhatsApp mode deactivated. Goodbye!", _whatsapp_recipient)
+            await _send_whatsapp_internal("WhatsApp mode deactivated. Goodbye!", to_number=_whatsapp_recipient)
         
         _whatsapp_mode = False
         _whatsapp_recipient = None
@@ -1610,7 +1621,7 @@ async def start_slack_mode(channel: str = None) -> str:
         _slack_mode = True
         
         # Send confirmation
-        await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", _slack_channel)
+        await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
         
         result = f"Slack mode activated! Sending messages to {_slack_channel}"
         log_message("INFO", f"start_slack_mode returning: {result}")
@@ -1640,7 +1651,7 @@ async def stop_slack_mode() -> str:
         
         # Send farewell message
         if _slack_channel:
-            await _send_slack_internal("Slack mode deactivated. Goodbye!", _slack_channel)
+            await _send_slack_internal("Slack mode deactivated. Goodbye!", channel=_slack_channel)
         
         _slack_mode = False
         _slack_channel = None
@@ -2078,9 +2089,13 @@ def main():
         # This line only executes after the server shuts down
         print("Talkito MCP SSE server has stopped.", file=sys.stderr)
     except (KeyboardInterrupt, asyncio.CancelledError):
+        # Don't print the traceback for expected interruptions
         print("\nTalkito MCP SSE server interrupted by user.", file=sys.stderr)
         log_message("INFO", "Server interrupted by user")
+        # Return without re-raising to avoid ugly stack traces
+        return
     except Exception as e:
+        # Only print error details for unexpected exceptions
         print(f"Talkito MCP SSE server error: {e}", file=sys.stderr)
         
         # If it's a port binding error, try the next port
