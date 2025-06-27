@@ -1085,6 +1085,8 @@ def tts_worker(engine: str):
             try:
                 from . import asr
                 if hasattr(asr, 'set_ignore_input'):
+                    # Small delay to ensure TTS audio has fully finished
+                    time.sleep(0.5)
                     asr.set_ignore_input(False)
                     log_message("DEBUG", "Resumed ASR after speaking")
             except Exception as e:
