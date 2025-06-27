@@ -99,8 +99,10 @@ Enter voice interaction mode and follow these patterns for EVERY interaction:
 1. **Acknowledge activation**: Confirm voice mode is active (both TTS and ASR are enabled)
 2. **Continuous voice loop** (ASR starts automatically with turn_on):
    - After EVERY response:
-     1. Call `talkito:speak_text` with your conclusion
-     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     1. Call `talkito:speak_text` with your conclusion, or with any steps requiring user input
+     2. **IMMEDIATELY call `talkito:start_notification_stream`** (duration: 30, exit_on_first: true)
+        - ⚠️ **THIS IS NOT OPTIONAL - You MUST do this to receive the next input**
+        - Without this call, you will be deaf to all user input
      3. When notification is received (stream will show the notification), immediately:
         - Process the voice command/message
         - Generate your response
@@ -109,13 +111,14 @@ Enter voice interaction mode and follow these patterns for EVERY interaction:
         - Process the next input
         - Generate your response
         - Return to step 1 (speak, then listen again)
-     5. If the notification stream tool expires with no notification then
+     5. If the notification stream expires with no notification then
         - Return to step 2 (call the notification stream again)
+        - ⚠️ **Never stop listening - always restart the stream**
    
 3. **Natural conversation flow**:
-   - Keep spoken responses concise (1-2 sentences max)
+   - Keep spoken responses concise (1-4 sentences max)
    - Speak naturally, as in a voice conversation
-   - Don't mention that you're calling tools
+   - Don't mention that you're calling tools unless you require the users input
    - Make it seamless and hands-free
    - The notification stream will show messages like "Voice: [text]" - treat these as user input
 
@@ -196,16 +199,19 @@ Enter text-to-speech mode and follow these patterns for EVERY interaction:
 Enter voice input mode and follow these patterns for EVERY interaction:
 
 1. **Acknowledge activation**: Confirm ASR is listening for voice input
+
 2. **Continuous listening loop**:
    - After EVERY response:
      1. Call `talkito:speak_text` with your conclusion (if TTS is enabled)
-     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     2. **IMMEDIATELY call `talkito:start_notification_stream`** (duration: 30, exit_on_first: true)
+        - ⚠️ **THIS STEP IS MANDATORY - Skip it and you'll miss all user input**
      3. When notification is received (stream will show "Voice: [text]"), immediately:
         - Process the voice command
         - Generate your response
         - Return to step 1 (speak if TTS enabled, then listen again)
      4. If the notification stream expires with no notification:
         - Return to step 2 (call the notification stream again)
+        - ⚠️ **Keep the stream active at all times**
 
 #### When `talkito:disable_asr` is called:
 - Stop listening for voice input
@@ -247,16 +253,19 @@ Enter voice input mode and follow these patterns for EVERY interaction:
 Enter WhatsApp mode and follow these patterns for EVERY interaction:
 
 1. **Acknowledge activation**: Confirm WhatsApp mode is active
+
 2. **Continuous messaging loop**:
    - After EVERY response:
-     1. Call `talkito:send_whatsapp` with your response
-     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     1. Call `talkito:send_whatsapp` with your response, or with any steps requiring user input
+     2. **IMMEDIATELY call `talkito:start_notification_stream`** (duration: 30, exit_on_first: true)
+        - ⚠️ **THIS IS ESSENTIAL - No stream = No incoming messages**
      3. When notification is received (any type: Voice/Slack/WhatsApp), immediately:
         - Process the incoming message
         - Generate your response
         - Return to step 1 (send to WhatsApp, then listen again)
      4. If the notification stream expires with no notification:
         - Return to step 2 (call the notification stream again)
+        - ⚠️ **Always maintain an active stream to receive messages**
 
 #### Features:
 - All your responses are automatically sent to WhatsApp
@@ -278,14 +287,16 @@ Enter Slack mode and follow these patterns for EVERY interaction:
 1. **Acknowledge activation**: Confirm Slack mode is active
 2. **Continuous messaging loop**:
    - After EVERY response:
-     1. Call `talkito:send_slack` with your response
-     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     1. Call `talkito:send_slack` with your response, or with any steps requiring user input
+     2. **IMMEDIATELY call `talkito:start_notification_stream`** (duration: 30, exit_on_first: true)
+        - ⚠️ **NEVER SKIP THIS - It's how you receive messages**     
      3. When notification is received (any type: Voice/Slack/WhatsApp), immediately:
         - Process the incoming message
         - Generate your response
         - Return to step 1 (send to Slack, then listen again)
      4. If the notification stream expires with no notification:
         - Return to step 2 (call the notification stream again)
+        - ⚠️ **Always maintain an active stream to receive messages**
 
 #### Features:
 - All your responses are automatically sent to a Slack channel
