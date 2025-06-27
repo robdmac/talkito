@@ -663,12 +663,14 @@ class CommunicationManager:
                 params = parse_qs(post_data)
                 from_number = params.get('From', [''])[0]
                 body = params.get('Body', [''])[0]
+                message_sid = params.get('MessageSid', [''])[0]  # Twilio's unique message ID
                 
                 # Create and handle the message
                 message = Message(
                     content=body,
                     sender=from_number,
-                    channel=channel
+                    channel=channel,
+                    message_id=message_sid if message_sid else f"{channel}_{from_number}_{int(time.time()*1000)}"
                 )
                 parent_self._handle_input_message(message)
                 
