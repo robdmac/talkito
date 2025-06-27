@@ -91,25 +91,36 @@ TALKITO_MD_CONTENT = """# Talkito Voice Interaction Instructions
 
 ## Voice Mode Control
 
+**IMPORTANT**: For phrases like "talkito on", "start voice mode", "enable voice" → ALWAYS call `talkito:turn_on`
+
 ### When `talkito:turn_on` is called:
 Enter voice interaction mode and follow these patterns for EVERY interaction:
 
-1. **Acknowledge activation**: Confirm voice mode is active
-2. **Continuous voice loop**:
-   - After EVERY response, automatically call `talkito:speak_text` with your key conclusion
-   - Immediately call `talkito:start_voice_input` without asking
-   - Wait 1 second, then silently call `talkito:get_messages`
-   - Process the received messages as the next user input
-   - Continue this cycle indefinitely while talkito is on
-
+1. **Acknowledge activation**: Confirm voice mode is active (both TTS and ASR are enabled)
+2. **Continuous voice loop** (ASR starts automatically with turn_on):
+   - After EVERY response:
+     1. Call `talkito:speak_text` with your conclusion
+     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     3. When notification is received (stream will show the notification), immediately:
+        - Process the voice command/message
+        - Generate your response
+        - Return to step 1 (speak, then listen again)
+     4. If the user cancels the notification stream tool call respond to their next input then
+        - Process the next input
+        - Generate your response
+        - Return to step 1 (speak, then listen again)
+     5. If the notification stream tool expires with no notification then
+        - Return to step 2 (call the notification stream again)
+   
 3. **Natural conversation flow**:
    - Keep spoken responses concise (1-2 sentences max)
    - Speak naturally, as in a voice conversation
    - Don't mention that you're calling tools
    - Make it seamless and hands-free
+   - The notification stream will show messages like "Voice: [text]" - treat these as user input
 
 ### When `talkito:turn_off` is called:
-1. Exit voice interaction mode immediately
+1. Exit voice interaction mode immediately (disables TTS, ASR, WhatsApp and Slack)
 2. Confirm deactivation with a final speech output
 3. Return to standard text-only interaction
 4. Stop all automatic speech and voice input
@@ -127,11 +138,86 @@ Enter voice interaction mode and follow these patterns for EVERY interaction:
 - "send to WhatsApp" → use `talkito:send_whatsapp` for the last response
 - "send to Slack" → use `talkito:send_slack` for the last response
 
+### Common User Requests:
+
+#### Voice Mode Activation:
+When users say these phrases, call `talkito:turn_on`:
+- "talkito on" → Call `talkito:turn_on` (NOT just enable TTS)
+- "start voice mode" → Call `talkito:turn_on`
+- "enable voice" → Call `talkito:turn_on`
+- "turn on talkito" → Call `talkito:turn_on`
+- Any variation of "start/enable/turn on" + "voice/talkito" → Call `talkito:turn_on`
+
+#### Communication Mode Activation:
+When users say these phrases, perform BOTH configuration and mode activation:
+- "enable slack on channel [X]" → Configure AND start Slack mode
+- "enable whatsapp for [number]" → Configure AND start WhatsApp mode
+- "start slack on [channel]" → Configure AND start Slack mode
+- "connect to slack channel [X]" → Configure AND start Slack mode
+- Any variation of "enable/start/connect" + "slack/whatsapp" → Configure AND start the mode
+
+### Message Input Sources:
+When in voice mode, messages from ALL sources are treated as user input:
+- **Voice dictation**: "Voice: [text]" - Process as spoken command
+- **Slack messages**: "Slack ([channel]): [text]" - Process as typed command  
+- **WhatsApp messages**: "WhatsApp: [text]" - Process as typed command
+
+All messages should be handled the same way - as direct input from the user requiring a response.
+
 ## Standard Mode (default or after turn_off)
 - Only use talkito tools when explicitly requested
 - No automatic speech output
 - No automatic voice input
 - Normal Claude text interaction
+
+## Modular Control
+You can independently control each component:
+
+### TTS Control:
+- `talkito:enable_tts` - Enable text-to-speech output
+- `talkito:disable_tts` - Disable text-to-speech output
+- `talkito:speak_text` - Speak specific text (works regardless of TTS enabled state)
+
+#### When `talkito:enable_tts` is called:
+Enter text-to-speech mode and follow these patterns for EVERY interaction:
+
+1. **Acknowledge activation**: Confirm TTS is enabled for speaking output
+2. **Continuous speaking**:
+   - After EVERY response:
+     1. Call `talkito:speak_text` with your conclusion
+
+#### When `talkito:disable_tts` is called:
+- Stop speaking the output
+- Confirm deactivation with a regular text response
+
+### ASR Control:
+
+#### When `talkito:enable_asr` is called:
+Enter voice input mode and follow these patterns for EVERY interaction:
+
+1. **Acknowledge activation**: Confirm ASR is listening for voice input
+2. **Continuous listening loop**:
+   - After EVERY response:
+     1. Call `talkito:speak_text` with your conclusion (if TTS is enabled)
+     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     3. When notification is received (stream will show "Voice: [text]"), immediately:
+        - Process the voice command
+        - Generate your response
+        - Return to step 1 (speak if TTS enabled, then listen again)
+     4. If the notification stream expires with no notification:
+        - Return to step 2 (call the notification stream again)
+
+#### When `talkito:disable_asr` is called:
+- Stop listening for voice input
+- Confirm deactivation
+
+### Quick Controls:
+- `talkito:turn_on` - Convenience method that enables BOTH TTS and ASR
+- `talkito:turn_off` - Master off switch that disables ALL modules (TTS, ASR, WhatsApp, Slack)
+
+### Status Checking:
+- `talkito:get_talkito_status` - Get complete status of all modules
+- Shows TTS, ASR, WhatsApp, and Slack status independently
 
 ## Communication Channels
 
@@ -139,33 +225,79 @@ Enter voice interaction mode and follow these patterns for EVERY interaction:
 - Use `talkito:send_whatsapp` to send messages via WhatsApp
 - Can combine with TTS: set `with_tts=true` to also speak the message
 - Configure with `talkito:configure_communication` or via TWILIO environment variables
+- **IMPORTANT**: When user asks to "enable whatsapp" or "start whatsapp", ALWAYS:
+  1. Configure if needed: `talkito:configure_communication`
+  2. Start WhatsApp Mode: `talkito:start_whatsapp_mode`
 
 ### Slack Integration:
 - Use `talkito:send_slack` to send messages to Slack channels
 - Can combine with TTS: set `with_tts=true` to also speak the message
 - Configure with `talkito:configure_communication` or via SLACK_BOT_TOKEN
+- **IMPORTANT**: When user asks to "enable slack" or "start slack", ALWAYS:
+  1. Configure if needed: `talkito:configure_communication`
+  2. Start Slack Mode: `talkito:start_slack_mode`
 
 ### Communication Status:
 - Check channel availability with `talkito:get_communication_status`
 - View configuration in resource: `talkito://communication/status`
 
 ### WhatsApp Mode:
-When WhatsApp mode is active:
+
+#### When `talkito:start_whatsapp_mode` is called:
+Enter WhatsApp mode and follow these patterns for EVERY interaction:
+
+1. **Acknowledge activation**: Confirm WhatsApp mode is active
+2. **Continuous messaging loop**:
+   - After EVERY response:
+     1. Call `talkito:send_whatsapp` with your response
+     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     3. When notification is received (any type: Voice/Slack/WhatsApp), immediately:
+        - Process the incoming message
+        - Generate your response
+        - Return to step 1 (send to WhatsApp, then listen again)
+     4. If the notification stream expires with no notification:
+        - Return to step 2 (call the notification stream again)
+
+#### Features:
 - All your responses are automatically sent to WhatsApp
 - Voice commands trigger immediate WhatsApp messages
 - Perfect for hands-free messaging while driving or cooking
-- Use `talkito:start_whatsapp_mode` to activate
-- Use `talkito:stop_whatsapp_mode` to deactivate
-- Check status with `talkito:get_whatsapp_mode_status`
+- Works independently of voice mode (can use with text-only interaction)
+- In voice mode: speak and send to WhatsApp simultaneously
+
+#### When `talkito:stop_whatsapp_mode` is called:
+- Stop sending messages to WhatsApp
+- Confirm deactivation
+- Note: `turn_off` will also stop WhatsApp mode
 
 ### Slack Mode:
-When Slack mode is active:
+
+#### When `talkito:start_slack_mode` is called:
+Enter Slack mode and follow these patterns for EVERY interaction:
+
+1. **Acknowledge activation**: Confirm Slack mode is active
+2. **Continuous messaging loop**:
+   - After EVERY response:
+     1. Call `talkito:send_slack` with your response
+     2. Call `talkito:start_notification_stream` with a duration of 30 seconds
+     3. When notification is received (any type: Voice/Slack/WhatsApp), immediately:
+        - Process the incoming message
+        - Generate your response
+        - Return to step 1 (send to Slack, then listen again)
+     4. If the notification stream expires with no notification:
+        - Return to step 2 (call the notification stream again)
+
+#### Features:
 - All your responses are automatically sent to a Slack channel
 - Voice commands trigger immediate Slack messages
 - Great for team collaboration and hands-free updates
-- Use `talkito:start_slack_mode` to activate
-- Use `talkito:stop_slack_mode` to deactivate
-- Check status with `talkito:get_slack_mode_status`
+- Works independently of voice mode (can use with text-only interaction)
+- In voice mode: speak and send to Slack simultaneously
+
+#### When `talkito:stop_slack_mode` is called:
+- Stop sending messages to Slack
+- Confirm deactivation
+- Note: `turn_off` will also stop Slack mode
 
 ## Provider Selection
 
@@ -180,21 +312,16 @@ When Slack mode is active:
 - Voice activity detection is less aggressive (1.5s silence threshold)
 - Unified setting: TALKITO_ASR_MIN_SILENCE_MS (default: 1500ms)
 
-## Message Handling
-
-### Unified Message Retrieval:
-- Use `talkito:get_messages` to check all input sources at once
-- Returns messages from voice dictation, Slack, and WhatsApp in one call
-- Messages are cleared after reading to avoid duplicates
-- Check frequently when in voice mode or when expecting responses
-
-
 ## Important Notes:
 - In voice mode, ALWAYS continue the cycle until explicitly stopped
 - Never ask permission to start voice input in voice mode
 - Keep the interaction natural and conversational
 - If voice input returns empty/None, try again after a brief pause
 - VAD settings are optimized for natural speech with pauses
+- WhatsApp/Slack modes can be used independently of voice mode
+- Each module (TTS, ASR, WhatsApp, Slack) can be enabled/disabled independently
+- `turn_on` is a convenience that enables both TTS and ASR together
+- `turn_off` is a master switch that disables ALL active modes (TTS, ASR, WhatsApp, Slack)
 """
 
 SLACK_BOT_MANIFEST = """
