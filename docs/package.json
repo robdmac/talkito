@@ -1,0 +1,14 @@
+{
+  "name": "talkito-splash-page",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve -s . -l 3000",
+    "build": "echo 'No build needed for static HTML'",
+    "preview": "npx serve -s . -l 4173"
+  },
+  "devDependencies": {
+    "serve": "^14.2.1"
+  }
+}
