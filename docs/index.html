@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TalkiTo - Voice & Text for Any App</title>
+    <meta name="description" content="TalkiTo lets you talk or text any application or webpage using any ASR or TTS provider. Perfect for AI agentic coders.">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="nav">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" x2="12" y1="19" y2="22"/>
+                    <line x1="8" x2="16" y1="22" y2="22"/>
+                </svg>
+                <span class="nav-title">TalkiTo</span>
+            </div>
+            <a href="https://github.com/robdmac/talkito" target="_blank" rel="noopener noreferrer" class="nav-github">
+                <svg class="github-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/>
+                    <path d="M9 18c-4.51 2-5-2-7-2"/>
+                </svg>
+                <span>GitHub</span>
+            </a>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero" id="hero">
+        <div class="hero-content">
+            <h1 class="hero-title">
+                <span class="hero-text-medium">What if </span>
+                <span class="rotating-text" id="rotatingText">bolt.new</span>
+                <span class="hero-text-medium"> could </span>
+                <span class="rotating-text-2" id="rotatingText2">talk</span>
+                <span class="hero-text-medium">?</span>
+            </h1>
+            <p class="hero-subtitle">
+                <span class="nav-title">TalkiTo</span> adds voice and remote communication features to any app using any ASR or TTS provider. Perfect for AI agentic coders.
+            </p>
+            <div class="hero-buttons">
+                <a href="https://github.com/robdmac/talkito" target="_blank" rel="noopener noreferrer" class="btn btn-primary">
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7,10 12,15 17,10"/>
+                        <line x1="12" x2="12" y1="15" y2="3"/>
+                    </svg>
+                    <span>Get Started - Free</span>
+                </a>
+                <div class="morphing-signup-container">
+                    <button class="btn btn-secondary morphing-btn" id="morphingBtn">
+                        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                            <polyline points="22,6 12,13 2,6"/>
+                        </svg>
+                        Get Premium Updates
+                    </button>
+                    <form class="morphing-form" id="morphingForm" action="https://formspree.io/f/YOUR_FORM_ID" method="POST">
+                        <div class="morphing-form-content">
+                            <input 
+                                type="email" 
+                                name="email" 
+                                placeholder="Enter your email address" 
+                                required 
+                                class="morphing-email-input"
+                                id="morphingEmailInput"
+                            >
+                            <button type="submit" class="morphing-submit-btn">
+                                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                                    <polyline points="22,6 12,13 2,6"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <p class="morphing-form-note">No spam, just premium updates and early access.</p>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Universal Voice Control</h2>
+                <p class="section-subtitle">Works with WhatsApp, Slack, and any web application</p>
+            </div>
+
+            <div class="features-grid">
+                <div class="feature-card">
+                    <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                        <line x1="12" x2="12" y1="19" y2="22"/>
+                        <line x1="8" x2="16" y1="22" y2="22"/>
+                    </svg>
+                    <h3 class="feature-title">8 ASR Providers</h3>
+                    <p class="feature-description">OpenAI, Deepgram, AssemblyAI, AWS, Azure, Google, and more</p>
+                </div>
+
+                <div class="feature-card">
+                    <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <h3 class="feature-title">6 TTS Providers</h3>
+                    <p class="feature-description">OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</p>
+                </div>
+
+                <div class="feature-card">
+                    <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+                        <path d="M2 12h20"/>
+                    </svg>
+                    <h3 class="feature-title">Any Website</h3>
+                    <p class="feature-description">Works with bolt.new, Claude, and any web application</p>
+                </div>
+
+                <div class="feature-card">
+                    <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13,2 3,14 12,14 11,22 21,10 12,10 13,2"/>
+                    </svg>
+                    <h3 class="feature-title">Your API Keys</h3>
+                    <p class="feature-description">Bring your own keys, full control and transparency</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Comparison Section -->
+    <section class="comparison">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Feature Comparison</h2>
+                <p class="section-subtitle">See how TalkiTo compares to alternatives</p>
+            </div>
+
+            <div class="comparison-table-wrapper">
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th class="feature-column">Feature</th>
+                            <th class="talkito-column">
+                                <div class="column-header">
+                                    <span class="column-title">TalkiTo</span>
+                                    <span class="column-subtitle">Self-Hosted</span>
+                                </div>
+                            </th>
+                            <th class="premium-column">
+                                <div class="column-header">
+                                    <span class="column-title">TalkiTo Premium</span>
+                                    <span class="column-subtitle">Coming Soon</span>
+                                </div>
+                            </th>
+                            <th class="competitor-column">
+                                <div class="column-header">
+                                    <span class="column-title">WhisperFlow</span>
+                                    <span class="column-subtitle">Competitor</span>
+                                </div>
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="feature-name">Speech Recognition</td>
+                            <td class="talkito-cell">
+                                <span class="feature-value">8 Options</span>
+                                <span class="feature-detail">Houndify, Whisper, Deepgram, AssemblyAI, AWS, Azure, Google, Whisper</span>
+                            </td>
+                            <td class="premium-cell">
+                                <span class="feature-value">8 Options</span>
+                                <span class="feature-detail">Houndify, Whisper, Deepgram, AssemblyAI, AWS, Azure, Google, Whisper</span>
+                            </td>
+                            <td class="competitor-cell">
+                                <span class="feature-value">1 Option</span>
+                                <span class="feature-detail">Whisper</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Text-to-Speech</td>
+                            <td class="talkito-cell">
+                                <span class="feature-value">6 Options</span>
+                                <span class="feature-detail">OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
+                            </td>
+                            <td class="premium-cell">
+                                <span class="feature-value">6 Options</span>
+                                <span class="feature-detail">OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">WhatsApp Support</td>
+                            <td class="talkito-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Slack Support</td>
+                            <td class="talkito-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Any Application</td>
+                            <td class="talkito-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Any Website</td>
+                            <td class="talkito-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">App</td>
+                            <td class="talkito-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <span class="price-value">coming soon</span>
+                            </td>
+                            <td class="competitor-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Hosted</td>
+                            <td class="talkito-cell">
+                                <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                            </td>
+                            <td class="premium-cell">
+                                <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20,6 9,17 4,12"/>
+                                </svg>
+                            </td>
+                            <td class="competitor-cell">
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">Price</td>
+                            <td class="talkito-cell">
+                                <span class="price-value">Free</span>
+                            </td>
+                            <td class="premium-cell">
+                                <span class="price-value">TBD</span>
+                            </td>
+                            <td class="competitor-cell">
+                                <span class="price-value">$12/month</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- CTA Section -->
+    <section class="cta">
+        <div class="container">
+            <h2 class="cta-title">Ready to Give Your Code a Voice?</h2>
+            <a href="https://github.com/robdmac/talkito" target="_blank" rel="noopener noreferrer" class="btn btn-primary">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/>
+                    <path d="M9 18c-4.51 2-5-2-7-2"/>
+                </svg>
+                <span>View on GitHub</span>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M7 17l9.2-9.2M17 17V7H7"/>
+                </svg>
+            </a>
+        </div>
+    </section>
+
+    <script src="script.js"></script>
+</body>
+</html>
