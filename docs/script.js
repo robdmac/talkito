@@ -201,16 +201,6 @@ document.addEventListener('DOMContentLoaded', function() {
             hero.style.transform = `translateY(${rate}px)`;
         }
         
-        // Navigation background opacity
-        const nav = document.querySelector('.nav');
-        if (nav) {
-            if (scrolled > 50) {
-                nav.classList.add('scrolled');
-            } else {
-                nav.classList.remove('scrolled');
-            }
-        }
-        
         ticking = false;
     }
     
