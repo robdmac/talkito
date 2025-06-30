@@ -200,6 +200,76 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
+    // Tab functionality for Quick Start Guide
+    const tabButtons = document.querySelectorAll('.tab-button');
+    const tabPanels = document.querySelectorAll('.tab-panel');
+
+    tabButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const targetTab = button.getAttribute('data-tab');
+            
+            // Remove active class from all buttons and panels
+            tabButtons.forEach(btn => btn.classList.remove('active'));
+            tabPanels.forEach(panel => panel.classList.remove('active'));
+            
+            // Add active class to clicked button and corresponding panel
+            button.classList.add('active');
+            document.getElementById(targetTab).classList.add('active');
+        });
+    });
+
+    // Copy to clipboard functionality
+    const copyButtons = document.querySelectorAll('.copy-btn');
+    
+    copyButtons.forEach(button => {
+        button.addEventListener('click', async () => {
+            const textToCopy = button.getAttribute('data-copy');
+            
+            try {
+                await navigator.clipboard.writeText(textToCopy);
+                
+                // Visual feedback
+                const originalHTML = button.innerHTML;
+                button.innerHTML = `
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20,6 9,17 4,12"/>
+                    </svg>
+                `;
+                button.style.background = 'rgba(197, 216, 109, 0.3)';
+                button.style.borderColor = 'var(--mindaro)';
+                
+                setTimeout(() => {
+                    button.innerHTML = originalHTML;
+                    button.style.background = '';
+                    button.style.borderColor = '';
+                }, 2000);
+                
+            } catch (err) {
+                console.error('Failed to copy text: ', err);
+                
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = textToCopy;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                
+                // Visual feedback for fallback
+                const originalHTML = button.innerHTML;
+                button.innerHTML = `
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20,6 9,17 4,12"/>
+                    </svg>
+                `;
+                
+                setTimeout(() => {
+                    button.innerHTML = originalHTML;
+                }, 2000);
+            }
+        });
+    });
+
     // Smooth scrolling for any internal links (if added later)
     document.querySelectorAll('a[href^="#"]').forEach(anchor => {
         anchor.addEventListener('click', function (e) {
@@ -227,7 +297,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 100);
     }
 
-    // Add scroll-triggered animations for feature cards
+    // Add scroll-triggered animations for step cards
     const observerOptions = {
         threshold: 0.1,
         rootMargin: '0px 0px -50px 0px'
@@ -242,8 +312,8 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }, observerOptions);
 
-    // Observe feature cards and pricing cards
-    document.querySelectorAll('.feature-card, .pricing-card').forEach(card => {
+    // Observe step cards and other animated elements
+    document.querySelectorAll('.step, .feature-card').forEach(card => {
         card.style.opacity = '0';
         card.style.transform = 'translateY(30px)';
         card.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
@@ -287,9 +357,9 @@ document.addEventListener('DOMContentLoaded', function() {
         scrollProgress.style.width = scrollPercent + '%';
     });
 
-    // Add staggered animation to feature cards
-    const featureCards = document.querySelectorAll('.feature-card');
-    featureCards.forEach((card, index) => {
+    // Add staggered animation to step cards
+    const stepCards = document.querySelectorAll('.step');
+    stepCards.forEach((card, index) => {
         card.style.animationDelay = `${index * 0.1}s`;
     });
 
@@ -305,7 +375,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // Add ripple effect to buttons
-    document.querySelectorAll('.btn').forEach(button => {
+    document.querySelectorAll('.btn, .tab-button').forEach(button => {
         button.addEventListener('click', function(e) {
             const ripple = document.createElement('span');
             const rect = this.getBoundingClientRect();
@@ -325,4 +395,56 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 600);
         });
     });
+
+    // Keyboard navigation for tabs
+    document.addEventListener('keydown', function(e) {
+        if (e.target.classList.contains('tab-button')) {
+            const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+            const currentIndex = tabButtons.indexOf(e.target);
+            
+            if (e.key === 'ArrowLeft' && currentIndex > 0) {
+                e.preventDefault();
+                tabButtons[currentIndex - 1].focus();
+                tabButtons[currentIndex - 1].click();
+            } else if (e.key === 'ArrowRight' && currentIndex < tabButtons.length - 1) {
+                e.preventDefault();
+                tabButtons[currentIndex + 1].focus();
+                tabButtons[currentIndex + 1].click();
+            }
+        }
+    });
 });
+
+// Add CSS for ripple effect
+const style = document.createElement('style');
+style.textContent = `
+    .ripple {
+        position: absolute;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.3);
+        transform: scale(0);
+        animation: ripple 0.6s linear;
+        pointer-events: none;
+    }
+    
+    @keyframes ripple {
+        to {
+            transform: scale(4);
+            opacity: 0;
+        }
+    }
+    
+    .animate-spin {
+        animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+        from {
+            transform: rotate(0deg);
+        }
+        to {
+            transform: rotate(360deg);
+        }
+    }
+`;
+document.head.appendChild(style);
