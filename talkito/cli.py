@@ -325,7 +325,7 @@ async def run_claude_with_sse(args) -> int:
     import subprocess
     import time
 
-    from .mcp_sse import find_available_port
+    from .mcp import find_available_port
     
     # Use specified port or find an available one
     if args.port:
@@ -577,24 +577,24 @@ def run_mcp_server():
 
 
 def run_mcp_sse_server():
-    """Run the MCP SSE server"""
+    """Run the MCP server with SSE transport"""
+    import sys
     try:
-        from .mcp_sse import main as mcp_sse_main
-        # Pass through the original sys.argv to the MCP SSE server
-        # but remove the --mcp-sse-server argument itself
-        import sys
+        from .mcp import main as mcp_main
+        # Pass through the original sys.argv to the MCP server
+        # but remove the --mcp-sse-server argument and add --transport sse
         original_argv = sys.argv[:]
-        sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-sse-server']
-        print(f"[DEBUG] Running MCP SSE server with args: {sys.argv}", file=sys.stderr)
-        mcp_sse_main()
+        sys.argv = [sys.argv[0]] + ['--transport', 'sse'] + [arg for arg in sys.argv[1:] if arg != '--mcp-sse-server']
+        print(f"[DEBUG] Running MCP server with SSE transport, args: {sys.argv}", file=sys.stderr)
+        mcp_main()
     except ImportError as e:
-        print(f"Error: Failed to import MCP SSE server: {e}", file=sys.stderr)
+        print(f"Error: Failed to import MCP server: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
         print("Make sure the MCP SDK is installed: pip install mcp", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"Error running MCP SSE server: {e}", file=sys.stderr)
+        print(f"Error running MCP server: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
         sys.exit(1)
