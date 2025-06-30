@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TalkiTo - Voice & Text for Any App</title>
     <meta name="description" content="TalkiTo lets you talk or text any application or webpage using any ASR or TTS provider. Perfect for AI agentic coders.">
+    
+    <!-- Favicons and Icons -->
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="android-chrome-192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="android-chrome-512x512.png">
+    <link rel="manifest" href="site.webmanifest">
+    
+    <!-- Theme and App Meta -->
+    <meta name="theme-color" content="#8783d1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="TalkiTo">
+    
     <link rel="stylesheet" href="styles.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,6 +30,32 @@
     <a href="https://bolt.new" target="_blank" rel="noopener noreferrer" class="bolt-badge" title="Built with bolt.new">
         <img src="white_circle_360x360.png" alt="Built with bolt.new" class="bolt-badge-image">
     </a>
+
+    <!-- Thank You Modal -->
+    <div class="thank-you-modal" id="thankYouModal">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <svg class="success-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22,4 12,14.01 9,11.01"/>
+                </svg>
+                <h2 class="modal-title">Thanks for Registering!</h2>
+            </div>
+            <div class="modal-body">
+                <p class="modal-message">You're all set! We'll notify you as soon as TalkiTo Premium launches with hosted features and enhanced capabilities.</p>
+                <p class="modal-submessage">Keep an eye on your inbox for exclusive updates and early access opportunities.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-close-btn" id="modalCloseBtn">
+                    <span>Got it!</span>
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20,6 9,17 4,12"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
 
     <!-- Hero Section -->
     <section class="hero" id="hero">
