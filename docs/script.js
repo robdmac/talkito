@@ -73,6 +73,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const morphingBtn = document.getElementById('morphingBtn');
     const morphingForm = document.getElementById('morphingForm');
     const morphingEmailInput = document.getElementById('morphingEmailInput');
+    const thankYouModal = document.getElementById('thankYouModal');
+    const modalCloseBtn = document.getElementById('modalCloseBtn');
 
     morphingBtn.addEventListener('click', function(e) {
         e.preventDefault();
@@ -95,10 +97,13 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 0); // Very short delay to ensure content is hidden first
     });
 
-    // Handle form submission
+    // Handle form submission with custom popup
     morphingForm.addEventListener('submit', function(e) {
+        e.preventDefault(); // Prevent default form submission and redirect
+        
         const submitBtn = this.querySelector('.morphing-submit-btn');
         const originalHTML = submitBtn.innerHTML;
+        const formData = new FormData(this);
         
         // Show loading state
         submitBtn.innerHTML = `
@@ -108,11 +113,68 @@ document.addEventListener('DOMContentLoaded', function() {
         `;
         submitBtn.disabled = true;
         
-        // Reset after form submission (Formspree will handle the redirect)
-        setTimeout(() => {
+        // Submit to Formspree using fetch
+        fetch(this.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'Accept': 'application/json'
+            }
+        }).then(response => {
+            if (response.ok) {
+                // Success - show thank you modal
+                showThankYouModal();
+                
+                // Reset form
+                this.reset();
+                
+                // Hide the form and show button again
+                morphingForm.classList.remove('active');
+                setTimeout(() => {
+                    morphingBtn.classList.remove('morphing');
+                    morphingBtn.classList.remove('hide-content');
+                }, 200);
+            } else {
+                // Error handling
+                console.error('Form submission error');
+                alert('There was an error submitting your email. Please try again.');
+            }
+        }).catch(error => {
+            console.error('Form submission error:', error);
+            alert('There was an error submitting your email. Please try again.');
+        }).finally(() => {
+            // Reset button state
             submitBtn.innerHTML = originalHTML;
             submitBtn.disabled = false;
-        }, 2000);
+        });
+    });
+
+    // Thank you modal functions
+    function showThankYouModal() {
+        thankYouModal.classList.add('show');
+        document.body.style.overflow = 'hidden'; // Prevent background scrolling
+    }
+
+    function hideThankYouModal() {
+        thankYouModal.classList.remove('show');
+        document.body.style.overflow = ''; // Restore scrolling
+    }
+
+    // Modal close button
+    modalCloseBtn.addEventListener('click', hideThankYouModal);
+
+    // Close modal when clicking backdrop
+    thankYouModal.addEventListener('click', function(e) {
+        if (e.target === this || e.target.classList.contains('modal-backdrop')) {
+            hideThankYouModal();
+        }
+    });
+
+    // Close modal with Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && thankYouModal.classList.contains('show')) {
+            hideThankYouModal();
+        }
     });
 
     // Click outside to close form
