@@ -26,70 +26,64 @@ body {
     padding: 0 1.5rem;
 }
 
-/* Navigation */
-.nav {
+/* Built with bolt.new Badge */
+.bolt-badge {
     position: fixed;
-    top: 0;
-    width: 100%;
-    z-index: 1000;
-    background: rgba(2, 2, 2, 0.95);
-    backdrop-filter: blur(20px);
-    border-bottom: 1px solid rgba(135, 131, 209, 0.3);
+    top: 1rem;
+    right: 1rem;
+    z-index: 1002;
+    display: block;
+    transition: all 0.3s ease;
+    opacity: 0.8;
+}
+
+.bolt-badge:hover {
+    opacity: 1;
+    transform: scale(1.05);
+}
+
+.bolt-badge-image {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    box-shadow: 0 4px 20px rgba(135, 131, 209, 0.3);
     transition: all 0.3s ease;
 }
 
-.nav.scrolled {
-    background: rgba(2, 2, 2, 0.98);
+.bolt-badge:hover .bolt-badge-image {
+    box-shadow: 0 6px 25px rgba(135, 131, 209, 0.5);
 }
 
-.nav-container {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 1.5rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    height: 4rem;
+/* Responsive badge sizing */
+@media (max-width: 768px) {
+    .bolt-badge {
+        top: 0.75rem;
+        right: 0.75rem;
+    }
+    
+    .bolt-badge-image {
+        width: 50px;
+        height: 50px;
+    }
 }
 
-.nav-brand {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+@media (max-width: 480px) {
+    .bolt-badge {
+        top: 0.5rem;
+        right: 0.5rem;
+    }
+    
+    .bolt-badge-image {
+        width: 45px;
+        height: 45px;
+    }
 }
 
-.nav-icon {
-    width: 1.75rem;
-    height: 1.75rem;
-    color: var(--tropical-indigo);
-}
-
+/* Brand title styling for hero subtitle */
 .nav-title {
     font-size: 1.4em;
     font-weight: bold;
     color: var(--tropical-indigo);
-}
-
-.nav-github {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: linear-gradient(135deg, var(--tropical-indigo), rgba(135, 131, 209, 0.8));
-    color: var(--lavender-web);
-    padding: 0.5rem 1rem;
-    border-radius: 0.75rem;
-    text-decoration: none;
-    transition: all 0.3s ease;
-}
-
-.nav-github:hover {
-    background: linear-gradient(135deg, var(--dark-cyan), var(--tropical-indigo));
-    transform: translateY(-2px);
-}
-
-.github-icon {
-    width: 1rem;
-    height: 1rem;
 }
 
 /* Hero Section */
@@ -182,6 +176,8 @@ body {
     flex-direction: column;
     gap: 1rem;
     align-items: center;
+    max-width: 600px;
+    margin: 0 auto;
 }
 
 @media (min-width: 640px) {
@@ -194,6 +190,7 @@ body {
 .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
     padding: 1rem 2rem;
     border-radius: 0.75rem;
@@ -205,6 +202,9 @@ body {
     transition: all 0.3s ease;
     position: relative;
     overflow: hidden;
+    width: 280px; /* Fixed width for both buttons */
+    height: 3.5rem; /* Fixed height for consistency */
+    white-space: nowrap;
 }
 
 .btn::before {
@@ -256,8 +256,7 @@ body {
 /* Morphing Signup */
 .morphing-signup-container {
     position: relative;
-    width: 100%;
-    max-width: 400px;
+    width: 280px; /* Same width as buttons */
     height: 3.5rem; /* Fixed height to prevent jumping */
     display: flex;
     align-items: center;
@@ -710,6 +709,33 @@ body {
     .btn {
         padding: 0.875rem 1.5rem;
         font-size: 1rem;
+        width: 100%; /* Full width on mobile */
+        max-width: 320px; /* But with a reasonable max */
+    }
+
+    .morphing-signup-container {
+        width: 100%;
+        max-width: 320px;
+        height: 4rem; /* Slightly taller on mobile */
+    }
+
+    .morphing-form-content {
+        height: 4rem;
+    }
+
+    .morphing-email-input {
+        font-size: 1rem;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .morphing-form-content {
+        padding: 0.375rem;
+    }
+
+    .morphing-submit-btn {
+        padding: 0.625rem;
+        min-width: 2.5rem;
+        height: 3rem;
     }
 
     .comparison-table th,
@@ -740,29 +766,6 @@ body {
 
     .feature-card {
         padding: 1.5rem;
-    }
-
-    .morphing-signup-container {
-        height: 4rem; /* Slightly taller on mobile */
-    }
-
-    .morphing-form-content {
-        height: 4rem;
-    }
-
-    .morphing-email-input {
-        font-size: 1rem;
-        padding: 0.5rem 0.75rem;
-    }
-
-    .morphing-form-content {
-        padding: 0.375rem;
-    }
-
-    .morphing-submit-btn {
-        padding: 0.625rem;
-        min-width: 2.5rem;
-        height: 3rem;
     }
 }
 
@@ -826,7 +829,6 @@ html {
 
 /* Focus styles for accessibility */
 .btn:focus,
-.nav-github:focus,
 .morphing-email-input:focus {
     outline: 2px solid var(--tropical-indigo);
     outline-offset: 2px;
