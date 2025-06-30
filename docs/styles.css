@@ -43,8 +43,10 @@ body {
 }
 
 .bolt-badge-image {
-    width: 60px;
-    height: 60px;
+    width: 50px;
+    height: 50px;
+    max-width: 50px;
+    max-height: 50px;
     border-radius: 50%;
     box-shadow: 0 4px 20px rgba(135, 131, 209, 0.3);
     transition: all 0.3s ease;
@@ -62,8 +64,10 @@ body {
     }
     
     .bolt-badge-image {
-        width: 50px;
-        height: 50px;
+        width: 45px;
+        height: 45px;
+        max-width: 45px;
+        max-height: 45px;
     }
 }
 
@@ -74,9 +78,144 @@ body {
     }
     
     .bolt-badge-image {
-        width: 45px;
-        height: 45px;
+        width: 40px;
+        height: 40px;
+        max-width: 40px;
+        max-height: 40px;
     }
+}
+
+/* Thank You Modal */
+.thank-you-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.thank-you-modal.show {
+    opacity: 1;
+    visibility: visible;
+}
+
+.modal-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(2, 2, 2, 0.85);
+    backdrop-filter: blur(20px);
+}
+
+.modal-content {
+    position: relative;
+    background: linear-gradient(135deg, rgba(135, 131, 209, 0.15) 0%, rgba(135, 131, 209, 0.08) 100%);
+    border: 1px solid rgba(135, 131, 209, 0.3);
+    border-radius: 1.5rem;
+    padding: 3rem 2.5rem;
+    max-width: 500px;
+    width: 90%;
+    text-align: center;
+    backdrop-filter: blur(30px);
+    box-shadow: 0 25px 50px rgba(135, 131, 209, 0.2);
+    transform: scale(0.9) translateY(20px);
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.thank-you-modal.show .modal-content {
+    transform: scale(1) translateY(0);
+}
+
+.modal-header {
+    margin-bottom: 2rem;
+}
+
+.success-icon {
+    width: 4rem;
+    height: 4rem;
+    color: var(--mindaro);
+    margin-bottom: 1.5rem;
+    animation: successPulse 2s ease-in-out infinite;
+}
+
+@keyframes successPulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+.modal-title {
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--lavender-web);
+    margin-bottom: 0;
+}
+
+.modal-body {
+    margin-bottom: 2.5rem;
+}
+
+.modal-message {
+    font-size: 1.125rem;
+    color: rgba(238, 238, 255, 0.9);
+    margin-bottom: 1rem;
+    line-height: 1.6;
+}
+
+.modal-submessage {
+    font-size: 1rem;
+    color: rgba(238, 238, 255, 0.7);
+    line-height: 1.5;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: center;
+}
+
+.modal-close-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    background: linear-gradient(135deg, var(--mindaro) 0%, var(--dark-cyan) 100%);
+    color: var(--black);
+    border: none;
+    border-radius: 0.75rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.modal-close-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s;
+}
+
+.modal-close-btn:hover::before {
+    left: 100%;
+}
+
+.modal-close-btn:hover {
+    background: linear-gradient(135deg, var(--dark-cyan) 0%, var(--mindaro) 100%);
+    transform: translateY(-2px);
 }
 
 /* Brand title styling for hero subtitle */
@@ -738,6 +877,19 @@ body {
         height: 3rem;
     }
 
+    .modal-content {
+        padding: 2rem 1.5rem;
+        margin: 1rem;
+    }
+
+    .modal-title {
+        font-size: 1.5rem;
+    }
+
+    .modal-message {
+        font-size: 1rem;
+    }
+
     .comparison-table th,
     .comparison-table td {
         padding: 1rem 0.75rem;
@@ -814,6 +966,24 @@ body {
         height: auto;
         min-height: 2rem;
     }
+
+    .modal-content {
+        padding: 1.5rem 1rem;
+    }
+
+    .success-icon {
+        width: 3rem;
+        height: 3rem;
+    }
+
+    .modal-title {
+        font-size: 1.25rem;
+    }
+
+    .modal-close-btn {
+        padding: 0.875rem 1.5rem;
+        font-size: 1rem;
+    }
 }
 
 /* Smooth scrolling */
@@ -829,7 +999,8 @@ html {
 
 /* Focus styles for accessibility */
 .btn:focus,
-.morphing-email-input:focus {
+.morphing-email-input:focus,
+.modal-close-btn:focus {
     outline: 2px solid var(--tropical-indigo);
     outline-offset: 2px;
 }
