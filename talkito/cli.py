@@ -361,6 +361,12 @@ async def run_claude_with_sse(args) -> int:
         # Add log file if specified
         if args.log_file:
             sse_cmd.extend(["--log-file", args.log_file + ".sse"])
+        
+        # Add TTS/ASR provider arguments if specified
+        if args.tts_provider:
+            sse_cmd.extend(["--tts-provider", args.tts_provider])
+        if args.asr_provider:
+            sse_cmd.extend(["--asr-provider", args.asr_provider])
 
         sse_process = subprocess.Popen(
             sse_cmd,
