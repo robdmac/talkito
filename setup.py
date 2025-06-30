@@ -58,7 +58,7 @@ extras_require = {
     "slack": ["slack-sdk>=3.19.0"],
     "comms": ["twilio>=8.0.0", "flask>=2.0.0", "python-dotenv>=0.19.0", "waitress>=2.0.0"],
     # MCP server
-    "mcp": ["mcp>=0.1.0"],
+    "mcp": ["fastmcp"],
     # Utilities
     "env": ["python-dotenv>=0.19.0"],
     # All optional dependencies
@@ -77,7 +77,6 @@ extras_require = {
         "slack-sdk>=3.19.0",
         "flask>=2.0.0",
         "waitress>=2.0.0",
-        "mcp>=0.1.0",
         "python-dotenv>=0.19.0",
         "fastmcp"
     ],
