@@ -93,17 +93,20 @@ body {
     width: 100%;
     height: 100%;
     z-index: 2000;
-    display: flex;
+    display: none; /* Changed from flex to none for Safari */
     align-items: center;
     justify-content: center;
     opacity: 0;
     visibility: hidden;
     transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none; /* Added to prevent interaction when hidden */
 }
 
 .thank-you-modal.show {
+    display: flex; /* Show as flex when active */
     opacity: 1;
     visibility: visible;
+    pointer-events: auto; /* Allow interaction when shown */
 }
 
 .modal-backdrop {
@@ -142,8 +145,14 @@ body {
 .success-icon {
     width: 4rem;
     height: 4rem;
+    max-width: 4rem;
+    max-height: 4rem;
+    min-width: 4rem;
+    min-height: 4rem;
     color: var(--mindaro);
-    margin-bottom: 1.5rem;
+    margin: 0 auto 1.5rem auto;
+    display: block;
+    flex-shrink: 0;
     animation: successPulse 2s ease-in-out infinite;
 }
 
@@ -890,6 +899,15 @@ body {
         font-size: 1rem;
     }
 
+    .success-icon {
+        width: 3rem;
+        height: 3rem;
+        max-width: 3rem;
+        max-height: 3rem;
+        min-width: 3rem;
+        min-height: 3rem;
+    }
+
     .comparison-table th,
     .comparison-table td {
         padding: 1rem 0.75rem;
@@ -972,8 +990,12 @@ body {
     }
 
     .success-icon {
-        width: 3rem;
-        height: 3rem;
+        width: 2.5rem;
+        height: 2.5rem;
+        max-width: 2.5rem;
+        max-height: 2.5rem;
+        min-width: 2.5rem;
+        min-height: 2.5rem;
     }
 
     .modal-title {
