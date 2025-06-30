@@ -2296,9 +2296,15 @@ def main():
                         help='Transport type: stdio (default) or sse')
     parser.add_argument('--no-http-api', action='store_true', 
                         help='Disable HTTP API server (SSE transport only)')
+    parser.add_argument('--tts-provider', type=str, 
+                        choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
+                        help='TTS provider to use')
+    parser.add_argument('--asr-provider', type=str,
+                        choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing'],
+                        help='ASR provider to use')
     args = parser.parse_args()
     
-    print(f"[DEBUG] Parsed args: log_file={args.log_file}, port={args.port}, transport={args.transport}", file=sys.stderr)
+    print(f"[DEBUG] Parsed args: log_file={args.log_file}, port={args.port}, transport={args.transport}, tts_provider={args.tts_provider}, asr_provider={args.asr_provider}", file=sys.stderr)
     
     # Set up logging if log file specified
     global _log_file_path, _cors_enabled
@@ -2306,6 +2312,15 @@ def main():
     # CORS is always enabled for SSE transport
     if args.transport == 'sse':
         _cors_enabled = True
+    
+    # Set TTS/ASR provider preferences from command line arguments
+    if args.tts_provider:
+        os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+        print(f"[DEBUG] Set TTS provider preference to: {args.tts_provider}", file=sys.stderr)
+    
+    if args.asr_provider:
+        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
+        print(f"[DEBUG] Set ASR provider preference to: {args.asr_provider}", file=sys.stderr)
     
     if args.log_file:
         _log_file_path = args.log_file
