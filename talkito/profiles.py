@@ -221,7 +221,7 @@ class Profile:
 CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
-    continuation_prefix=r'^  [A-Z][a-z]',
+    continuation_prefix=r'^  [a-zA-Z]',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
@@ -230,6 +230,7 @@ CLAUDE_PROFILE = Profile(
     exception_patterns=[
         (0, r'│\s*✻ Welcome'),                # ✻ Welcome to Claude Code
         (1, r'\s*✻'),                         # Interim thinking
+        (0, r'│ Do'),
     ],
     skip_patterns=[
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
@@ -268,7 +269,7 @@ CLAUDE_PROFILE = Profile(
         (4, r'Error File content'),           # Skip file size error messages
         (4, r'^\s*>\s*'),                     # Claude previous input
         (4, r'^[|│]\s*>\s*'),                 # Claude previous input
-        (4, r'(╭|╰)'),                        # Box drawing characters
+        (4, r'(╭|╮|╯|╰)'),                   # Box drawing characters (all corners)
         (4, r'\? for shortcuts'),
         (4, r'\(node:'),
         (4, r'^\['),
