@@ -192,7 +192,7 @@ class ASRState:
     last_prompt_position: int = 0
     prompt_detected: bool = False
     refresh_spaces_added: int = 0
-    partial_enabled: bool = False
+    partial_enabled: bool = True
     question_mode: bool = False
 
 # State instances will be created by TalkitoCore
@@ -1235,10 +1235,6 @@ def get_visual_length(text):
 
 def insert_partial_transcript(data_str, asr_state, active_profile):
     """Insert the partial transcript into the terminal output while preserving formatting. Returns modified data_str."""
-    # if not active_profile or not (active_profile.input_end and active_profile.input_end in data_str):
-    #     log_message("DEBUG", "End marker not in this chunk, waiting...")
-    #     return data_str
-
     # Find the input start position
     start_idx = data_str.find(active_profile.input_start) if active_profile and active_profile.input_start else -1
     if start_idx != -1:
@@ -1260,7 +1256,6 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
             before_pipe = search_area[check_start:right_border_pos]
 
             # Find all ANSI escape sequences
-            import re
             ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
 
             if ansi_matches:
@@ -1290,10 +1285,8 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
                 end_idx = line_end
     else:
         start_idx = 0  # Fallback if start not in this chunk
-        end_idx = data_str.find(active_profile.input_end) if active_profile and active_profile.input_end else -1
 
-    log_message("DEBUG", f"Found input area from {start_idx} to {end_idx}")
-    log_message("DEBUG", f"Content after input area: {repr(data_str[end_idx:min(end_idx + 30, len(data_str))])}")
+    log_message("DEBUG", f"Found input area from {start_idx}")
 
     # Extract the input area
     input_area = data_str[start_idx:end_idx]
@@ -1820,7 +1813,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         output_data = output_data[:e.start]
                         data_str = output_data.decode('utf-8')
 
-                    if not in_input and active_profile.input_start and active_profile.input_end:
+                    if not in_input and active_profile.input_start:
                         if active_profile.input_start and active_profile.input_start in data_str:
                             start_idx = data_str.find(active_profile.input_start) + len(active_profile.input_start)
                             log_message("DEBUG", f"Found input start at position {start_idx}")
@@ -1831,11 +1824,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         log_message("DEBUG", f"partial_needs_display {asr_state.current_partial}")
                         data_str = insert_partial_transcript(data_str, asr_state, active_profile)
 
-                    if in_input and active_profile.input_start and active_profile.input_end:
-                        if active_profile.input_end and active_profile.input_end in data_str:
-                            end_idx = data_str.find(active_profile.input_end)
-                            log_message("DEBUG", "Found input end at position", end_idx)
-                            in_input = False
+                    in_input = False
 
                     output_data = data_str.encode('utf-8')
                     output_data = output_data.replace(SPACE_THEN_BACK, b'')

@@ -320,6 +320,49 @@ def print_configuration_status():
     print(f"Configuration: {' | '.join(status_parts)} (configure with .talkito.env)")
 
 
+async def run_claude_wrapper(args) -> int:
+    cmd = [args.command] + args.arguments
+
+    # Build kwargs for run_with_talkito
+    kwargs = {
+        'verbosity': args.verbose,
+        'asr_mode': args.asr_mode,
+        'record_file': args.record,
+    }
+
+    # Add other configurations...
+    if args.log_file:
+        kwargs['log_file'] = args.log_file
+
+    if args.profile:
+        kwargs['profile'] = args.profile
+    else:
+        kwargs['profile'] = 'claude'
+
+    # Add TTS config
+    tts_config = build_tts_config(args)
+    if tts_config:
+        kwargs['tts_config'] = tts_config
+
+    # Add ASR config
+    if asr:
+        asr_config = build_asr_config(args)
+        if asr_config:
+            kwargs['asr_config'] = asr_config
+
+    # Add communications config
+    comms_config = build_comms_config(args)
+    if comms_config:
+        kwargs['comms_config'] = comms_config
+
+    # Handle TTS disable
+    if args.disable_tts:
+        tts.disable_tts = True
+
+    # Use the high-level API from core
+    from .core import run_with_talkito
+    return await run_with_talkito(cmd, **kwargs)
+
 async def run_claude_with_sse(args) -> int:
     """Run Claude with SSE MCP server support with fallback mechanisms"""
     import subprocess
@@ -426,47 +469,7 @@ async def run_claude_with_sse(args) -> int:
             
             # Step F: Fall back to traditional talkito wrapper
             print("Falling back to traditional talkito wrapper...")
-            cmd = [args.command] + args.arguments
-            
-            # Build kwargs for run_with_talkito
-            kwargs = {
-                'verbosity': args.verbose,
-                'asr_mode': args.asr_mode,
-                'record_file': args.record,
-            }
-            
-            # Add other configurations...
-            if args.log_file:
-                kwargs['log_file'] = args.log_file
-            
-            if args.profile:
-                kwargs['profile'] = args.profile
-            else:
-                kwargs['profile'] = 'claude'
-            
-            # Add TTS config
-            tts_config = build_tts_config(args)
-            if tts_config:
-                kwargs['tts_config'] = tts_config
-            
-            # Add ASR config
-            if asr:
-                asr_config = build_asr_config(args)
-                if asr_config:
-                    kwargs['asr_config'] = asr_config
-            
-            # Add communications config
-            comms_config = build_comms_config(args)
-            if comms_config:
-                kwargs['comms_config'] = comms_config
-            
-            # Handle TTS disable
-            if args.disable_tts:
-                tts.disable_tts = True
-            
-            # Use the high-level API from core
-            from .core import run_with_talkito
-            return await run_with_talkito(cmd, **kwargs)
+            return await run_claude_wrapper(args)
     
     finally:
         # Clean up any remaining processes
@@ -479,7 +482,8 @@ async def run_talkito_command(args) -> int:
     
     # Special handling for 'claude' command
     if args.command == 'claude':
-        return await run_claude_with_sse(args)
+        # return await run_claude_with_sse(args)
+        return await run_claude_wrapper(args)
     
     # Build command list
     cmd = [args.command] + args.arguments
