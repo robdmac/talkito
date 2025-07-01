@@ -1340,7 +1340,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
             partial_to_show = ' ' + asr_state.current_partial
         else:
             # We already have at least one space, don't add another
-            insert_pos = start_idx + last_char_pos + 1
+            insert_pos = start_idx + last_char_pos
             partial_to_show = asr_state.current_partial
 
         log_message("DEBUG",
@@ -1377,12 +1377,27 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         log_message("DEBUG",
                     f"Content at insert point: {repr(input_content[max(0, relative_pos - 5):relative_pos + 10])}")
 
-        # Find the end of cursor marker sequence (after \x1b[27m)
-        cursor_end = -1
-        if cursor_marker_start != -1:
-            cursor_end_marker = input_content.find('\x1b[27m', cursor_marker_start)
-            if cursor_end_marker != -1:
-                cursor_end = cursor_end_marker + 5  # Skip past \x1b[27m
+        # Check if relative_pos falls inside an ANSI escape sequence
+        i = 0
+        adjusted_relative_pos = relative_pos
+        while i < relative_pos:
+            if i < len(input_content) and input_content[i] == '\x1b' and i + 1 < len(input_content) and input_content[
+                i + 1] == '[':
+                # Found start of ANSI sequence
+                match = re.match(r'\x1b\[[0-9;]*[a-zA-Z]', input_content[i:])
+                if match:
+                    seq_end = i + len(match.group())
+                    if i < relative_pos <= seq_end:
+                        adjusted_relative_pos = seq_end
+                        log_message("DEBUG",
+                                    f"Adjusted insertion position from {relative_pos} to {adjusted_relative_pos} to avoid splitting ANSI sequence")
+                        break
+                    i = seq_end
+                else:
+                    i += 1
+            else:
+                i += 1
+        relative_pos = adjusted_relative_pos
 
         # Calculate visual length of partial transcript
         visual_partial_length = get_visual_length(partial_to_show)
@@ -1458,14 +1473,26 @@ def handle_partial_transcript(text: str):
         return
 
     # # Store the partial transcript in state - it will be displayed by modifying the output
-    asr_state.current_partial = text
+    old_partial = asr_state.current_partial
+    asr_state.current_partial = text + '\u200b'
     # Trigger terminal activity so we have output to modify
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
             # Send a zero-width joiner character to trigger refresh without affecting spacing
             # This is a Unicode character that doesn't take up visual space
             os.write(current_master_fd, SPACE_THEN_BACK)  # Zero-width joiner (U+200D)
-            # asr_state.refresh_spaces_added += 1
+            asr_state.refresh_spaces_added += 1
+            # Delete the old partial transcript using backspaces
+            # spaces = b''
+            # if old_partial:
+            #     # Send backspace characters to delete old text
+            #     backspaces = b'\x08' * len(old_partial)
+            #     spaces = b' ' * len(old_partial)
+            #     os.write(current_master_fd, backspaces + spaces + backspaces)
+            # # Write the new partial transcript
+            # if text:
+            #     os.write(current_master_fd, text.encode('utf-8'))
+            # os.write(current_master_fd, SPACE_THEN_BACK)
             log_message("DEBUG", f"Triggered terminal refresh with zero-width joiner (refresh count: {asr_state.refresh_spaces_added})")
         except Exception as e:
             log_message("ERROR", f"Failed to trigger refresh: {e}")
@@ -1481,7 +1508,7 @@ def handle_dictated_text(text: str):
     if asr_state.partial_enabled:
         handle_partial_transcript("")
         # FIXME Due to a bug with 2nd + partial transcript handling we disable it after the first final transcript.
-        asr_state.partial_enabled = False
+        asr_state.partial_enabled = True
     
     if current_master_fd is not None:
         try:
@@ -1823,6 +1850,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     if asr_state.current_partial and in_input:
                         log_message("DEBUG", f"partial_needs_display {asr_state.current_partial}")
                         data_str = insert_partial_transcript(data_str, asr_state, active_profile)
+                        # data_str = data_str.replace('\u200b', ' '*len(asr_state.current_partial))
 
                     in_input = False
 
