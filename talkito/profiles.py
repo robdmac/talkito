@@ -57,7 +57,6 @@ class Profile:
     
     # Input handling
     input_start: Optional[str] = None
-    input_end: Optional[str] = None
     input_mic_replace: Optional[str] = None
 
     # Compiled patterns (cached)
@@ -284,7 +283,6 @@ CLAUDE_PROFILE = Profile(
     ],
     input_start='│[39m[22m > ',
     # input_start='│ > ',
-    input_end='|',
     # or binary would be b'\xe2\x94\x80\xe2\x95\xae\x1b[39m\x1b[22m\r\n\x1b[2m\x1b[38;5;244m\xe2\x94\x82\x1b[39m\x1b[22m\xc2\xa0>'
     input_mic_replace='│[39m[22m🎤 ',
     skip_prompt_tts=True,
@@ -356,7 +354,6 @@ DEFAULT_PROFILE = Profile(
     strip_symbols=[],
     skip_prompt_tts=False,
     input_start='',
-    input_end='',
     input_mic_replace='',
 )
 
