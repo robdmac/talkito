@@ -87,6 +87,52 @@ elevenlabs_model_id = os.environ.get('ELEVENLABS_MODEL_ID', 'eleven_monolingual_
 deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')  # Default Deepgram model
 
 
+def get_tts_config():
+    """Get TTS configuration from shared state if available, otherwise use module globals"""
+    if SHARED_STATE_AVAILABLE:
+        try:
+            state = get_shared_state()
+            config = {
+                'provider': state.tts_provider or tts_provider,
+                'voice': None,
+                'region': None,
+                'language': None,
+                'rate': state.tts_rate,
+                'pitch': state.tts_pitch
+            }
+            
+            # Map provider-specific voice settings
+            if state.tts_provider == 'openai':
+                config['voice'] = state.tts_voice or openai_voice
+            elif state.tts_provider in ['aws', 'polly']:
+                config['voice'] = state.tts_voice or polly_voice
+                config['region'] = state.tts_region or polly_region
+            elif state.tts_provider == 'azure':
+                config['voice'] = state.tts_voice or azure_voice
+                config['region'] = state.tts_region or azure_region
+            elif state.tts_provider == 'gcloud':
+                config['voice'] = state.tts_voice or gcloud_voice
+                config['language'] = state.tts_language or gcloud_language_code
+            elif state.tts_provider == 'elevenlabs':
+                config['voice'] = state.tts_voice or elevenlabs_voice_id
+            elif state.tts_provider == 'deepgram':
+                config['voice'] = state.tts_voice or deepgram_voice_model
+            
+            return config
+        except Exception:
+            pass
+    
+    # Fallback to module globals
+    return {
+        'provider': tts_provider,
+        'voice': None,
+        'region': None,
+        'language': None,
+        'rate': None,
+        'pitch': None
+    }
+
+
 # Provider registry for easier management
 TTS_PROVIDERS = {
     'openai': {
@@ -483,10 +529,14 @@ def _synthesize_openai(text: str) -> Optional[bytes]:
     import openai
     import io
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    voice = config.get('voice') or openai_voice
+    
     # Generate speech using OpenAI
     response = openai.audio.speech.create(
         model="tts-1",
-        voice=openai_voice,
+        voice=voice,
         input=text
     )
     
@@ -519,14 +569,19 @@ def _synthesize_polly(text: str) -> Optional[bytes]:
     """Synthesize speech using AWS Polly TTS API"""
     import boto3
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    voice = config.get('voice') or polly_voice
+    region = config.get('region') or polly_region
+    
     # Create Polly client
-    polly_client = boto3.client('polly', region_name=polly_region)
+    polly_client = boto3.client('polly', region_name=region)
     
     # Generate speech using AWS Polly
     response = polly_client.synthesize_speech(
         Text=text,
         OutputFormat='mp3',
-        VoiceId=polly_voice,
+        VoiceId=voice,
         Engine='neural'  # Use neural voice for better quality
     )
     
@@ -549,14 +604,19 @@ def _synthesize_azure(text: str) -> Optional[bytes]:
     """Synthesize speech using Microsoft Azure TTS API"""
     import azure.cognitiveservices.speech as speechsdk
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    voice = config.get('voice') or azure_voice
+    region = config.get('region') or azure_region
+    
     # Check for API key and region
     speech_key = os.environ.get('AZURE_SPEECH_KEY')
     if not speech_key:
         raise ValueError("AZURE_SPEECH_KEY environment variable not set")
     
     # Create speech configuration
-    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=azure_region)
-    speech_config.speech_synthesis_voice_name = azure_voice
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=region)
+    speech_config.speech_synthesis_voice_name = voice
     
     # Set output format to mp3
     speech_config.set_speech_synthesis_output_format(
@@ -597,6 +657,11 @@ def _synthesize_gcloud(text: str) -> Optional[bytes]:
     """Synthesize speech using Google Cloud Text-to-Speech API"""
     from google.cloud import texttospeech
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    voice_name = config.get('voice') or gcloud_voice
+    language = config.get('language') or gcloud_language_code
+    
     # Create a client
     client = texttospeech.TextToSpeechClient()
     
@@ -604,16 +669,16 @@ def _synthesize_gcloud(text: str) -> Optional[bytes]:
     synthesis_input = texttospeech.SynthesisInput(text=text)
     
     # Build the voice request - handle both simple voice names and full voice specs
-    if gcloud_voice and '-' in gcloud_voice:
+    if voice_name and '-' in voice_name:
         # Full voice name like "en-US-Journey-F"
         voice = texttospeech.VoiceSelectionParams(
-            language_code=gcloud_language_code,
-            name=gcloud_voice
+            language_code=language,
+            name=voice_name
         )
     else:
         # Simple voice name - let Google pick the best match
         voice = texttospeech.VoiceSelectionParams(
-            language_code=gcloud_language_code,
+            language_code=language,
             ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
         )
     
@@ -648,11 +713,15 @@ def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
     """Synthesize speech using ElevenLabs TTS API"""
     import requests
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    voice_id = config.get('voice') or elevenlabs_voice_id
+    
     # Get API key
     api_key = os.environ.get('ELEVENLABS_API_KEY')
     
     # ElevenLabs API endpoint
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{elevenlabs_voice_id}"
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     
     headers = {
         "Accept": "audio/mpeg",
@@ -704,6 +773,10 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
     import tempfile
     import os
     
+    # Get configuration from shared state
+    config = get_tts_config()
+    model = config.get('voice') or deepgram_voice_model
+    
     # Get API key
     api_key = os.environ.get('DEEPGRAM_API_KEY')
     
@@ -712,7 +785,7 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
     
     # Configure options
     options = SpeakOptions(
-        model=deepgram_voice_model,
+        model=model,
         encoding="mp3"
     )
     
@@ -1422,11 +1495,21 @@ def select_best_tts_provider() -> str:
     """Select the best available TTS provider based on accessibility and preferences.
     
     Order of preference:
-    1. TALKITO_PREFERRED_TTS_PROVIDER from environment (if accessible)
-    2. First accessible non-system provider (alphabetically)
-    3. System provider as fallback
+    1. Provider from shared state (if accessible)
+    2. TALKITO_PREFERRED_TTS_PROVIDER from environment (if accessible)
+    3. First accessible non-system provider (alphabetically)
+    4. System provider as fallback
     """
-    preferred = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+    # Check shared state first
+    state_provider = None
+    if SHARED_STATE_AVAILABLE:
+        try:
+            state = get_shared_state()
+            state_provider = state.tts_provider
+        except:
+            pass
+    
+    preferred = state_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
     accessible = check_tts_provider_accessibility()
     
     # Check if preferred provider is accessible
