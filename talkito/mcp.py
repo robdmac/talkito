@@ -42,7 +42,7 @@ from . import comms
 from .comms import SlackProvider, TwilioWhatsAppProvider, TwilioSMSProvider
 from .core import TalkitoCore
 from .logs import log_message as _base_log_message, setup_logging
-from .state import get_shared_state, save_shared_state
+from .state import get_shared_state, save_shared_state, get_status_summary
 
 # Check if ASR is available
 try:
@@ -113,7 +113,6 @@ def _save_logging_state():
     root_logger = logging.getLogger()
     _original_log_handlers = root_logger.handlers.copy()
     _original_log_level = root_logger.level
-    print(f"[DEBUG] Saved {len(_original_log_handlers)} logging handlers", file=sys.stderr)
 
 def _restore_logging_state():
     """Restore our logging state after FastMCP has started"""
@@ -158,15 +157,8 @@ _notifications_enabled = True
 # Note: In FastMCP, notifications are sent via ctx.info() within tools.
 # The notification queue stores pending notifications until a tool with context is called.
 
-# Global state - Initialization vs Enablement
-# Initialization means the system is ready to use
-_tts_initialized = False
-_asr_initialized = False
+# Global state - these will be migrated to shared state
 _shutdown_registered = False
-
-# Enablement means the system is actively being used
-_tts_enabled = False  # Whether TTS should speak
-_asr_enabled = False  # Whether ASR should listen
 
 # Track last spoken text to prevent duplicates
 _last_spoken_text = None
@@ -184,15 +176,38 @@ _last_message_timestamp = None  # Track the last processed message timestamp
 _core_instance = None
 _comms_manager = None  # Communication manager for WhatsApp/Slack
 
-# Communication modes
-_whatsapp_mode = False  # Flag for WhatsApp mode
+# Communication modes - will use shared state
 _whatsapp_recipient = None  # Current WhatsApp recipient
-_slack_mode = False  # Flag for Slack mode
 _slack_channel = None  # Current Slack channel
 
 # Store the original callback functions to intercept messages
 _original_dictation_callback = None
 _original_slack_callback = None
+
+# Shared state accessors
+def _get_tts_initialized():
+    """Get TTS initialization state from shared state"""
+    return get_shared_state().tts_initialized
+
+def _get_asr_initialized():
+    """Get ASR initialization state from shared state"""
+    return get_shared_state().asr_initialized
+
+def _get_tts_enabled():
+    """Get TTS enabled state from shared state"""
+    return get_shared_state().tts_enabled
+
+def _get_asr_enabled():
+    """Get ASR enabled state from shared state"""
+    return get_shared_state().asr_enabled
+
+def _get_whatsapp_mode():
+    """Get WhatsApp mode state from shared state"""
+    return get_shared_state().whatsapp_mode_active
+
+def _get_slack_mode():
+    """Get Slack mode state from shared state"""
+    return get_shared_state().slack_mode_active
 _original_whatsapp_callback = None
 
 # Thread-safe notification queue
@@ -216,12 +231,14 @@ def _ensure_logging():
 
 def _ensure_initialization():
     """Ensure TTS system is initialized"""
-    global _tts_initialized, _shutdown_registered, _core_instance, _comms_manager
+    global _shutdown_registered, _core_instance, _comms_manager
     
     # Always ensure logging is working first
     _ensure_logging()
     
-    if not _tts_initialized:
+    shared_state = get_shared_state()
+    
+    if not shared_state.tts_initialized:
         # Create core instance
         _core_instance = TalkitoCore(verbosity_level=0)
         
@@ -250,7 +267,7 @@ def _ensure_initialization():
             else:
                 tts.start_tts_worker(best_provider, auto_skip_tts=False)
         
-        _tts_initialized = True
+        shared_state.set_tts_initialized(True, provider=best_provider)
         log_message("INFO", f"TTS initialized with provider: {tts.tts_provider}")
         
         # Register cleanup on exit
@@ -263,7 +280,7 @@ def _ensure_initialization():
 
 def _cleanup():
     """Cleanup TTS and ASR resources"""
-    global _tts_initialized, _asr_initialized, _notification_processor_task, _shutdown_requested, _comms_manager
+    global _notification_processor_task, _shutdown_requested, _comms_manager
     
     log_message("INFO", "Starting cleanup process")
     
@@ -278,20 +295,22 @@ def _cleanup():
         except Exception as e:
             log_message("WARNING", f"Error canceling notification processor: {e}")
     
+    shared_state = get_shared_state()
+    
     # Stop ASR if initialized
-    if _asr_initialized and ASR_AVAILABLE:
+    if shared_state.asr_initialized and ASR_AVAILABLE:
         try:
             asr.stop_dictation()
-            _asr_initialized = False
+            shared_state.set_asr_initialized(False)
             log_message("INFO", "ASR stopped")
         except Exception as e:
             log_message("WARNING", f"Error stopping ASR: {e}")
     
     # Shutdown TTS if initialized
-    if _tts_initialized:
+    if shared_state.tts_initialized:
         try:
             tts.shutdown_tts()
-            _tts_initialized = False
+            shared_state.set_tts_initialized(False)
             log_message("INFO", "TTS stopped")
         except Exception as e:
             log_message("WARNING", f"Error stopping TTS: {e}")
@@ -576,60 +595,39 @@ async def _init_processor_if_needed():
 
 # MCP Tools for talkito control - Same as original
 
+def _get_status_summary() -> str:
+    """Internal function to generate status summary - used by all toggle functions"""
+    return get_status_summary(_comms_manager, _whatsapp_recipient, _slack_channel)
+
 @app.tool()
-async def get_talkito_status() -> dict[str, Any]:
+async def get_talkito_status() -> str:
     """
     Get the current status of all talkito modules (TTS, ASR, Slack, WhatsApp)
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+    
     Returns:
-        Dictionary with status of each module
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
-    try:
-        # Get shared state for consistency
-        shared_state = get_shared_state()
-        
-        status = {
-            "tts": {
-                "initialized": _tts_initialized,
-                "enabled": shared_state.tts_enabled,
-                "is_speaking": tts.is_speaking() if _tts_initialized else False,
-                "provider": tts.tts_provider if _tts_initialized else None
-            },
-            "asr": {
-                "available": ASR_AVAILABLE,
-                "initialized": _asr_initialized,
-                "enabled": shared_state.asr_enabled,
-                "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and _asr_initialized else False,
-                "provider": asr.asr_provider if ASR_AVAILABLE and _asr_initialized else None
-            },
-            "whatsapp": {
-                "mode_active": shared_state.whatsapp_mode_active,
-                "recipient": _whatsapp_recipient,
-                "configured": _comms_manager is not None and any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else []))
-            },
-            "slack": {
-                "mode_active": shared_state.slack_mode_active,
-                "channel": _slack_channel,
-                "configured": _comms_manager is not None and any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else []))
-            },
-            "voice_mode": shared_state.voice_mode_active  # Both must be on for full voice mode
-        }
-        
-        log_message("DEBUG", f"get_talkito_status returning: {status}")
-        return status
-        
-    except Exception as e:
-        error_dict = {"error": f"Error getting talkito status: {str(e)}"}
-        log_message("ERROR", f"get_talkito_status error: {error_dict}")
-        return error_dict
+    return _get_status_summary()
 
 @app.tool()
 async def turn_on() -> str:
     """
     Enable talkito voice interaction mode - activates voice workflow patterns
 
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Instructions for voice mode activation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         # Ensure logging has been restored after FastMCP startup
@@ -650,10 +648,8 @@ async def turn_on() -> str:
         shared_state = get_shared_state()
         shared_state.set_voice_mode(True)
 
-        result = "Voice interaction mode ACTIVATED"
-
-        log_message("INFO", f"turn_on returning: Voice mode activated")
-        return result
+        log_message("INFO", f"turn_on completed: Voice mode activated")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling voice mode: {str(e)}"
@@ -666,14 +662,21 @@ async def turn_off() -> str:
     """
     Disable talkito voice interaction mode - deactivates all voice workflows (TTS, ASR, and communication modes)
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Confirmation of deactivation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         log_message("INFO", "turn_off called")
         
         # Announce deactivation before turning off TTS
-        if _tts_enabled and _tts_initialized:
+        shared_state = get_shared_state()
+        if shared_state.tts_enabled and shared_state.tts_initialized:
             tts.queue_for_speech("Voice interaction mode deactivated. Returning to text-only interaction.", None)
             tts.wait_for_tts_to_finish(timeout=3.0)
         
@@ -686,26 +689,17 @@ async def turn_off() -> str:
         log_message("INFO", f"ASR disable result: {asr_result}")
         
         # Also stop any active communication modes
-        global _whatsapp_mode, _slack_mode
-        if _whatsapp_mode:
+        if shared_state.whatsapp_mode_active:
             await stop_whatsapp_mode()
-        if _slack_mode:
+        if shared_state.slack_mode_active:
             await stop_slack_mode()
         
         # Update shared state - master off
         shared_state = get_shared_state()
         shared_state.turn_off_all()
         
-        result = """Voice interaction mode is now DISABLED.
-
-Returning to normal text-only interaction:
-- No automatic speech output
-- No automatic voice input
-- Standard Claude interaction restored
-
-You can re-enable voice mode at any time with the turn_on tool."""
-        log_message("INFO", f"turn_off returning: Voice mode deactivated")
-        return result
+        log_message("INFO", f"turn_off completed: Voice mode deactivated")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling voice mode: {str(e)}"
@@ -717,23 +711,20 @@ You can re-enable voice mode at any time with the turn_on tool."""
 
 async def _enable_tts_internal() -> str:
     """Internal function to enable TTS"""
-    global _tts_enabled
-    
     try:
         _ensure_logging_restored()
         _ensure_initialization()
         
-        # Update both local and shared state
-        _tts_enabled = True
-        shared_state = get_shared_state()
-        shared_state.set_tts_enabled(True)
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_tts_enabled(True)
         
         log_message("INFO", "TTS enabled")
         
         # Announce enablement if TTS is working
         tts.queue_for_speech("Text to speech is now enabled.", None)
         
-        return "✅ TTS enabled - I will now speak my responses"
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling TTS: {str(e)}"
@@ -742,22 +733,21 @@ async def _enable_tts_internal() -> str:
 
 async def _disable_tts_internal() -> str:
     """Internal function to disable TTS"""
-    global _tts_enabled
-    
     try:
+        shared_state = get_shared_state()
+        
         # Announce before disabling
-        if _tts_enabled and _tts_initialized:
+        if shared_state.tts_enabled and shared_state.tts_initialized:
             tts.queue_for_speech("Text to speech is being disabled.", None)
             tts.wait_for_tts_to_finish(timeout=3.0)
         
-        # Update both local and shared state
-        _tts_enabled = False
-        shared_state = get_shared_state()
-        shared_state.set_tts_enabled(False)
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_tts_enabled(False)
         
         log_message("INFO", "TTS disabled")
         
-        return "🔇 TTS disabled - I will no longer speak my responses"
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling TTS: {str(e)}"
@@ -766,8 +756,6 @@ async def _disable_tts_internal() -> str:
 
 async def _enable_asr_internal() -> str:
     """Internal function to enable ASR"""
-    global _asr_enabled, _asr_initialized
-    
     try:
         _ensure_logging_restored()
         log_message("INFO", "enable_asr called")
@@ -775,24 +763,26 @@ async def _enable_asr_internal() -> str:
         if not ASR_AVAILABLE:
             return "❌ ASR not available. Install with: pip install talkito[asr]"
         
+        shared_state = get_shared_state()
+        
         # Initialize ASR if needed
-        if not _asr_initialized:
+        if not shared_state.asr_initialized:
             best_asr_provider = asr.select_best_asr_provider()
             log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
             
             asr.start_dictation(
                 text_callback=_dictation_callback_with_notification
             )
-            _asr_initialized = True
+            # Update shared state using thread-safe method
+            shared_state.set_asr_initialized(True, provider=best_asr_provider)
         
-        # Update both local and shared state
-        _asr_enabled = True
-        shared_state = get_shared_state()
-        shared_state.set_asr_enabled(True)
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_asr_enabled(True)
         
         log_message("INFO", "ASR enabled")
         
-        return "🎤 ASR enabled - I'm now listening for voice input"
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling ASR: {str(e)}"
@@ -801,23 +791,25 @@ async def _enable_asr_internal() -> str:
 
 async def _disable_asr_internal() -> str:
     """Internal function to disable ASR"""
-    global _asr_enabled, _asr_initialized
-    
     try:
-        # Update both local and shared state
-        _asr_enabled = False
-        shared_state = get_shared_state()
-        shared_state.set_asr_enabled(False)
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_asr_enabled(False)
         
         log_message("INFO", "ASR disabled")
         
+        shared_state = get_shared_state()
+        
         # Stop active dictation if running
-        if ASR_AVAILABLE and _asr_initialized and asr.is_dictation_active():
+        if ASR_AVAILABLE and shared_state.asr_initialized and asr.is_dictation_active():
             asr.stop_dictation()
-            _asr_initialized = False
             log_message("INFO", "Stopped active dictation")
         
-        return "🔇 ASR disabled - I'm no longer listening for voice input"
+        # Always mark ASR as uninitialized when disabled
+        _shared_state.set_asr_initialized(False)
+        log_message("INFO", "ASR marked as uninitialized")
+        
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling ASR: {str(e)}"
@@ -955,7 +947,7 @@ async def get_speech_status() -> dict[str, Any]:
             "current_text": current_item.original_text[:100] if current_item else None,
             "current_line_number": current_item.line_number if current_item else None,
             "queue_size": queue_size,
-            "tts_initialized": _tts_initialized
+            "tts_initialized": get_shared_state().tts_initialized
         }
         
         log_message("DEBUG", f"get_speech_status returning: {status}")
@@ -1027,8 +1019,13 @@ async def configure_tts(provider: str = "system", voice: str = None, region: str
                 log_message("ERROR", f"configure_tts error: {error_msg}")
                 return error_msg
         
+        # Update shared state with new configuration
+        from .state import set_tts_config_thread_safe
+        set_tts_config_thread_safe(provider=provider, voice=voice, region=region, 
+                                  language=language, rate=rate, pitch=pitch)
+        
         # Restart TTS worker with new config
-        if _tts_initialized:
+        if get_shared_state().tts_initialized:
             tts.shutdown_tts()
         
         engine = provider if provider != 'system' else tts.detect_tts_engine()
@@ -1057,8 +1054,14 @@ async def enable_asr() -> str:
     """
     Enable automatic speech recognition. ASR will be initialized if needed.
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about ASR enablement
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     return await _enable_asr_internal()
 
@@ -1067,8 +1070,14 @@ async def disable_asr() -> str:
     """
     Disable automatic speech recognition. ASR remains initialized but won't listen.
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about ASR disablement
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     return await _disable_asr_internal()
 
@@ -1081,8 +1090,14 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
         language: Language code for speech recognition (e.g., en-US, es-ES)
         provider: ASR provider (google, gcloud, assemblyai, deepgram, etc.)
         
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about starting voice input
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         await _init_processor_if_needed()
@@ -1120,6 +1135,10 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
         asr.start_dictation(_dictation_callback_with_notification, partial_callback=partial_callback)
         _asr_initialized = True
         
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.set_asr_initialized(True, provider=provider)
+        
         # Verify ASR is actually running
         is_active = asr.is_dictation_active() if hasattr(asr, 'is_dictation_active') else False
         log_message("INFO", f"ASR dictation active status: {is_active}")
@@ -1140,8 +1159,14 @@ async def stop_voice_input() -> str:
     """
     Stop voice input/dictation
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about stopping voice input
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         global _asr_initialized
@@ -1154,6 +1179,11 @@ async def stop_voice_input() -> str:
         if _asr_initialized:
             asr.stop_dictation()
             _asr_initialized = False
+            
+            # Update shared state
+            shared_state = get_shared_state()
+            shared_state.set_asr_initialized(False)
+            
             result = "Stopped voice input"
             log_message("INFO", f"stop_voice_input returning: {result}")
             return result
@@ -1167,30 +1197,6 @@ async def stop_voice_input() -> str:
         log_message("ERROR", f"stop_voice_input error: {error_msg}")
         return error_msg
 
-@app.tool()
-async def get_voice_input_status() -> dict[str, Any]:
-    """
-    Get status of voice input system
-    
-    Returns:
-        Dictionary with ASR status information
-    """
-    try:
-        status = {
-            "asr_available": ASR_AVAILABLE,
-            "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and _asr_initialized else False,
-            "asr_initialized": _asr_initialized,
-            "last_text": _last_dictated_text,
-            "recent_results_count": len(_dictation_callback_results)
-        }
-        
-        log_message("DEBUG", f"get_voice_input_status returning: {status}")
-        return status
-        
-    except Exception as e:
-        error_dict = {"error": f"Error getting voice input status: {str(e)}"}
-        log_message("ERROR", f"get_voice_input_status error: {error_dict}")
-        return error_dict
 
 @conditional_tool(masked_for_claude=True)
 async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
@@ -1425,7 +1431,7 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
     success = whatsapp_provider.send_message(whatsapp_message)
     
     # Also speak it if requested
-    if with_tts and _tts_initialized:
+    if with_tts and get_shared_state().tts_initialized:
         tts.queue_for_speech(message, None)
     
     if success:
@@ -1507,7 +1513,7 @@ async def _send_slack_internal(message: str, channel: str = None, with_tts: bool
     success = slack_provider.send_message(slack_message)
     
     # Also speak it if requested
-    if with_tts and _tts_initialized:
+    if with_tts and get_shared_state().tts_initialized:
         tts.queue_for_speech(message, None)
     
     if success:
@@ -1590,14 +1596,20 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
     Args:
         phone_number: Phone number to send messages to (optional, uses TWILIO_WHATSAPP_NUMBER if not provided)
         
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about WhatsApp mode activation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         # Ensure message poller is initialized
         await _init_processor_if_needed()
         
-        global _whatsapp_mode, _whatsapp_recipient, _comms_manager
+        global _whatsapp_recipient, _comms_manager
         
         # Determine recipient
         if phone_number:
@@ -1619,20 +1631,20 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
                 log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
                 return error_msg
         
-        _whatsapp_mode = True
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_whatsapp_mode(True)
         
-        # Update shared state
+        # Also update the recipient in shared state
         shared_state = get_shared_state()
-        shared_state.set_whatsapp_mode(True)
         shared_state.communication.whatsapp_to_number = _whatsapp_recipient
         save_shared_state()
         
         # Send confirmation
         # await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
         
-        result = f"WhatsApp mode activated! Sending messages to {_whatsapp_recipient}"
-        log_message("INFO", f"start_whatsapp_mode returning: {result}")
-        return result
+        log_message("INFO", f"start_whatsapp_mode completed: WhatsApp mode activated for {_whatsapp_recipient}")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error starting WhatsApp mode: {str(e)}"
@@ -1645,31 +1657,36 @@ async def stop_whatsapp_mode() -> str:
     """
     Stop WhatsApp mode - responses will no longer be sent to WhatsApp
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about WhatsApp mode deactivation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
-        global _whatsapp_mode, _whatsapp_recipient
+        global _whatsapp_recipient
         
-        if not _whatsapp_mode:
-            result = "WhatsApp mode is not active"
-            log_message("INFO", f"stop_whatsapp_mode returning: {result}")
-            return result
+        shared_state = get_shared_state()
+        
+        if not shared_state.whatsapp_mode_active:
+            log_message("INFO", f"stop_whatsapp_mode: WhatsApp mode is not active")
+            return _get_status_summary()
         
         # Send farewell message
         if _whatsapp_recipient:
             await _send_whatsapp_internal("WhatsApp mode deactivated. Goodbye!", to_number=_whatsapp_recipient)
         
-        _whatsapp_mode = False
         _whatsapp_recipient = None
         
-        # Update shared state
-        shared_state = get_shared_state()
-        shared_state.set_whatsapp_mode(False)
+        # Update shared state using thread-safe method
+        from .state import _shared_state
+        _shared_state.set_whatsapp_mode(False)
         
-        result = "WhatsApp mode deactivated"
-        log_message("INFO", f"stop_whatsapp_mode returning: {result}")
-        return result
+        log_message("INFO", f"stop_whatsapp_mode completed: WhatsApp mode deactivated")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error stopping WhatsApp mode: {str(e)}"
@@ -1685,8 +1702,9 @@ async def get_whatsapp_mode_status() -> dict[str, Any]:
     Returns:
         Dictionary with WhatsApp mode status
     """
+    shared_state = get_shared_state()
     status = {
-        "active": _whatsapp_mode,
+        "active": shared_state.whatsapp_mode_active,
         "recipient": _whatsapp_recipient,
         "configured": _comms_manager is not None and any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else []))
     }
@@ -1702,8 +1720,14 @@ async def start_slack_mode(channel: str = None) -> str:
     Args:
         channel: Slack channel to send messages to (optional, uses SLACK_CHANNEL if not provided)
         
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about Slack mode activation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         await _init_processor_if_needed()
@@ -1756,9 +1780,8 @@ async def start_slack_mode(channel: str = None) -> str:
         # Send confirmation
         await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
         
-        result = f"Slack mode activated! Sending messages to {_slack_channel}"
-        log_message("INFO", f"start_slack_mode returning: {result}")
-        return result
+        log_message("INFO", f"start_slack_mode completed: Slack mode activated for {_slack_channel}")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error starting Slack mode: {str(e)}"
@@ -1771,16 +1794,21 @@ async def stop_slack_mode() -> str:
     """
     Stop Slack mode - responses will no longer be sent to Slack
     
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about Slack mode deactivation
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     try:
         global _slack_mode, _slack_channel
         
         if not _slack_mode:
-            result = "Slack mode is not active"
-            log_message("INFO", f"stop_slack_mode returning: {result}")
-            return result
+            log_message("INFO", f"stop_slack_mode: Slack mode is not active")
+            return _get_status_summary()
         
         # Send farewell message
         if _slack_channel:
@@ -1793,9 +1821,8 @@ async def stop_slack_mode() -> str:
         shared_state = get_shared_state()
         shared_state.set_slack_mode(False)
         
-        result = "Slack mode deactivated"
-        log_message("INFO", f"stop_slack_mode returning: {result}")
-        return result
+        log_message("INFO", f"stop_slack_mode completed: Slack mode deactivated")
+        return _get_status_summary()
         
     except Exception as e:
         error_msg = f"Error stopping Slack mode: {str(e)}"
@@ -1957,16 +1984,16 @@ async def get_available_engines() -> str:
 async def get_voice_status_resource() -> str:
     """Get current ASR status as a resource"""
     try:
-        status = await get_voice_input_status()
+        shared_state = get_shared_state()
         lines = [
             "ASR Status:",
-            f"  Available: {status.get('asr_available', False)}",
-            f"  Initialized: {status.get('asr_initialized', False)}",
-            f"  Is Listening: {status.get('is_listening', False)}",
-            f"  Recent Results: {status.get('recent_results_count', 0)}",
+            f"  Available: {ASR_AVAILABLE}",
+            f"  Initialized: {shared_state.asr_initialized}",
+            f"  Is Listening: {asr.is_dictation_active() if ASR_AVAILABLE and shared_state.asr_initialized else False}",
+            f"  Recent Results: {len(_dictation_callback_results)}",
         ]
-        if status.get('last_text'):
-            lines.append(f"  Last Text: {status['last_text'][:50]}...")
+        if _last_dictated_text:
+            lines.append(f"  Last Text: {_last_dictated_text[:50]}...")
         return "\n".join(lines)
     except Exception as e:
         return f"Error getting ASR status: {str(e)}"
@@ -2429,13 +2456,7 @@ def main():
                 print(f"\nStarting servers...", file=sys.stderr)
                 print(f"  MCP SSE server on port {port}", file=sys.stderr)
                 print(f"  HTTP API server on port {api_port}", file=sys.stderr)
-                print(f"\nConnect with:", file=sys.stderr)
-                print(f"  claude mcp add talkito http://127.0.0.1:{port} --transport sse", file=sys.stderr)
-                print(f"\nHTTP API endpoints:", file=sys.stderr)
-                print(f"  GET  http://127.0.0.1:{api_port}/api/ping", file=sys.stderr)
-                print(f"  POST http://127.0.0.1:{api_port}/api/speak", file=sys.stderr)
-                print(f"  POST http://127.0.0.1:{api_port}/api/whatsapp", file=sys.stderr)
-                print(f"  POST http://127.0.0.1:{api_port}/api/slack", file=sys.stderr)
+                print(f"\nConnect with the TalkiTo chrome extension", file=sys.stderr)
                 print("=" * 60, file=sys.stderr)
             else:
                 print(f"\nStarting SSE server on port {port}...", file=sys.stderr)

@@ -1037,6 +1037,16 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
         log_message("DEBUG", f"Periodic status check: ASR_AVAILABLE={ASR_AVAILABLE}, "
                             f"asr_auto_started={asr_state.asr_auto_started}, asr_mode={asr_mode}")
 
+        # Check shared state and stop ASR if it's been disabled
+        shared_state = get_shared_state()
+        if ASR_AVAILABLE and asr_state.asr_auto_started and not shared_state.asr_enabled:
+            try:
+                log_message("INFO", "ASR disabled in shared state, stopping dictation")
+                asr.stop_dictation()
+                asr_state.asr_auto_started = False
+            except Exception as e:
+                log_message("ERROR", f"Failed to stop ASR after shared state disable: {e}")
+
         if ASR_AVAILABLE and asr_state.asr_auto_started and asr_mode != "off":
             log_message("DEBUG", "Calling show_speech_status from periodic check")
             
@@ -1084,6 +1094,20 @@ def configure_tts_engine(tts_config: dict, auto_skip_tts: bool) -> str:
             log_message("INFO", f"Using TTS engine: {engine}")
 
     tts.start_tts_worker(engine, auto_skip_tts)
+    
+    # Update shared state
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    
+    # Get the actual provider that was configured
+    if tts_config and tts_config.get('provider'):
+        provider = tts_config.get('provider')
+    else:
+        # For system/auto, get the actual engine being used
+        provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
+    
+    shared_state.set_tts_initialized(True, provider)
+    
     return engine
 
 
@@ -2481,6 +2505,19 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     # Start TTS worker
     tts.start_tts_worker(engine, auto_skip_tts)
     
+    # Update shared state for TTS initialization
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    
+    # Get the actual provider that was configured
+    if tts_config and tts_config.get('provider'):
+        provider = tts_config.get('provider')
+    else:
+        # For system/auto, get the actual engine being used
+        provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
+    
+    shared_state.set_tts_initialized(True, provider)
+    
     # Configure ASR based on kwargs
     if 'asr_config' in kwargs and ASR_AVAILABLE:
         asr.configure_asr_from_dict(kwargs['asr_config'])
@@ -2497,6 +2534,14 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
                 # But immediately pause it so it doesn't start listening yet
                 asr.set_ignore_input(True)
                 log_message("INFO", "ASR pre-initialized and paused")
+                
+                # Update shared state
+                from .state import get_shared_state
+                shared_state = get_shared_state()
+                asr_provider = kwargs.get('asr_config', {}).get('provider') if 'asr_config' in kwargs else None
+                if not asr_provider:
+                    asr_provider = asr.select_best_asr_provider()
+                shared_state.set_asr_initialized(True, asr_provider)
             except Exception as e:
                 log_message("ERROR", f"Failed to pre-initialize ASR: {e}")
         
