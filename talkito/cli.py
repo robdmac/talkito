@@ -25,6 +25,11 @@ import asyncio
 import signal
 from typing import List, Optional, Union, Tuple
 
+# Suppress websockets deprecation warnings early
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+
 # Try to load .env files if available
 try:
     from dotenv import load_dotenv
@@ -173,6 +178,8 @@ def parse_arguments():
                         help='Run as MCP server with SSE transport for real-time notifications')
     parser.add_argument('--port', type=int, metavar='PORT',
                         help='Port to run the MCP SSE server on (default: auto-find from 8000)')
+    parser.add_argument('--disable-mcp', action='store_true',
+                        help='Disable MCP server when running claude command (use wrapper mode only)')
     
     # Setup helpers
     parser.add_argument('--setup-slack', action='store_true',
@@ -410,6 +417,10 @@ async def run_claude_with_sse(args) -> int:
             sse_cmd.extend(["--tts-provider", args.tts_provider])
         if args.asr_provider:
             sse_cmd.extend(["--asr-provider", args.asr_provider])
+        
+        # Pass the client command to indicate this is for Claude
+        if args.command:
+            sse_cmd.extend(["--client-command", args.command])
 
         sse_process = subprocess.Popen(
             sse_cmd,
@@ -476,14 +487,121 @@ async def run_claude_with_sse(args) -> int:
         kill_process(sse_process)
 
 
+async def run_claude_hybrid(args) -> int:
+    """Run Claude with in-process MCP server and wrapper functionality"""
+    import threading
+    import time
+    from .mcp import app, find_available_port
+    from .claude_init import init_claude
+    
+    # Find available port
+    port = args.port if args.port else find_available_port(8000)
+    if not port:
+        print("Error: Could not find an available port", file=sys.stderr)
+        return 1
+    
+    # Set environment variables for provider preferences
+    if args.tts_provider:
+        os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+    if args.asr_provider:
+        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
+    
+    # Start MCP server in background thread
+    server_ready = threading.Event()
+    server_thread = None
+    
+    def run_mcp_server():
+        """Run the MCP server in a thread"""
+        try:
+            # Enable CORS for SSE
+            from . import mcp
+            mcp._cors_enabled = True
+            
+            # Set flag to indicate we're running for Claude
+            if args.command == 'claude':
+                mcp._running_for_claude = True
+            
+            # Set up logging if specified
+            if args.log_file:
+                mcp._log_file_path = args.log_file
+                mcp.setup_logging(mcp._log_file_path)
+            
+            # Signal that we're about to start
+            server_ready.set()
+            
+            # Run the server (this blocks)
+            app.run(
+                transport="sse",
+                host="127.0.0.1", 
+                port=port,
+                log_level="warning"
+            )
+        except Exception as e:
+            print(f"MCP server error: {e}", file=sys.stderr)
+            server_ready.set()  # Signal even on error so we don't hang
+    
+    try:
+        # Start the MCP server thread
+        print(f"Starting in-process MCP server on port {port}...")
+        server_thread = threading.Thread(target=run_mcp_server, daemon=True)
+        server_thread.start()
+        
+        # Wait for server to be ready (max 5 seconds)
+        if not server_ready.wait(5):
+            print("Warning: MCP server startup timeout", file=sys.stderr)
+        
+        # Give it a bit more time to fully initialize
+        time.sleep(1)
+        
+        # Restore logging after FastMCP has messed with it
+        if args.log_file:
+            import logging
+            from .logs import setup_logging
+            import talkito.logs
+            
+            # Force reset of logging configuration
+            talkito.logs._is_configured = False
+            
+            # Clear all handlers that uvicorn/fastmcp added
+            root_logger = logging.getLogger()
+            root_logger.handlers.clear()
+            
+            # Re-setup logging
+            setup_logging(args.log_file, mode='a')
+            print(f"Restored logging to: {args.log_file}", file=sys.stderr)
+        
+        # Initialize Claude with SSE configuration
+        print("Configuring Claude for MCP...")
+        if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
+            print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
+        
+        # Show configuration status
+        print_configuration_status()
+        
+        # Now run Claude using the wrapper approach
+        print("Starting Claude with wrapper functionality...")
+        return await run_claude_wrapper(args)
+        
+    except Exception as e:
+        print(f"Hybrid mode error: {e}", file=sys.stderr)
+        # Fall back to regular wrapper
+        print("Falling back to standard wrapper mode...")
+        return await run_claude_wrapper(args)
+
+
 async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
     
     # Special handling for 'claude' command
     if args.command == 'claude':
-        # return await run_claude_with_sse(args)
-        return await run_claude_wrapper(args)
+        # Check if MCP is disabled
+        if args.disable_mcp:
+            # Use wrapper mode only
+            return await run_claude_wrapper(args)
+        else:
+            # Use hybrid approach
+            return await run_claude_hybrid(args)
     
     # Build command list
     cmd = [args.command] + args.arguments

@@ -30,7 +30,7 @@ from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
 
 
 TALKITO_PERMISSIONS = [
-    "mcp__talkito__speak_text",
+    # "mcp__talkito__speak_text",
     "mcp__talkito__skip_current_speech",
     "mcp__talkito__get_speech_status",
     "mcp__talkito__wait_for_speech_completion",
@@ -38,7 +38,7 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__start_voice_input",
     "mcp__talkito__stop_voice_input",
     "mcp__talkito__get_voice_input_status",
-    "mcp__talkito__get_dictated_text",
+    # "mcp__talkito__get_dictated_text",
     "mcp__talkito__turn_on",
     "mcp__talkito__turn_off",
     "mcp__talkito__configure_communication",
@@ -52,7 +52,7 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__stop_slack_mode",
     "mcp__talkito__get_slack_mode_status",
     "mcp__talkito__get_messages",
-    "mcp__talkito__start_notification_stream",
+    # "mcp__talkito__start_notification_stream",
     "mcp__talkito__get_talkito_status",
     "mcp__talkito__enable_tts",
     "mcp__talkito__disable_tts",
@@ -203,11 +203,11 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
     success = True
     
     # 1. Create TALKITO.md
-    try:
-        create_talkito_md()
-    except Exception as e:
-        print(f"✗ Error creating TALKITO.md: {e}")
-        success = False
+    # try:
+    #     create_talkito_md()
+    # except Exception as e:
+    #     print(f"✗ Error creating TALKITO.md: {e}")
+    #     success = False
     
     # 2. Update Claude settings
     try:
@@ -217,11 +217,11 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
         success = False
     
     # 3. Update CLAUDE.md
-    try:
-        update_claude_md()
-    except Exception as e:
-        print(f"✗ Error updating CLAUDE.md: {e}")
-        success = False
+    # try:
+    #     update_claude_md()
+    # except Exception as e:
+    #     print(f"✗ Error updating CLAUDE.md: {e}")
+    #     success = False
     
     # 4. Create .talkito.env template
     try:

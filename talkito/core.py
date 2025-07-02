@@ -43,6 +43,7 @@ from typing import Optional, List, Tuple, Dict, Union, Deque, Any
 from . import tts
 from .profiles import get_profile, Profile
 from .logs import setup_logging, get_logger, log_message, restore_stderr, log_debug, is_logging_enabled
+from .state import get_shared_state
 
 try:
     from . import asr
@@ -360,12 +361,13 @@ def check_comms_input() -> Optional[str]:
     return None
 
 def send_pending_text():
-    log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
-    speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
-    if speakable_text:
-        log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
-        terminal.pending_speech_text = ""
-        send_to_comms(speakable_text)
+    if terminal.pending_speech_text.strip():
+        log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
+        speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
+        if speakable_text:
+            log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+            terminal.pending_speech_text = ""
+            send_to_comms(speakable_text)
 
 def queue_output(text: str, line_number: Optional[int] = None):
     """Queue text for both TTS and communication channels"""
@@ -453,12 +455,6 @@ def is_prompt_line(line: str) -> bool:
     except Exception as e:
         log_message("ERROR", f"Error in is_prompt_line: {e} - patterns: {prompt_patterns}, line: {line!r}")
         return False
-
-
-def should_speak_prompt(line: str) -> bool:
-    """Check if the prompt itself should be spoken"""
-    skip_prompt_tts = active_profile.skip_prompt_tts if active_profile else False
-    return not skip_prompt_tts and line
 
 
 def hash_content(content: str) -> str:
@@ -748,7 +744,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     cleaned_line = clean_text(line)
 
     # Check if this is a continuation line
-    if active_profile and active_profile.is_continuation_line(line) and (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
+    if active_profile and active_profile.is_continuation_line(cleaned_line) and (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
         log_message("DEBUG", f"Detected continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
         if terminal.previous_line_was_skipped:
             log_message("FILTER", f"Skipping continuation line (previous was skipped): '{line[:MAX_LINE_PREVIEW]}...'")
@@ -805,10 +801,6 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     # Move prompt detection here, before we process the line
     if is_prompt:
         log_message("INFO", f"Detected prompt in line ({line_number}): '{cleaned_line}'")
-        if should_speak_prompt(cleaned_line):
-            queue_output(strip_profile_symbols(cleaned_line), line_number)
-            return None, buffer, line, True
-        # Don't speak prompt when skip_prompt_tts is True
         terminal.previous_line_was_skipped = True
         send_pending_text()
         return None, buffer, line, True
@@ -1466,15 +1458,20 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
     return data_str
 
+
 def handle_partial_transcript(text: str):
     """Handle partial transcript from streaming ASR"""
     log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
-    asr_state.current_partial = text + '\u200b'
+    if not text.strip():
+        return
+
+    asr_state.current_partial = text # + '\u200b'
+
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            os.write(current_master_fd, b'\xe2\x80\xa6')
+            os.write(current_master_fd, '>'.encode('utf-8'))
         except Exception as e:
             log_message("ERROR", f"Failed to trigger screen update: {e}")
 
@@ -1482,6 +1479,12 @@ def handle_partial_transcript(text: str):
 def handle_dictated_text(text: str):
     """Handle text from ASR dictation"""
     global current_master_fd
+    
+    # Check shared state if available
+    shared_state = get_shared_state()
+    if not shared_state.asr_enabled:
+        log_message("DEBUG", "ASR disabled in shared state, ignoring dictated text")
+        return
     
     log_message("INFO", f"[ASR TRANSCRIPTION] Received dictated text: '{text}'")
 
@@ -1547,6 +1550,12 @@ def check_tap_to_talk_timeout():
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
     if not ASR_AVAILABLE or asr_mode == "off":
+        return False
+        
+    # Check shared state if available
+    shared_state = get_shared_state()
+    if not shared_state.asr_enabled:
+        log_message("DEBUG", "ASR disabled in shared state, not auto-enabling")
         return False
         
     # Log the current state for debugging

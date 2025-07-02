@@ -53,8 +53,7 @@ class Profile:
     # Behavior settings
     skip_progress: List[str] = field(default_factory=list)
     strip_symbols: List[str] = field(default_factory=list)
-    skip_prompt_tts: bool = False
-    
+
     # Input handling
     input_start: Optional[str] = None
     input_mic_replace: Optional[str] = None
@@ -286,7 +285,6 @@ CLAUDE_PROFILE = Profile(
     # input_start='│ > ',
     # or binary would be b'\xe2\x94\x80\xe2\x95\xae\x1b[39m\x1b[22m\r\n\x1b[2m\x1b[38;5;244m\xe2\x94\x82\x1b[39m\x1b[22m\xc2\xa0>'
     input_mic_replace='│[39m[22m🎤 ',
-    skip_prompt_tts=True,
 )
 
 
@@ -353,7 +351,6 @@ DEFAULT_PROFILE = Profile(
     prompt_patterns=[],
     skip_progress=[],
     strip_symbols=[],
-    skip_prompt_tts=False,
     input_start='',
     input_mic_replace='',
 )
