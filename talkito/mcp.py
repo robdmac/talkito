@@ -42,6 +42,7 @@ from . import comms
 from .comms import SlackProvider, TwilioWhatsAppProvider, TwilioSMSProvider
 from .core import TalkitoCore
 from .logs import log_message as _base_log_message, setup_logging
+from .state import get_shared_state, save_shared_state
 
 # Check if ASR is available
 try:
@@ -83,6 +84,9 @@ app = FastMCP("talkito-sse-server")
 
 # CORS headers for browser access
 _cors_enabled = False
+
+# Track if we're running for Claude (to mask certain tools)
+_running_for_claude = False
 
 def add_cors_headers(headers):
     """Add CORS headers to response"""
@@ -343,8 +347,20 @@ _pending_notifications = []
 # Shutdown flag for graceful exit
 _shutdown_requested = False
 
+# Helper function to conditionally register tools
+def conditional_tool(masked_for_claude=False):
+    """Decorator to conditionally register tools based on client"""
+    def decorator(func):
+        if masked_for_claude and _running_for_claude:
+            # Don't register this tool for Claude
+            return func
+        else:
+            # Register the tool normally
+            return app.tool()(func)
+    return decorator
+
 # Tool that runs a notification loop within the request context
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def start_notification_stream(ctx: Context, duration: int = 30, exit_on_first: bool = True) -> str:
     """
     Start streaming notifications for a specified duration.
@@ -569,31 +585,34 @@ async def get_talkito_status() -> dict[str, Any]:
         Dictionary with status of each module
     """
     try:
+        # Get shared state for consistency
+        shared_state = get_shared_state()
+        
         status = {
             "tts": {
                 "initialized": _tts_initialized,
-                "enabled": _tts_enabled,
+                "enabled": shared_state.tts_enabled,
                 "is_speaking": tts.is_speaking() if _tts_initialized else False,
                 "provider": tts.tts_provider if _tts_initialized else None
             },
             "asr": {
                 "available": ASR_AVAILABLE,
                 "initialized": _asr_initialized,
-                "enabled": _asr_enabled,
+                "enabled": shared_state.asr_enabled,
                 "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and _asr_initialized else False,
                 "provider": asr.asr_provider if ASR_AVAILABLE and _asr_initialized else None
             },
             "whatsapp": {
-                "mode_active": _whatsapp_mode,
+                "mode_active": shared_state.whatsapp_mode_active,
                 "recipient": _whatsapp_recipient,
                 "configured": _comms_manager is not None and any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else []))
             },
             "slack": {
-                "mode_active": _slack_mode,
+                "mode_active": shared_state.slack_mode_active,
                 "channel": _slack_channel,
                 "configured": _comms_manager is not None and any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else []))
             },
-            "voice_mode": _tts_enabled and _asr_enabled  # Both must be on for full voice mode
+            "voice_mode": shared_state.voice_mode_active  # Both must be on for full voice mode
         }
         
         log_message("DEBUG", f"get_talkito_status returning: {status}")
@@ -626,6 +645,10 @@ async def turn_on() -> str:
         # Enable ASR
         asr_result = await _enable_asr_internal()
         log_message("INFO", f"ASR enable result: {asr_result}")
+
+        # Update shared state for voice mode
+        shared_state = get_shared_state()
+        shared_state.set_voice_mode(True)
 
         result = "Voice interaction mode ACTIVATED"
 
@@ -669,6 +692,10 @@ async def turn_off() -> str:
         if _slack_mode:
             await stop_slack_mode()
         
+        # Update shared state - master off
+        shared_state = get_shared_state()
+        shared_state.turn_off_all()
+        
         result = """Voice interaction mode is now DISABLED.
 
 Returning to normal text-only interaction:
@@ -696,7 +723,11 @@ async def _enable_tts_internal() -> str:
         _ensure_logging_restored()
         _ensure_initialization()
         
+        # Update both local and shared state
         _tts_enabled = True
+        shared_state = get_shared_state()
+        shared_state.set_tts_enabled(True)
+        
         log_message("INFO", "TTS enabled")
         
         # Announce enablement if TTS is working
@@ -719,7 +750,11 @@ async def _disable_tts_internal() -> str:
             tts.queue_for_speech("Text to speech is being disabled.", None)
             tts.wait_for_tts_to_finish(timeout=3.0)
         
+        # Update both local and shared state
         _tts_enabled = False
+        shared_state = get_shared_state()
+        shared_state.set_tts_enabled(False)
+        
         log_message("INFO", "TTS disabled")
         
         return "🔇 TTS disabled - I will no longer speak my responses"
@@ -750,7 +785,11 @@ async def _enable_asr_internal() -> str:
             )
             _asr_initialized = True
         
+        # Update both local and shared state
         _asr_enabled = True
+        shared_state = get_shared_state()
+        shared_state.set_asr_enabled(True)
+        
         log_message("INFO", "ASR enabled")
         
         return "🎤 ASR enabled - I'm now listening for voice input"
@@ -765,7 +804,11 @@ async def _disable_asr_internal() -> str:
     global _asr_enabled, _asr_initialized
     
     try:
+        # Update both local and shared state
         _asr_enabled = False
+        shared_state = get_shared_state()
+        shared_state.set_asr_enabled(False)
+        
         log_message("INFO", "ASR disabled")
         
         # Stop active dictation if running
@@ -803,7 +846,7 @@ async def disable_tts() -> str:
     """
     return await _disable_tts_internal()
 
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def speak_text(text: str, clean_text_flag: bool = True) -> str:
     """
     Convert text to speech using the talkito TTS engine
@@ -1149,7 +1192,7 @@ async def get_voice_input_status() -> dict[str, Any]:
         log_message("ERROR", f"get_voice_input_status error: {error_dict}")
         return error_dict
 
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
     """
     Get the most recent dictated text from voice input
@@ -1293,6 +1336,13 @@ async def configure_communication(providers: list[str] = None, whatsapp_to: str 
             config.whatsapp_to_number = whatsapp_to
         if slack_channel:
             config.slack_channel = slack_channel
+            
+        # Update shared state with configuration
+        shared_state = get_shared_state()
+        if whatsapp_to:
+            shared_state.communication.whatsapp_to_number = whatsapp_to
+        if slack_channel:
+            shared_state.communication.slack_channel = slack_channel
             
         # Setup communication with specified providers
         base_manager = comms.setup_communication(providers=providers, config=config)
@@ -1571,6 +1621,12 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         
         _whatsapp_mode = True
         
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.set_whatsapp_mode(True)
+        shared_state.communication.whatsapp_to_number = _whatsapp_recipient
+        save_shared_state()
+        
         # Send confirmation
         # await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
         
@@ -1606,6 +1662,10 @@ async def stop_whatsapp_mode() -> str:
         
         _whatsapp_mode = False
         _whatsapp_recipient = None
+        
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.set_whatsapp_mode(False)
         
         result = "WhatsApp mode deactivated"
         log_message("INFO", f"stop_whatsapp_mode returning: {result}")
@@ -1687,6 +1747,12 @@ async def start_slack_mode(channel: str = None) -> str:
         
         _slack_mode = True
         
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.set_slack_mode(True)
+        shared_state.communication.slack_channel = _slack_channel
+        save_shared_state()
+        
         # Send confirmation
         await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
         
@@ -1722,6 +1788,10 @@ async def stop_slack_mode() -> str:
         
         _slack_mode = False
         _slack_channel = None
+        
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.set_slack_mode(False)
         
         result = "Slack mode deactivated"
         log_message("INFO", f"stop_slack_mode returning: {result}")
@@ -1976,30 +2046,6 @@ async def announce_completion(task_name: str = "task") -> types.Prompt:
                 content=types.TextContent(
                     type="text",
                     text=f"Use the speak_text tool to announce that '{task_name}' has been completed successfully."
-                )
-            )
-        ]
-    )
-
-@app.prompt() 
-async def read_aloud() -> types.Prompt:
-    """Template for reading text content aloud"""
-    return types.Prompt(
-        name="read_aloud",
-        description="Read provided text content using text-to-speech",
-        arguments=[
-            types.PromptArgument(
-                name="content",
-                description="Text content to read aloud", 
-                required=True
-            )
-        ],
-        messages=[
-            types.PromptMessage(
-                role="user", 
-                content=types.TextContent(
-                    type="text",
-                    text="Use the speak_text tool to read the provided content aloud, cleaning any formatting as needed."
                 )
             )
         ]
@@ -2302,12 +2348,19 @@ def main():
     parser.add_argument('--asr-provider', type=str,
                         choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing'],
                         help='ASR provider to use')
+    parser.add_argument('--client-command', type=str,
+                        help='The command that is using this MCP server (e.g., claude)')
     args = parser.parse_args()
     
     print(f"[DEBUG] Parsed args: log_file={args.log_file}, port={args.port}, transport={args.transport}, tts_provider={args.tts_provider}, asr_provider={args.asr_provider}", file=sys.stderr)
     
     # Set up logging if log file specified
-    global _log_file_path, _cors_enabled
+    global _log_file_path, _cors_enabled, _running_for_claude
+    
+    # Check if we're running for Claude
+    if args.client_command == 'claude':
+        _running_for_claude = True
+        print(f"[DEBUG] Running for Claude - certain tools will be masked", file=sys.stderr)
     
     # CORS is always enabled for SSE transport
     if args.transport == 'sse':
