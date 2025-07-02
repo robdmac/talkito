@@ -179,6 +179,11 @@ class TerminalState:
     pending_speech_text: str = ""
     pending_text_line_number: int = 0
     last_line_number: int = -1
+    # Animation state for partial transcripts
+    animation_frame: int = 0
+    animation_position: Optional[int] = None
+    animation_chars: List[str] = field(default_factory=lambda: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+    animation_steps: int = 0  # Count how many animation frames we've shown
 
 @dataclass 
 class ASRState:
@@ -1350,6 +1355,9 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         insert_pos = start_idx
         partial_to_show = asr_state.current_partial
         log_message("DEBUG", f"No existing text, inserting at input start {insert_pos}")
+    
+    # Store the animation position (relative to prompt)
+    terminal.animation_position = insert_pos - start_idx
 
     # Calculate available space
     remaining_space = end_idx - insert_pos
@@ -1449,12 +1457,18 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         # Debug the result
         log_message("DEBUG", f"Result at insert point: {repr(new_input[max(0, relative_pos - 5):relative_pos + 15])}")
 
+
         # Ensure we maintain the exact same length
         if len(new_input) > len(input_content):
             new_input = new_input[:len(input_content)]
         elif len(new_input) < len(input_content):
             # Pad at the end if needed
-            new_input += ' ' * (len(input_content) - len(new_input))
+            # Add extra spaces to compensate for backspaces from animation
+            padding_needed = len(input_content) - len(new_input)
+            new_input += ' ' * (padding_needed)
+
+        extra_padding = terminal.animation_steps
+        new_input += ' ' * (extra_padding*2)
 
         # Reconstruct the full string
         data_str = before_input + active_profile.input_start + new_input + after_input
@@ -1474,7 +1488,18 @@ def handle_partial_transcript(text: str):
     asr_state.current_partial = text + '\u200b'
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            os.write(current_master_fd, b'\xe2\x80\xa6')
+            # Get the current animation character and advance the frame
+            anim_char = terminal.animation_chars[terminal.animation_frame]
+            terminal.animation_frame = (terminal.animation_frame + 1) % len(terminal.animation_chars)
+            
+            # If we've written an animation character before, backspace it first
+            if terminal.animation_position is not None:
+                os.write(current_master_fd, b'\x08')  # Backspace
+                # os.fsync(current_master_fd)  # Flush immediately
+                terminal.animation_steps += 1
+            
+            # Write the animation character to trigger screen update
+            os.write(current_master_fd, anim_char.encode('utf-8'))
         except Exception as e:
             log_message("ERROR", f"Failed to trigger screen update: {e}")
 
@@ -1485,11 +1510,21 @@ def handle_dictated_text(text: str):
     
     log_message("INFO", f"[ASR TRANSCRIPTION] Received dictated text: '{text}'")
 
-    # Clear the partial transcript
+    # Clear the partial transcript and animation
     if asr_state.partial_enabled:
+        # Clear the animation character if one was displayed
+        if terminal.animation_position is not None and current_master_fd is not None:
+            try:
+                os.write(current_master_fd, b'\x08')  # Backspace to remove animation char
+            except Exception as e:
+                log_message("ERROR", f"Failed to clear animation character: {e}")
+        
         handle_partial_transcript("")
         # FIXME Due to a bug with 2nd + partial transcript handling we disable it after the first final transcript.
         asr_state.partial_enabled = True
+        # Clear animation state
+        terminal.animation_position = None
+        terminal.animation_steps = 0
     
     if current_master_fd is not None:
         try:
