@@ -220,7 +220,7 @@ class Profile:
 CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
-    continuation_prefix=r'^  [a-zA-Z]',
+    continuation_prefix=r'^\s+[a-zA-Z0-9]',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers

@@ -569,6 +569,10 @@ class CommunicationManager:
         if not text.strip():
             return
         
+        # Check shared state for active modes
+        from .state import get_shared_state
+        shared_state = get_shared_state()
+        
         # Send to SMS recipients
         sms_recipients = recipients or self.config.sms_recipients
         for phone in sms_recipients:
@@ -580,8 +584,13 @@ class CommunicationManager:
             )
             self.output_queue.put(msg)
         
-        # Send to WhatsApp recipients  
-        for phone in self.config.whatsapp_recipients:
+        # Send to WhatsApp recipients (include mode recipient if active)
+        whatsapp_recipients = list(self.config.whatsapp_recipients)
+        if shared_state.whatsapp_mode_active and shared_state.communication.whatsapp_to_number:
+            if shared_state.communication.whatsapp_to_number not in whatsapp_recipients:
+                whatsapp_recipients.append(shared_state.communication.whatsapp_to_number)
+        
+        for phone in whatsapp_recipients:
             msg = Message(
                 content=text,
                 sender=phone,
@@ -590,11 +599,15 @@ class CommunicationManager:
             )
             self.output_queue.put(msg)
         
-        # Send to Slack
+        # Send to Slack (use mode channel if active)
         if any(isinstance(p, SlackProvider) for p in self.providers):
+            slack_channel = self.config.slack_channel
+            if shared_state.slack_mode_active and shared_state.communication.slack_channel:
+                slack_channel = shared_state.communication.slack_channel
+                
             msg = Message(
                 content=text,
-                sender=self.config.slack_channel,
+                sender=slack_channel,
                 channel="slack",
                 session_id=self.current_session_id
             )

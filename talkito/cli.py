@@ -47,6 +47,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import TalkitoCore
+from .state import get_status_summary
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -218,6 +219,22 @@ def parse_arguments():
     if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp:
         parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp or init claude')
     
+    # Check if any command arguments look like talkito options
+    if args.command and args.arguments:
+        talkito_options = {
+            '--log-file', '--tts-provider', '--asr-provider', '--tts-voice', '--tts-region', '--tts-language',
+            '--tts-rate', '--tts-pitch', '--capture-tts-output', '--asr-mode', '--asr-language', '--asr-model',
+            '--sms-recipients', '--whatsapp-recipients', '--slack-channel', '--webhook-port', '--record', '--replay',
+            '--no-output', '--port', '--disable-mcp', '--auto-skip-tts', '--disable-tts', '--profile', '--verbosity',
+            '-v', '--verbose', '--mcp-server', '--mcp-sse-server', '--setup-slack', '--setup-whatsapp'
+        }
+        
+        for i, arg in enumerate(args.arguments):
+            if arg in talkito_options:
+                print(f"\nError: Talkito option '{arg}' was placed after the command '{args.command}'", file=sys.stderr)
+                print("\nDid you mean: talkito " + (arg + " ... " + args.command + " " + ' '.join(args.arguments[:i]) + " " + ' '.join(args.arguments[i+2:])).strip() + "?", file=sys.stderr)
+                sys.exit(1)
+    
     return args
 
 
@@ -227,6 +244,11 @@ def build_tts_config(args) -> dict:
     
     if args.tts_provider:
         config['provider'] = args.tts_provider
+    else:
+        # If no provider specified, use the best available one
+        best_provider = tts.select_best_tts_provider()
+        if best_provider != 'system':
+            config['provider'] = best_provider
     if args.tts_voice:
         config['voice'] = args.tts_voice
     if args.tts_region:
@@ -249,6 +271,15 @@ def build_asr_config(args) -> dict:
     
     if args.asr_provider:
         config['provider'] = args.asr_provider
+    else:
+        # If no provider specified, use the best available one
+        if asr:
+            try:
+                best_provider = asr.select_best_asr_provider()
+                if best_provider != 'google':  # 'google' is the free fallback
+                    config['provider'] = best_provider
+            except:
+                pass
     if args.asr_language:
         config['language'] = args.asr_language
     if args.asr_model:
@@ -288,43 +319,14 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     return config
 
 
-def print_configuration_status():
+def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
-    import os
-    
-    # Get the best available TTS provider
-    tts_provider = tts.select_best_tts_provider()
-    
-    # Get the best available ASR provider
-    asr_provider = 'N/A'
-    if asr:
-        try:
-            asr_provider = asr.select_best_asr_provider()
-        except:
-            asr_provider = 'unavailable'
-    
-    # Check communication channels
-    channels = []
-    if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('ZROK_RESERVED_TOKEN'):
-        if os.environ.get('TWILIO_WHATSAPP_NUMBER'):
-            channels.append('WhatsApp')
-        if os.environ.get('TWILIO_PHONE_NUMBER'):
-            channels.append('SMS')
-    if os.environ.get('SLACK_BOT_TOKEN') and os.environ.get('SLACK_APP_TOKEN'):
-        channels.append('Slack')
-    
-    # Build status line
-    status_parts = [
-        f"TTS: {tts_provider}",
-        f"ASR: {asr_provider}"
-    ]
-    
-    if channels:
-        status_parts.append(f"Available Msgs: {', '.join(channels)}")
-    else:
-        status_parts.append("Available Msgs: none")
-    
-    print(f"Configuration: {' | '.join(status_parts)} (configure with .talkito.env)")
+
+    # Get the status summary using the shared function
+    status = get_status_summary(tts_override=True, asr_override=(args.asr_mode != "off"))
+
+    # Print with the same format but add the note about .talkito.env
+    print(f"╭ {status}")
 
 
 async def run_claude_wrapper(args) -> int:
@@ -449,7 +451,7 @@ async def run_claude_with_sse(args) -> int:
             raise Exception("Failed to configure Claude for SSE")
         
         # Step D: Show configuration status
-        print_configuration_status()
+        print_configuration_status(args)
         
         # Step E: Run Claude
         print("Starting Claude...")
@@ -529,20 +531,29 @@ async def run_claude_hybrid(args) -> int:
             # Signal that we're about to start
             server_ready.set()
             
-            # Run the server (this blocks)
-            app.run(
-                transport="sse",
-                host="127.0.0.1", 
-                port=port,
-                log_level="warning"
-            )
+            # Temporarily redirect stderr to suppress the startup message
+            import sys
+            import io
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            
+            try:
+                # Run the server (this blocks)
+                app.run(
+                    transport="sse",
+                    host="127.0.0.1", 
+                    port=port,
+                    log_level="error"  # Changed from warning to error
+                )
+            finally:
+                # Restore stderr
+                sys.stderr = old_stderr
         except Exception as e:
             print(f"MCP server error: {e}", file=sys.stderr)
             server_ready.set()  # Signal even on error so we don't hang
     
     try:
         # Start the MCP server thread
-        print(f"Starting in-process MCP server on port {port}...")
         server_thread = threading.Thread(target=run_mcp_server, daemon=True)
         server_thread.start()
         
@@ -568,22 +579,19 @@ async def run_claude_hybrid(args) -> int:
             
             # Re-setup logging
             setup_logging(args.log_file, mode='a')
-            print(f"Restored logging to: {args.log_file}", file=sys.stderr)
-        
+
         # Initialize Claude with SSE configuration
-        print("Configuring Claude for MCP...")
         if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
             print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
         
         # Show configuration status
-        print_configuration_status()
+        print_configuration_status(args)
         
         # Now run Claude using the wrapper approach
-        print("Starting Claude with wrapper functionality...")
         return await run_claude_wrapper(args)
         
     except Exception as e:
-        print(f"Hybrid mode error: {e}", file=sys.stderr)
+        print(f"Hybrid mode error: {e}")
         # Fall back to regular wrapper
         print("Falling back to standard wrapper mode...")
         return await run_claude_wrapper(args)

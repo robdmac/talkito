@@ -37,7 +37,7 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__configure_tts",
     "mcp__talkito__start_voice_input",
     "mcp__talkito__stop_voice_input",
-    "mcp__talkito__get_voice_input_status",
+    # "mcp__talkito__get_voice_input_status",
     # "mcp__talkito__get_dictated_text",
     "mcp__talkito__turn_on",
     "mcp__talkito__turn_off",
@@ -97,10 +97,6 @@ def update_claude_settings():
     with open(settings_file, 'w') as f:
         json.dump(settings, f, indent=2)
     
-    if added > 0:
-        print(f"Added {added} talkito permissions to .claude/settings.local.json")
-    else:
-        print(f"All permissions needed for talkito were already found in .claude/settings.local.json")
     return True
 
 
@@ -248,9 +244,7 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
                     capture_output=True,
                     text=True
                 )
-            if result.returncode == 0:
-                print("Added talkito MCP server to Claude")
-            else:
+            if result.returncode != 0:
                 if "already exists" in result.stderr:
                     print("Talkito MCP server already configured")
                 else:
