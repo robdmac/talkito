@@ -759,7 +759,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
             log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
             return cleaned_line, [], line, False
     elif cleaned_line.strip(): # Reset on non empty lines
-        log_message("DEBUG", "reset previous_line_was_queued and previous_line_was_skipped to false")
+        log_message("DEBUG", f"{cleaned_line=} reset previous_line_was_queued and previous_line_was_skipped to false")
         send_pending_text()
         terminal.previous_line_was_queued = False
         terminal.previous_line_was_skipped = False
@@ -1201,9 +1201,9 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
                         break
 
             # Check for TTS control keys
-            control_handled = handle_tts_controls(input_data)
-            if control_handled:
-                return
+            # control_handled = handle_tts_controls(input_data)
+            # if control_handled:
+            #     return
 
             # Forward to PTY
             if input_data:  # Only forward if there's data left after filtering
@@ -1337,7 +1337,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         if spaces_after_content == 0:
             # No spaces, add one
             insert_pos = start_idx + last_char_pos
-            partial_to_show = ' ' + asr_state.current_partial
+            partial_to_show = asr_state.current_partial
         else:
             # We already have at least one space, don't add another
             insert_pos = start_idx + last_char_pos
@@ -1357,8 +1357,8 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
     # Calculate how much of the partial we can display
     if remaining_space > 0:
-        if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
-            partial_to_show = partial_to_show[:remaining_space - 1] + '…'
+        # if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
+        #     partial_to_show = partial_to_show[:remaining_space - 1] + '…'
 
         # Work only within the input line boundaries
         input_start_len = len(active_profile.input_start) if active_profile and active_profile.input_start else 0
@@ -1471,31 +1471,12 @@ def handle_partial_transcript(text: str):
     log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
-
-    # # Store the partial transcript in state - it will be displayed by modifying the output
-    old_partial = asr_state.current_partial
     asr_state.current_partial = text + '\u200b'
-    # Trigger terminal activity so we have output to modify
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            # Send a zero-width joiner character to trigger refresh without affecting spacing
-            # This is a Unicode character that doesn't take up visual space
-            os.write(current_master_fd, SPACE_THEN_BACK)  # Zero-width joiner (U+200D)
-            asr_state.refresh_spaces_added += 1
-            # Delete the old partial transcript using backspaces
-            # spaces = b''
-            # if old_partial:
-            #     # Send backspace characters to delete old text
-            #     backspaces = b'\x08' * len(old_partial)
-            #     spaces = b' ' * len(old_partial)
-            #     os.write(current_master_fd, backspaces + spaces + backspaces)
-            # # Write the new partial transcript
-            # if text:
-            #     os.write(current_master_fd, text.encode('utf-8'))
-            # os.write(current_master_fd, SPACE_THEN_BACK)
-            log_message("DEBUG", f"Triggered terminal refresh with zero-width joiner (refresh count: {asr_state.refresh_spaces_added})")
+            os.write(current_master_fd, b'\xe2\x80\xa6')
         except Exception as e:
-            log_message("ERROR", f"Failed to trigger refresh: {e}")
+            log_message("ERROR", f"Failed to trigger screen update: {e}")
 
 
 def handle_dictated_text(text: str):
@@ -1856,7 +1837,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
                     output_data = data_str.encode('utf-8')
                     output_data = output_data.replace(SPACE_THEN_BACK, b'')
-                    # log_message("DEBUG", f"output_data {output_data}")
 
                     # Show microphone emoji if ASR is active
                     if asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input():
@@ -2089,10 +2069,15 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         if line.strip():
             log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()[:100]}...'")
         
-        # Process all lines, including unchanged ones
-        text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
-            line, text_buffer, prev_line, skip_duplicates, line_idx, asr_mode
-        )
+        # Only process lines that have been added or modified
+        if action in ['added', 'modified']:
+            text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
+                line, text_buffer, prev_line, skip_duplicates, line_idx, asr_mode
+            )
+        else:
+            # For unchanged lines, don't process but preserve state
+            text_to_speak = None
+            detected_prompt = False
 
         response_prefix = active_profile.response_prefix
         if clean_text(line).strip().startswith(response_prefix):
