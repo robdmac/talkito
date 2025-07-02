@@ -46,6 +46,13 @@ except ImportError:
     def _base_log_message(level: str, message: str, logger_name: str = None):
         print(f"[{level}] {message}")
 
+# Import shared state
+try:
+    from .state import get_shared_state
+    SHARED_STATE_AVAILABLE = True
+except ImportError:
+    SHARED_STATE_AVAILABLE = False
+
 # Try to load .env files if available
 try:
     from dotenv import load_dotenv
@@ -1101,6 +1108,13 @@ def tts_worker(engine: str):
 def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output") -> str:
     """Queue text for speaking with debouncing"""
     global last_queued_text, last_queue_time
+
+    # Check shared state if available
+    if SHARED_STATE_AVAILABLE:
+        shared_state = get_shared_state()
+        if not shared_state.tts_enabled:
+            log_message("DEBUG", "TTS disabled in shared state, not queueing speech")
+            return ""
 
     # Log the original text before any filtering
     log_message("INFO", f"queue_for_speech received: '{text}'")

@@ -304,6 +304,8 @@ class SlackProvider(CommsProvider):
         self.socket_client = None
         self.input_callback = None
         self.connected_event = threading.Event()  # Event to signal when connected
+        self.rate_limited = False  # Track rate limit status
+        self.rate_limit_reset_time = None  # When rate limit resets
         
         # Enable Socket Mode if app token is provided
         if config.slack_app_token:
@@ -317,6 +319,17 @@ class SlackProvider(CommsProvider):
     
     def send_message(self, message: Message) -> bool:
         """Send Slack message."""
+        # Check if we're currently rate limited
+        if self.rate_limited:
+            if self.rate_limit_reset_time and time.time() < self.rate_limit_reset_time:
+                log_message("WARNING", f"Slack is rate limited until {time.ctime(self.rate_limit_reset_time)}")
+                return False
+            else:
+                # Rate limit period has passed
+                self.rate_limited = False
+                self.rate_limit_reset_time = None
+                log_message("INFO", "Slack rate limit has been lifted")
+        
         try:
             # Format for code blocks if it looks like terminal output
             content = message.content
@@ -338,8 +351,29 @@ class SlackProvider(CommsProvider):
             
             return True
         except SlackApiError as e:
-            log_message("ERROR", f"Failed to send Slack message: {e}")
-            return False
+            error_response = e.response
+            if error_response.get('error') == 'ratelimited':
+                # Extract retry_after if available
+                retry_after = error_response.get('retry_after', 60)  # Default to 60 seconds
+                self.rate_limited = True
+                self.rate_limit_reset_time = time.time() + retry_after
+                log_message("ERROR", f"Slack rate limited! Will retry after {retry_after} seconds")
+                log_message("INFO", f"Temporarily disabling Slack until {time.ctime(self.rate_limit_reset_time)}")
+                # Optionally disable the provider temporarily
+                self.active = False
+                # Schedule re-enabling
+                threading.Timer(retry_after, self._re_enable_after_rate_limit).start()
+                return False
+            else:
+                log_message("ERROR", f"Failed to send Slack message: {e}")
+                return False
+    
+    def _re_enable_after_rate_limit(self):
+        """Re-enable the provider after rate limit period."""
+        self.active = True
+        self.rate_limited = False
+        self.rate_limit_reset_time = None
+        log_message("INFO", "Slack provider re-enabled after rate limit period")
     
     def _process_slack_event(self, client: SocketModeClient, req: SocketModeRequest):
         """Process incoming Slack events."""
