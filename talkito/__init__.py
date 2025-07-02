@@ -28,6 +28,8 @@ from .__version__ import __version__, __author__, __email__, __license__
 
 import warnings
 warnings.filterwarnings("ignore", message=r".*in sys\.modules.*talkito\.(asr|tts|mcp|comms|profiles).*", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
 
 from . import asr, comms, profiles, tts
 

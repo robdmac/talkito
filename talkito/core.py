@@ -43,6 +43,7 @@ from typing import Optional, List, Tuple, Dict, Union, Deque, Any
 from . import tts
 from .profiles import get_profile, Profile
 from .logs import setup_logging, get_logger, log_message, restore_stderr, log_debug, is_logging_enabled
+from .state import get_shared_state
 
 try:
     from . import asr
@@ -192,7 +193,7 @@ class ASRState:
     last_prompt_position: int = 0
     prompt_detected: bool = False
     refresh_spaces_added: int = 0
-    partial_enabled: bool = False
+    partial_enabled: bool = True
     question_mode: bool = False
 
 # State instances will be created by TalkitoCore
@@ -360,12 +361,13 @@ def check_comms_input() -> Optional[str]:
     return None
 
 def send_pending_text():
-    log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
-    speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
-    if speakable_text:
-        log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
-        terminal.pending_speech_text = ""
-        send_to_comms(speakable_text)
+    if terminal.pending_speech_text.strip():
+        log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
+        speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
+        if speakable_text:
+            log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+            terminal.pending_speech_text = ""
+            send_to_comms(speakable_text)
 
 def queue_output(text: str, line_number: Optional[int] = None):
     """Queue text for both TTS and communication channels"""
@@ -453,12 +455,6 @@ def is_prompt_line(line: str) -> bool:
     except Exception as e:
         log_message("ERROR", f"Error in is_prompt_line: {e} - patterns: {prompt_patterns}, line: {line!r}")
         return False
-
-
-def should_speak_prompt(line: str) -> bool:
-    """Check if the prompt itself should be spoken"""
-    skip_prompt_tts = active_profile.skip_prompt_tts if active_profile else False
-    return not skip_prompt_tts and line
 
 
 def hash_content(content: str) -> str:
@@ -748,7 +744,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     cleaned_line = clean_text(line)
 
     # Check if this is a continuation line
-    if active_profile and active_profile.is_continuation_line(line) and (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
+    if active_profile and active_profile.is_continuation_line(cleaned_line) and (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
         log_message("DEBUG", f"Detected continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
         if terminal.previous_line_was_skipped:
             log_message("FILTER", f"Skipping continuation line (previous was skipped): '{line[:MAX_LINE_PREVIEW]}...'")
@@ -759,7 +755,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
             log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
             return cleaned_line, [], line, False
     elif cleaned_line.strip(): # Reset on non empty lines
-        log_message("DEBUG", "reset previous_line_was_queued and previous_line_was_skipped to false")
+        log_message("DEBUG", f"{cleaned_line=} reset previous_line_was_queued and previous_line_was_skipped to false")
         send_pending_text()
         terminal.previous_line_was_queued = False
         terminal.previous_line_was_skipped = False
@@ -805,10 +801,6 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     # Move prompt detection here, before we process the line
     if is_prompt:
         log_message("INFO", f"Detected prompt in line ({line_number}): '{cleaned_line}'")
-        if should_speak_prompt(cleaned_line):
-            queue_output(strip_profile_symbols(cleaned_line), line_number)
-            return None, buffer, line, True
-        # Don't speak prompt when skip_prompt_tts is True
         terminal.previous_line_was_skipped = True
         send_pending_text()
         return None, buffer, line, True
@@ -1201,9 +1193,9 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
                         break
 
             # Check for TTS control keys
-            control_handled = handle_tts_controls(input_data)
-            if control_handled:
-                return
+            # control_handled = handle_tts_controls(input_data)
+            # if control_handled:
+            #     return
 
             # Forward to PTY
             if input_data:  # Only forward if there's data left after filtering
@@ -1235,10 +1227,6 @@ def get_visual_length(text):
 
 def insert_partial_transcript(data_str, asr_state, active_profile):
     """Insert the partial transcript into the terminal output while preserving formatting. Returns modified data_str."""
-    # if not active_profile or not (active_profile.input_end and active_profile.input_end in data_str):
-    #     log_message("DEBUG", "End marker not in this chunk, waiting...")
-    #     return data_str
-
     # Find the input start position
     start_idx = data_str.find(active_profile.input_start) if active_profile and active_profile.input_start else -1
     if start_idx != -1:
@@ -1260,7 +1248,6 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
             before_pipe = search_area[check_start:right_border_pos]
 
             # Find all ANSI escape sequences
-            import re
             ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
 
             if ansi_matches:
@@ -1290,10 +1277,8 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
                 end_idx = line_end
     else:
         start_idx = 0  # Fallback if start not in this chunk
-        end_idx = data_str.find(active_profile.input_end) if active_profile and active_profile.input_end else -1
 
-    log_message("DEBUG", f"Found input area from {start_idx} to {end_idx}")
-    log_message("DEBUG", f"Content after input area: {repr(data_str[end_idx:min(end_idx + 30, len(data_str))])}")
+    log_message("DEBUG", f"Found input area from {start_idx}")
 
     # Extract the input area
     input_area = data_str[start_idx:end_idx]
@@ -1344,10 +1329,10 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         if spaces_after_content == 0:
             # No spaces, add one
             insert_pos = start_idx + last_char_pos
-            partial_to_show = ' ' + asr_state.current_partial
+            partial_to_show = asr_state.current_partial
         else:
             # We already have at least one space, don't add another
-            insert_pos = start_idx + last_char_pos + 1
+            insert_pos = start_idx + last_char_pos
             partial_to_show = asr_state.current_partial
 
         log_message("DEBUG",
@@ -1364,8 +1349,8 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
     # Calculate how much of the partial we can display
     if remaining_space > 0:
-        if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
-            partial_to_show = partial_to_show[:remaining_space - 1] + '…'
+        # if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
+        #     partial_to_show = partial_to_show[:remaining_space - 1] + '…'
 
         # Work only within the input line boundaries
         input_start_len = len(active_profile.input_start) if active_profile and active_profile.input_start else 0
@@ -1384,12 +1369,27 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         log_message("DEBUG",
                     f"Content at insert point: {repr(input_content[max(0, relative_pos - 5):relative_pos + 10])}")
 
-        # Find the end of cursor marker sequence (after \x1b[27m)
-        cursor_end = -1
-        if cursor_marker_start != -1:
-            cursor_end_marker = input_content.find('\x1b[27m', cursor_marker_start)
-            if cursor_end_marker != -1:
-                cursor_end = cursor_end_marker + 5  # Skip past \x1b[27m
+        # Check if relative_pos falls inside an ANSI escape sequence
+        i = 0
+        adjusted_relative_pos = relative_pos
+        while i < relative_pos:
+            if i < len(input_content) and input_content[i] == '\x1b' and i + 1 < len(input_content) and input_content[
+                i + 1] == '[':
+                # Found start of ANSI sequence
+                match = re.match(r'\x1b\[[0-9;]*[a-zA-Z]', input_content[i:])
+                if match:
+                    seq_end = i + len(match.group())
+                    if i < relative_pos <= seq_end:
+                        adjusted_relative_pos = seq_end
+                        log_message("DEBUG",
+                                    f"Adjusted insertion position from {relative_pos} to {adjusted_relative_pos} to avoid splitting ANSI sequence")
+                        break
+                    i = seq_end
+                else:
+                    i += 1
+            else:
+                i += 1
+        relative_pos = adjusted_relative_pos
 
         # Calculate visual length of partial transcript
         visual_partial_length = get_visual_length(partial_to_show)
@@ -1458,29 +1458,33 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
     return data_str
 
+
 def handle_partial_transcript(text: str):
     """Handle partial transcript from streaming ASR"""
     log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
+    if not text.strip():
+        return
 
-    # # Store the partial transcript in state - it will be displayed by modifying the output
-    asr_state.current_partial = text
-    # Trigger terminal activity so we have output to modify
+    asr_state.current_partial = text # + '\u200b'
+
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            # Send a zero-width joiner character to trigger refresh without affecting spacing
-            # This is a Unicode character that doesn't take up visual space
-            os.write(current_master_fd, SPACE_THEN_BACK)  # Zero-width joiner (U+200D)
-            # asr_state.refresh_spaces_added += 1
-            log_message("DEBUG", f"Triggered terminal refresh with zero-width joiner (refresh count: {asr_state.refresh_spaces_added})")
+            os.write(current_master_fd, '>'.encode('utf-8'))
         except Exception as e:
-            log_message("ERROR", f"Failed to trigger refresh: {e}")
+            log_message("ERROR", f"Failed to trigger screen update: {e}")
 
 
 def handle_dictated_text(text: str):
     """Handle text from ASR dictation"""
     global current_master_fd
+    
+    # Check shared state if available
+    shared_state = get_shared_state()
+    if not shared_state.asr_enabled:
+        log_message("DEBUG", "ASR disabled in shared state, ignoring dictated text")
+        return
     
     log_message("INFO", f"[ASR TRANSCRIPTION] Received dictated text: '{text}'")
 
@@ -1488,7 +1492,7 @@ def handle_dictated_text(text: str):
     if asr_state.partial_enabled:
         handle_partial_transcript("")
         # FIXME Due to a bug with 2nd + partial transcript handling we disable it after the first final transcript.
-        asr_state.partial_enabled = False
+        asr_state.partial_enabled = True
     
     if current_master_fd is not None:
         try:
@@ -1546,6 +1550,12 @@ def check_tap_to_talk_timeout():
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
     if not ASR_AVAILABLE or asr_mode == "off":
+        return False
+        
+    # Check shared state if available
+    shared_state = get_shared_state()
+    if not shared_state.asr_enabled:
+        log_message("DEBUG", "ASR disabled in shared state, not auto-enabling")
         return False
         
     # Log the current state for debugging
@@ -1820,7 +1830,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         output_data = output_data[:e.start]
                         data_str = output_data.decode('utf-8')
 
-                    if not in_input and active_profile.input_start and active_profile.input_end:
+                    if not in_input and active_profile.input_start:
                         if active_profile.input_start and active_profile.input_start in data_str:
                             start_idx = data_str.find(active_profile.input_start) + len(active_profile.input_start)
                             log_message("DEBUG", f"Found input start at position {start_idx}")
@@ -1830,16 +1840,12 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     if asr_state.current_partial and in_input:
                         log_message("DEBUG", f"partial_needs_display {asr_state.current_partial}")
                         data_str = insert_partial_transcript(data_str, asr_state, active_profile)
+                        # data_str = data_str.replace('\u200b', ' '*len(asr_state.current_partial))
 
-                    if in_input and active_profile.input_start and active_profile.input_end:
-                        if active_profile.input_end and active_profile.input_end in data_str:
-                            end_idx = data_str.find(active_profile.input_end)
-                            log_message("DEBUG", "Found input end at position", end_idx)
-                            in_input = False
+                    in_input = False
 
                     output_data = data_str.encode('utf-8')
                     output_data = output_data.replace(SPACE_THEN_BACK, b'')
-                    # log_message("DEBUG", f"output_data {output_data}")
 
                     # Show microphone emoji if ASR is active
                     if asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input():
@@ -2072,10 +2078,15 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         if line.strip():
             log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()[:100]}...'")
         
-        # Process all lines, including unchanged ones
-        text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
-            line, text_buffer, prev_line, skip_duplicates, line_idx, asr_mode
-        )
+        # Only process lines that have been added or modified
+        if action in ['added', 'modified']:
+            text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
+                line, text_buffer, prev_line, skip_duplicates, line_idx, asr_mode
+            )
+        else:
+            # For unchanged lines, don't process but preserve state
+            text_to_speak = None
+            detected_prompt = False
 
         response_prefix = active_profile.response_prefix
         if clean_text(line).strip().startswith(response_prefix):
