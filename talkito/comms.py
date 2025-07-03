@@ -26,6 +26,8 @@ import hashlib
 import threading
 import signal
 import subprocess
+import sys
+import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable
@@ -319,6 +321,17 @@ class SlackProvider(CommsProvider):
     
     def send_message(self, message: Message) -> bool:
         """Send Slack message."""
+        # print(f"[COMMS DEBUG] SlackProvider.send_message called", file=sys.stderr)
+        # print(f"[COMMS DEBUG] Message: content='{message.content[:50]}...', sender={message.sender}, channel={message.channel}", file=sys.stderr)
+        # print(f"[COMMS DEBUG] Provider active: {self.active}", file=sys.stderr)
+        # print(f"[COMMS DEBUG] self.channel: {self.channel}", file=sys.stderr)
+        log_message("DEBUG", f"SlackProvider.send_message called with: content='{message.content[:50]}...', sender={message.sender}, channel={message.channel}")
+        
+        # Check if provider is active
+        if not self.active:
+            log_message("DEBUG", f"[COMMS DEBUG] Provider is not active, returning False", file=sys.stderr)
+            return False
+        
         # Check if we're currently rate limited
         if self.rate_limited:
             if self.rate_limit_reset_time and time.time() < self.rate_limit_reset_time:
@@ -338,21 +351,41 @@ class SlackProvider(CommsProvider):
             
             # Determine target channel
             target = message.sender if message.sender != self.channel else self.channel
+            log_message("DEBUG", f"Target channel: {target}, self.channel: {self.channel}")
             
-            result = self.client.chat_postMessage(
-                channel=target,
-                text=content,
-                thread_ts=message.reply_to  # Thread support
-            )
+            log_message("INFO", f"Sending Slack message to {target}: {content[:50]}...")
+            try:
+                result = self.client.chat_postMessage(
+                    channel=target,
+                    text=content,
+                    thread_ts=message.reply_to  # Thread support
+                )
+            except Exception as api_e:
+                log_message("ERROR" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}", file=sys.stderr)
+                raise
             
             # Store message timestamp for threading
             if result.get("ok"):
                 message.message_id = result["ts"]
+                log_message("DEBUG", f"Slack message sent successfully, ts={result['ts']}")
+            else:
+                log_message("ERROR", f"Slack API returned ok=False: {result}")
             
             return True
         except SlackApiError as e:
             error_response = e.response
-            if error_response.get('error') == 'ratelimited':
+            log_message("ERROR", f"SlackApiError: {error_response}")
+
+            error_code = error_response.get('error', '')
+            if error_code == 'not_in_channel':
+                log_message("ERROR", f"Bot is not in channel {target}. Please invite the bot to the channel with /invite @talkito")
+                self._last_error = f"not_in_channel: {target}"
+                return False
+            elif error_code == 'channel_not_found':
+                log_message("ERROR", f"Channel {target} not found. Please create the channel or use an existing one.")
+                self._last_error = f"channel_not_found: {target}"
+                return False
+            elif error_code == 'ratelimited':
                 # Extract retry_after if available
                 retry_after = error_response.get('retry_after', 60)  # Default to 60 seconds
                 self.rate_limited = True
@@ -366,7 +399,13 @@ class SlackProvider(CommsProvider):
                 return False
             else:
                 log_message("ERROR", f"Failed to send Slack message: {e}")
+                log_message("ERROR", f"Error details: {error_response}")
                 return False
+        except Exception as e:
+            log_message("ERROR", f"Unexpected error in SlackProvider.send_message: {type(e).__name__}: {str(e)}")
+            traceback.print_exc(file=sys.stderr)
+            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+            return False
     
     def _re_enable_after_rate_limit(self):
         """Re-enable the provider after rate limit period."""
@@ -477,6 +516,8 @@ class CommunicationManager:
     
     def add_provider(self, provider_type: str, recipients: List[str] = None) -> bool:
         """Add a communication provider - returns True if successful, False otherwise."""
+        log_message("INFO", f"Adding {provider_type} provider")
+        
         try:
             if provider_type == "sms" and TWILIO_AVAILABLE:
                 provider = TwilioSMSProvider(self.config)
@@ -486,29 +527,44 @@ class CommunicationManager:
             
             elif provider_type == "whatsapp" and TWILIO_AVAILABLE:
                 # Check if ZROK_RESERVED_TOKEN is set (required for WhatsApp)
-                if not os.environ.get('ZROK_RESERVED_TOKEN'):
+                zrok_token = os.environ.get('ZROK_RESERVED_TOKEN')
+                log_message("DEBUG", f"ZROK_RESERVED_TOKEN check: {'set' if zrok_token else 'not set'}")
+                
+                if not zrok_token:
                     log_message("ERROR", "ZROK_RESERVED_TOKEN is required for WhatsApp support")
                     print("\n❌ WhatsApp requires ZROK_RESERVED_TOKEN to be set!")
                     print("   Run 'talkito --setup-whatsapp' for setup instructions")
                     return False
                 
+                log_message("DEBUG", f"Creating TwilioWhatsAppProvider with config: account_sid={'***' if self.config.twilio_account_sid else 'None'}, auth_token={'***' if self.config.twilio_auth_token else 'None'}, whatsapp_number={self.config.twilio_whatsapp_number}")
                 provider = TwilioWhatsAppProvider(self.config)
                 self.providers.append(provider)
                 log_message("INFO", "Added WhatsApp provider")
                 return True
             
             elif provider_type == "slack" and SLACK_AVAILABLE:
+                log_message("DEBUG", f"Creating SlackProvider with config: bot_token={'***' if self.config.slack_bot_token else 'None'}, app_token={'***' if self.config.slack_app_token else 'None'}, channel={self.config.slack_channel}")
+                
+                # Check if required credentials are available
+                if not self.config.slack_bot_token:
+                    log_message("ERROR", "Cannot add Slack provider: SLACK_BOT_TOKEN not set")
+                    return False
+                if not self.config.slack_app_token:
+                    log_message("ERROR", "Cannot add Slack provider: SLACK_APP_TOKEN not set")
+                    return False
+                    
                 provider = SlackProvider(self.config)
                 self.providers.append(provider)
                 log_message("INFO", "Added Slack provider")
                 return True
             
             else:
-                log_message("WARNING", f"Provider {provider_type} not available")
+                log_message("WARNING", f"Provider {provider_type} not available - TWILIO_AVAILABLE={TWILIO_AVAILABLE}, SLACK_AVAILABLE={SLACK_AVAILABLE}")
                 return False
         
         except Exception as e:
             log_message("ERROR", f"Failed to add provider {provider_type}: {e}")
+            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
             return False
     
     def start(self):
@@ -694,11 +750,14 @@ class CommunicationManager:
             
             def do_POST(self):
                 """Handle POST requests for webhooks."""
+                log_message("INFO", f"[WEBHOOK] Received POST request to {self.path}")
+                
                 # Parse the path
                 parsed_path = urlparse(self.path)
                 channel = parsed_path.path.strip('/')
                 
                 if channel not in ['sms', 'whatsapp']:
+                    log_message("WARNING", f"[WEBHOOK] Invalid channel: {channel}")
                     self.send_error(404, "Not Found")
                     return
                 
@@ -711,6 +770,8 @@ class CommunicationManager:
                 from_number = params.get('From', [''])[0]
                 body = params.get('Body', [''])[0]
                 message_sid = params.get('MessageSid', [''])[0]  # Twilio's unique message ID
+                
+                log_message("INFO", f"[WEBHOOK] Parsed {channel} message from {from_number}: {body}")
                 
                 # Create and handle the message
                 message = Message(
@@ -777,27 +838,43 @@ class CommunicationManager:
     
     def _print_webhook_info(self):
         """Print webhook configuration information."""
+        # Check if running in Claude wrapper mode
+        from .state import get_shared_state
+        shared_state = get_shared_state()
+        is_wrapper_mode = shared_state and (shared_state.slack_mode_active or shared_state.whatsapp_mode_active)
+        
         has_sms = any(isinstance(p, TwilioSMSProvider) for p in self.providers)
         has_whatsapp = any(isinstance(p, TwilioWhatsAppProvider) for p in self.providers)
-        if self.config.zrok_reserved_token:
-            print("\nPermanent Webhook URLs:")
-        else:
-            print("\nTemporary Webhook URLs:")
+        
+        # Log webhook info
+        webhook_type = "Permanent" if self.config.zrok_reserved_token else "Temporary"
+        log_message("INFO", f"{webhook_type} Webhook URLs:")
         if has_sms:
-            print(f"  SMS: {self.webhook_url}/sms")
+            log_message("INFO", f"  SMS: {self.webhook_url}/sms")
         if has_whatsapp:
-            print(f"  WhatsApp: {self.webhook_url}/whatsapp")
-        
-        if has_sms or has_whatsapp:
-            print(f"\nAdd these URLs in your Twilio console:\n")
-            print(f"  1. Go to https://console.twilio.com/")
-            print(f"  2. For SMS: Phone Numbers → Manage → Active Numbers → Your Number → Messaging")
-            print(f"  3. For WhatsApp: Messaging → Settings → WhatsApp Sandbox Settings")
-            print(f"  4. Set the webhook URL for incoming messages")
-        
-        if not self.config.zrok_reserved_token:
-            print(f"Note: This URL will change on restart. Use 'zrok reserve' for a permanent URL and set the")
-            print("ZROK_RESERVED_TOKEN env variable so you won't need to update Twilio settings on restart!")
+            log_message("INFO", f"  WhatsApp: {self.webhook_url}/whatsapp")
+            
+        # Only print to console if not in wrapper mode
+        if not is_wrapper_mode:
+            if self.config.zrok_reserved_token:
+                print("\nPermanent Webhook URLs:")
+            else:
+                print("\nTemporary Webhook URLs:")
+            if has_sms:
+                print(f"  SMS: {self.webhook_url}/sms")
+            if has_whatsapp:
+                print(f"  WhatsApp: {self.webhook_url}/whatsapp")
+            
+            if has_sms or has_whatsapp:
+                print(f"\nAdd these URLs in your Twilio console:\n")
+                print(f"  1. Go to https://console.twilio.com/")
+                print(f"  2. For SMS: Phone Numbers → Manage → Active Numbers → Your Number → Messaging")
+                print(f"  3. For WhatsApp: Messaging → Settings → WhatsApp Sandbox Settings")
+                print(f"  4. Set the webhook URL for incoming messages")
+            
+            if not self.config.zrok_reserved_token:
+                print(f"Note: This URL will change on restart. Use 'zrok reserve' for a permanent URL and set the")
+                print("ZROK_RESERVED_TOKEN env variable so you won't need to update Twilio settings on restart!")
     
     def _read_zrok_output(self, stream, stream_name: str, url_found: threading.Event):
         """Read and parse zrok process output."""
@@ -837,7 +914,6 @@ class CommunicationManager:
     def _setup_zrok(self):
         """Set up zrok (free, open source, zero trust tunneling)"""
         try:
-            import threading
             import re
             
             # Build zrok command
@@ -915,6 +991,14 @@ def setup_communication(providers: List[str] = None, config: Optional[CommsConfi
     if config is None:
         config = create_config_from_env()
     
+    # Log configuration details for debugging
+    log_message("DEBUG", f"Config loaded - twilio_account_sid: {'***' if config.twilio_account_sid else 'None'}")
+    log_message("DEBUG", f"Config loaded - twilio_whatsapp_number: {config.twilio_whatsapp_number}")
+    log_message("DEBUG", f"Config loaded - slack_bot_token: {'***' if config.slack_bot_token else 'None'}")
+    log_message("DEBUG", f"Config loaded - slack_app_token: {'***' if config.slack_app_token else 'None'}")
+    log_message("DEBUG", f"Config loaded - slack_channel: {config.slack_channel}")
+    log_message("DEBUG", f"ZROK_RESERVED_TOKEN set: {bool(os.environ.get('ZROK_RESERVED_TOKEN'))}")
+    
     if not providers:
         # Auto-detect based on available credentials
         providers = []
@@ -937,6 +1021,8 @@ def setup_communication(providers: List[str] = None, config: Optional[CommsConfi
         log_message("INFO", f"Adding provider: {provider}")
         if manager.add_provider(provider):
             successfully_added.append(provider)
+        else:
+            log_message("ERROR", f"Failed to add provider: {provider}")
     
     if not successfully_added:
         log_message("ERROR", "No providers could be added")
@@ -950,9 +1036,6 @@ def setup_communication(providers: List[str] = None, config: Optional[CommsConfi
 
 def run_interactive_mode(manager: CommunicationManager, providers: List[str]):
     """Run interactive messaging mode."""
-    import sys
-    import time
-    import threading
     import termios
 
     providers_str = ', '.join(p.upper() for p in providers)
@@ -1017,8 +1100,7 @@ def run_interactive_mode(manager: CommunicationManager, providers: List[str]):
 if __name__ == "__main__":
     # Make module runnable: python -m talkito.comms sms --sms-recipients +1234567890 "hello"
     import argparse
-    import sys
-    
+
     parser = argparse.ArgumentParser(
         description="Send messages via Talkito communication providers",
         usage='%(prog)s [options] [MESSAGE]'

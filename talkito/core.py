@@ -343,11 +343,18 @@ def send_to_comms(text: str):
         if text.strip():
             log_message("DEBUG", f"[COMMS] Sending to comms: {text}...")
             try:
+                # send_output already checks shared state for channels internally
                 comm_manager.send_output(text)
             except Exception as e:
                 log_message("ERROR", f"[COMMS] Failed to send to comms: {e}")
     else:
         log_message("DEBUG", "[COMMS] comm_manager not configured")
+
+
+def get_comm_manager():
+    """Get the global communication manager instance"""
+    global comm_manager
+    return comm_manager
 
 
 def check_comms_input() -> Optional[str]:
@@ -1674,6 +1681,80 @@ def ensure_asr_initialized():
     return False
 
 
+def ensure_tts_state_sync():
+    """Ensure TTS state is synchronized and clear pending text if TTS is disabled"""
+    shared_state = get_shared_state()
+    
+    # If TTS was disabled, clear any pending speech text
+    if not shared_state.tts_enabled and terminal and terminal.pending_speech_text:
+        log_message("INFO", "TTS disabled, clearing pending speech text")
+        terminal.pending_speech_text = ""
+        terminal.pending_text_line_number = None
+
+
+def ensure_comms_initialized():
+    """Ensure communication channels are initialized based on shared state"""
+    if not COMMS_AVAILABLE:
+        return False
+        
+    global comm_manager
+    shared_state = get_shared_state()
+    
+    # First, check if we need to create comm_manager at all
+    if not comm_manager and (shared_state.slack_mode_active or shared_state.whatsapp_mode_active):
+        log_message("INFO", "Communication modes active but comm_manager not initialized - creating now")
+        providers = []
+        if shared_state.slack_mode_active:
+            providers.append('slack')
+        if shared_state.whatsapp_mode_active:
+            providers.append('whatsapp')
+            
+        try:
+            comm_manager = comms.setup_communication(providers=providers)
+            log_message("INFO", f"Created comm_manager with providers: {providers}")
+            return True
+        except Exception as e:
+            log_message("ERROR", f"Failed to create comm_manager: {e}")
+            return False
+    
+    # If we have a comm_manager but need to add providers, we need to recreate it
+    # because providers can't be added dynamically
+    if comm_manager:
+        has_slack = any(hasattr(p, '__class__') and p.__class__.__name__ == 'SlackProvider' for p in (comm_manager.providers if hasattr(comm_manager, 'providers') else []))
+        has_whatsapp = any(hasattr(p, '__class__') and p.__class__.__name__ in ['WhatsAppProvider', 'TwilioWhatsAppProvider'] for p in (comm_manager.providers if hasattr(comm_manager, 'providers') else []))
+        
+        needs_slack = shared_state.slack_mode_active and not has_slack
+        needs_whatsapp = shared_state.whatsapp_mode_active and not has_whatsapp
+        
+        if needs_slack or needs_whatsapp:
+            log_message("INFO", f"Need to add providers - recreating comm_manager (needs_slack={needs_slack}, needs_whatsapp={needs_whatsapp})")
+            
+            # Stop existing comm_manager first to avoid port conflicts
+            if hasattr(comm_manager, 'stop'):
+                try:
+                    comm_manager.stop()
+                    log_message("INFO", "Stopped existing comm_manager")
+                except Exception as e:
+                    log_message("WARNING", f"Failed to stop existing comm_manager: {e}")
+            
+            # Build provider list
+            providers = []
+            if shared_state.slack_mode_active:
+                providers.append('slack')
+            if shared_state.whatsapp_mode_active:
+                providers.append('whatsapp')
+                
+            try:
+                comm_manager = comms.setup_communication(providers=providers)
+                log_message("INFO", f"Recreated comm_manager with providers: {providers}")
+                return True
+            except Exception as e:
+                log_message("ERROR", f"Failed to recreate comm_manager: {e}")
+                return False
+                
+    return False
+
+
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
     if not ASR_AVAILABLE:
@@ -1682,6 +1763,12 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     # First ensure ASR state is correct (initialize if needed, cleanup if disabled)
     ensure_asr_initialized()
     ensure_asr_cleanup()
+    
+    # Also ensure TTS state is synchronized
+    ensure_tts_state_sync()
+    
+    # Ensure communication channels are initialized if needed
+    ensure_comms_initialized()
         
     # Check shared state if available
     shared_state = get_shared_state()
@@ -2294,6 +2381,15 @@ def cleanup_terminal():
         sys.stdout.flush()
     except Exception:
         pass
+    
+    # Stop communication manager if not already done
+    global comm_manager
+    if comm_manager:
+        try:
+            comm_manager.stop()
+            comm_manager = None
+        except Exception:
+            pass
 
 # Register cleanup function to run at exit
 atexit.register(cleanup_terminal)
@@ -2329,6 +2425,15 @@ def signal_handler(signum):
         tts.shutdown_tts()
     except Exception:
         pass
+    
+    # Stop communication manager (includes zrok cleanup)
+    global comm_manager
+    if comm_manager:
+        try:
+            comm_manager.stop()
+            log_message("INFO", "Communication manager stopped")
+        except Exception as e:
+            log_message("ERROR", f"Failed to stop comm_manager: {e}")
     
     # Exit with appropriate code using os._exit to avoid segfaults
     exit_code = 130 if signum == signal.SIGINT else 0
