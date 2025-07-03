@@ -331,85 +331,18 @@ def save_shared_state():
     _shared_state.save_state()
 
 
+# Status reporting has been moved to status.py to avoid circular dependencies
+# Re-export for backward compatibility
+from .status import get_status_summary as _imported_get_status_summary
+
+# Wrapper to maintain the same signature
 def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channel=None,
                        tts_override=False, asr_override=False) -> str:
     """Generate a one-line status summary for TalkiTo components
     
-    Args:
-        comms_manager: Communication manager instance (optional)
-        whatsapp_recipient: Current WhatsApp recipient (optional)
-        slack_channel: Current Slack channel (optional)
-    
-    Returns:
-        One-line formatted status string
+    This is a wrapper for backward compatibility. The implementation has moved to status.py.
     """
-    try:
-        # Import needed modules
-        from . import tts
-        try:
-            from . import asr
-            ASR_AVAILABLE = True
-        except ImportError:
-            asr = None
-            ASR_AVAILABLE = False
-        
-        # Import provider types if comms_manager is provided
-        if comms_manager:
-            from .comms import SlackProvider, TwilioWhatsAppProvider
-        
-        shared_state = get_shared_state()
-        
-        # Build status dict
-        status = {
-            "tts": {
-                "initialized": shared_state.tts_initialized,
-                "enabled": shared_state.tts_enabled,
-                "is_speaking": tts.is_speaking() if shared_state.tts_initialized else False,
-                "provider": shared_state.tts_provider or tts.select_best_tts_provider()
-            },
-            "asr": {
-                "available": ASR_AVAILABLE,
-                "initialized": shared_state.asr_initialized,
-                "enabled": shared_state.asr_enabled,
-                "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and shared_state.asr_initialized else False,
-                "provider": shared_state.asr_provider or (asr.select_best_asr_provider() if ASR_AVAILABLE else None)
-            },
-            "whatsapp": {
-                "mode_active": shared_state.whatsapp_mode_active,
-                "recipient": whatsapp_recipient,
-                "configured": comms_manager is not None and any(isinstance(p, TwilioWhatsAppProvider) for p in (comms_manager.providers if comms_manager else []))
-            },
-            "slack": {
-                "mode_active": shared_state.slack_mode_active,
-                "channel": slack_channel,
-                "configured": comms_manager is not None and any(isinstance(p, SlackProvider) for p in (comms_manager.providers if comms_manager else []))
-            }
-        }
-        
-        # Format as a one-line summary
-        # Show green only if both initialized AND enabled
-        if tts_override:
-            tts_emoji = "🟢"
-        else:
-            tts_emoji = "🟢" if status["tts"]["initialized"] and status["tts"]["enabled"] else "🔴"
-        if asr_override:
-            asr_emoji = "🟢"
-        else:
-            asr_emoji = "🟢" if status["asr"]["initialized"] and status["asr"]["enabled"] else "🔴"
-        
-        # Communication status
-        comms = []
-        if status["whatsapp"]["configured"]:
-            emoji = "🟢" if status["whatsapp"]["mode_active"] else "⚪"
-            comms.append(f"{emoji} WhatsApp")
-        if status["slack"]["configured"]:
-            emoji = "🟢" if status["slack"]["mode_active"] else "⚪"
-            comms.append(f"{emoji} Slack")
-        
-        return f"TalkiTo: {tts_emoji} TTS ({status['tts']['provider']}) | {asr_emoji} ASR ({status['asr']['provider'] or 'none'}) | Comms: {', '.join(comms) if comms else 'none'}"
-        
-    except Exception as e:
-        return f"Error getting status: {str(e)}"
+    return _imported_get_status_summary(comms_manager, tts_override, asr_override)
 
 
 def set_tts_config_thread_safe(provider: Optional[str] = None, voice: Optional[str] = None,

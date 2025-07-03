@@ -34,6 +34,9 @@ from queue import Queue, Empty
 # Import centralized logging utilities
 from .logs import log_message as _base_log_message
 
+# Import centralized configuration
+from .config import get_config, TalkitoConfig
+
 # Try to load .env files if available
 try:
     from dotenv import load_dotenv
@@ -893,17 +896,22 @@ class CommunicationManager:
 
 # Convenience functions for integration
 def create_config_from_env() -> CommsConfig:
-    """Create configuration from environment variables"""
-    config = CommsConfig()
+    """Create configuration from centralized config"""
+    tconfig = get_config()
     
-    # Parse recipient lists from env
-    sms_recipients = os.environ.get('SMS_RECIPIENTS', '')
-    if sms_recipients:
-        config.sms_recipients = [r.strip() for r in sms_recipients.split(',')]
-    
-    whatsapp_recipients = os.environ.get('WHATSAPP_RECIPIENTS', '')
-    if whatsapp_recipients:
-        config.whatsapp_recipients = [r.strip() for r in whatsapp_recipients.split(',')]
+    config = CommsConfig(
+        twilio_account_sid=tconfig.twilio_account_sid,
+        twilio_auth_token=tconfig.twilio_auth_token,
+        twilio_phone_number=tconfig.twilio_phone_number,
+        twilio_whatsapp_number=tconfig.twilio_whatsapp_number,
+        slack_bot_token=tconfig.slack_bot_token,
+        slack_app_token=tconfig.slack_app_token,
+        slack_channel=tconfig.slack_channel,
+        webhook_port=tconfig.comms_webhook_port,
+        webhook_timeout=tconfig.comms_webhook_timeout,
+        sms_recipients=tconfig.sms_recipients,
+        whatsapp_recipients=tconfig.whatsapp_recipients
+    )
     
     return config
 

@@ -42,7 +42,8 @@ from . import comms
 from .comms import SlackProvider, TwilioWhatsAppProvider, TwilioSMSProvider
 from .core import TalkitoCore
 from .logs import log_message as _base_log_message, setup_logging
-from .state import get_shared_state, save_shared_state, get_status_summary
+from .state import get_shared_state, save_shared_state
+from .status import get_status_summary
 
 # Check if ASR is available
 try:
@@ -649,7 +650,7 @@ async def turn_on() -> str:
         shared_state.set_voice_mode(True)
 
         log_message("INFO", f"turn_on completed: Voice mode activated")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling voice mode: {str(e)}"
@@ -699,7 +700,7 @@ async def turn_off() -> str:
         shared_state.turn_off_all()
         
         log_message("INFO", f"turn_off completed: Voice mode deactivated")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling voice mode: {str(e)}"
@@ -724,7 +725,7 @@ async def _enable_tts_internal() -> str:
         # Announce enablement if TTS is working
         tts.queue_for_speech("Text to speech is now enabled.", None)
         
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling TTS: {str(e)}"
@@ -747,7 +748,7 @@ async def _disable_tts_internal() -> str:
         
         log_message("INFO", "TTS disabled")
         
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling TTS: {str(e)}"
@@ -782,7 +783,7 @@ async def _enable_asr_internal() -> str:
         
         log_message("INFO", "ASR enabled")
         
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error enabling ASR: {str(e)}"
@@ -809,7 +810,7 @@ async def _disable_asr_internal() -> str:
         _shared_state.set_asr_initialized(False)
         log_message("INFO", "ASR marked as uninitialized")
         
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error disabling ASR: {str(e)}"
@@ -1644,7 +1645,7 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         # await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
         
         log_message("INFO", f"start_whatsapp_mode completed: WhatsApp mode activated for {_whatsapp_recipient}")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error starting WhatsApp mode: {str(e)}"
@@ -1673,7 +1674,7 @@ async def stop_whatsapp_mode() -> str:
         
         if not shared_state.whatsapp_mode_active:
             log_message("INFO", f"stop_whatsapp_mode: WhatsApp mode is not active")
-            return _get_status_summary()
+            return get_status_summary()
         
         # Send farewell message
         if _whatsapp_recipient:
@@ -1686,7 +1687,7 @@ async def stop_whatsapp_mode() -> str:
         _shared_state.set_whatsapp_mode(False)
         
         log_message("INFO", f"stop_whatsapp_mode completed: WhatsApp mode deactivated")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error stopping WhatsApp mode: {str(e)}"
@@ -1781,7 +1782,7 @@ async def start_slack_mode(channel: str = None) -> str:
         await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
         
         log_message("INFO", f"start_slack_mode completed: Slack mode activated for {_slack_channel}")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error starting Slack mode: {str(e)}"
@@ -1808,7 +1809,7 @@ async def stop_slack_mode() -> str:
         
         if not _slack_mode:
             log_message("INFO", f"stop_slack_mode: Slack mode is not active")
-            return _get_status_summary()
+            return get_status_summary()
         
         # Send farewell message
         if _slack_channel:
@@ -1822,7 +1823,7 @@ async def stop_slack_mode() -> str:
         shared_state.set_slack_mode(False)
         
         log_message("INFO", f"stop_slack_mode completed: Slack mode deactivated")
-        return _get_status_summary()
+        return get_status_summary()
         
     except Exception as e:
         error_msg = f"Error stopping Slack mode: {str(e)}"

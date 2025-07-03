@@ -47,7 +47,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import TalkitoCore
-from .state import get_status_summary
+from .status import get_status_summary
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -867,6 +867,10 @@ def show_whatsapp_setup():
 async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
+    
+    # Load configuration and merge with args
+    config = get_config()
+    config.merge_with_args(args)
     
     # Handle MCP server modes synchronously before entering async context
     if args.mcp_server or args.mcp_sse_server:

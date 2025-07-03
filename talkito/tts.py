@@ -47,12 +47,22 @@ except ImportError:
     def _base_log_message(level: str, message: str, logger_name: str = None):
         print(f"[{level}] {message}")
 
+# Import compiled patterns for performance
+from .patterns import (
+    MULTI_PERIOD_PATTERN, PERIOD_COMMA_PATTERN, COMMA_PERIOD_PATTERN,
+    MULTI_PUNCTUATION_PATTERN, PATH_PATTERN, URL_PATTERN, EMAIL_PATTERN,
+    IP_PATTERN, HEX_PATTERN, UUID_PATTERN, HASH_PATTERN
+)
+
 # Import shared state
 try:
     from .state import get_shared_state
     SHARED_STATE_AVAILABLE = True
 except ImportError:
     SHARED_STATE_AVAILABLE = False
+
+# Import centralized configuration
+from .config import get_config
 
 # Try to load .env files if available
 try:
@@ -65,22 +75,29 @@ except ImportError:
     # python-dotenv not installed, continue without it
     pass
 
-# Configuration constants
-MIN_SPEAK_LENGTH = 1  # Minimum characters before speaking
-CACHE_SIZE = 1000  # Cache size for similarity checking
-CACHE_TIMEOUT = 1800  # Seconds before a cached item can be spoken again
-SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
-DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
+# Get configuration instance
+_config = get_config()
 
-# Global configuration
-auto_skip_tts_enabled = False  # Whether to auto-skip long text
-disable_tts = False  # Whether to disable TTS completely (for testing)
-tts_provider = "system"  # Current TTS provider (system, openai, polly, azure, gcloud, elevenlabs, deepgram, etc.)
-openai_voice = os.environ.get('OPENAI_VOICE', 'alloy')  # Default OpenAI voice
-polly_voice = os.environ.get('AWS_POLLY_VOICE', 'Joanna')  # Default AWS Polly voice
-polly_region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')  # Default AWS region for Polly
-azure_voice = os.environ.get('AZURE_VOICE', 'en-US-AriaNeural')  # Default Azure voice
-azure_region = os.environ.get('AZURE_REGION', 'eastus')  # Default Azure region
+# Configuration constants (from centralized config where applicable)
+MIN_SPEAK_LENGTH = 3  # Minimum characters before speaking
+CACHE_SIZE = 1000  # Cache size for similarity checking
+CACHE_TIMEOUT = 10  # Seconds before a cached item can be spoken again
+SIMILARITY_THRESHOLD = _config.similarity_threshold
+DEBOUNCE_TIME = _config.debounce_time
+MAX_SPEECH_LENGTH = _config.max_speech_length
+RECENT_TEXT_CACHE_SIZE = _config.recent_text_cache_size
+TTS_QUEUE_SIZE = 50  # Maximum items in TTS queue
+SPEECH_BUFFER_TIME = 2.0  # Time to wait after TTS finishes before considering it "done"
+
+# Global configuration (with config defaults)
+auto_skip_tts_enabled = _config.auto_skip_tts
+disable_tts = not _config.tts_enabled
+tts_provider = _config.tts_provider or "system"
+openai_voice = _config.tts_voice or os.environ.get('OPENAI_VOICE', 'alloy')
+polly_voice = _config.tts_voice or os.environ.get('AWS_POLLY_VOICE', 'Joanna')
+polly_region = _config.aws_region or 'us-east-1'
+azure_voice = _config.tts_voice or os.environ.get('AZURE_VOICE', 'en-US-AriaNeural')
+azure_region = _config.azure_speech_region or 'eastus'
 gcloud_voice = os.environ.get('GCLOUD_VOICE', 'en-US-Journey-F')  # Default Google Cloud voice
 gcloud_language_code = os.environ.get('GCLOUD_LANGUAGE_CODE', 'en-US')  # Default Google Cloud language code
 elevenlabs_voice_id = os.environ.get('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default ElevenLabs voice (Rachel)
@@ -1003,9 +1020,8 @@ def clean_punctuation_sequences(text: str) -> str:
     text = re.sub(r'([!?:;])\.\s', r'\1 ', text)
     # Replace punctuation followed by period at end with just the punctuation
     text = re.sub(r'([!?:;])\.$', r'\1', text)
-    # Only clean up multiple periods with spaces between (like ". ." or ". . .")
-    # This preserves intentional ellipsis like "..." or ".."
-    text = re.sub(r'\.(\s+\.)+', '.', text)
+    # Use compiled pattern for multiple periods
+    text = MULTI_PERIOD_PATTERN.sub('.', text)
     return text
 
 
@@ -1073,7 +1089,7 @@ def extract_speakable_text(text: str) -> (str, str):
         written_text = '. '.join(processed_written_lines) + '.'
     
     # Skip text that contains no letters (just punctuation, numbers, spaces)
-    if not re.search(r'[a-zA-Z]', text):
+    if not any(c.isalpha() for c in text):
         return "", ""
     
     return spoken_text, written_text

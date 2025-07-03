@@ -57,11 +57,14 @@ try:
 except ImportError:
     COMMS_AVAILABLE = False
 
+# Get configuration instance
+_config = get_config()
+
 # Configuration
 TTS_ENGINE = "auto"  # Options: auto, espeak, festival, say, flite
 SPEAK_ERRORS = True  # Whether to speak stderr output
 
-# Constants
+# Constants (with config overrides where applicable)
 MAX_LINE_PREVIEW = 50
 MAX_LINE_LOG = 100
 STATUS_CHECK_INTERVAL = 0.1
@@ -72,7 +75,7 @@ SCREEN_REDRAW_TIMEOUT = 5.0
 DEFAULT_TERMINAL_HEIGHT = 24
 DEFAULT_TERMINAL_WIDTH = 80
 PTY_READ_SIZE = 16384
-SIMILARITY_THRESHOLD = 0.85
+SIMILARITY_THRESHOLD = _config.similarity_threshold
 RECENT_LINES_CACHE_SIZE = 50
 SCREEN_CONTENT_CACHE_SIZE = 100
 RESPONSE_PREFIX = '⏺'
@@ -102,22 +105,14 @@ KEY_TAP_TO_TALK_SEQUENCES = [
 # Filtering Configuration
 SKIP_LINE_STARTS = ["?", "/", "cwd:", "#", "DEBUG:", "INFO:", "WARNING:"]
 SKIP_LINE_CONTAINS = ["Press Ctrl-C", "[SKIPPED]", "? for shortcuts"]
+
+# Progress pattern strings (for backward compatibility with profiles)
 PROGRESS_PATTERNS = [
-    # r'^\s*[│⎿]\s+',  # Progress lines
     r'^\s*\.{3,}$',  # Multiple dots
     r'^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]',  # Spinner characters
     r'^\s*\d+\s+',  # Lines starting with line numbers (code diffs)
     r'^[+-]\s*\d+',  # Diff line numbers with +/-
-    # r'^\s*\d+\s*[:\|]\s*',  # Line numbers with : or | separator
 ]
-
-# Common regex patterns
-FILE_PATH_PATTERN = r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$'
-NUMBERS_ONLY_PATTERN = r'^\s*\d+(\s+\d+)*\s*$'
-BOX_CONTENT_PATTERN = r'│\s*([^│]+)\s*│'
-BOX_SEPARATOR_PATTERN = r'^[─═╌╍]+$'
-PROMPT_PATTERN = r'^\s*[>\$#]\s*$'
-SENTENCE_END_PATTERN = r'[.!?]$'
 
 # Terminal escape sequences
 RESET_SEQUENCES = [
@@ -134,29 +129,16 @@ ALT_SCREEN_SEQUENCES = [
     b'\x1b[?47l',
 ]
 
-# ANSI escape code pattern - comprehensive
-ANSI_PATTERN = re.compile(
-    r'(\x1B\[[0-9;]*[a-zA-Z]|'  # Standard codes
-    r'\x1B\]([0-9]+;[^\x07\x1B]*)?\x07|'  # OSC sequences
-    r'\x1B[()][0-9A-Za-z]?|'  # Charset selection (includes letters like B)
-    r'\x1B[>=]|'  # Keypad modes
-    r'\x0F|'  # Shift in
-    r'\r$|'  # Carriage return at end
-    r'\x1B\[[0-9;]*[Hf]|'  # Cursor positioning
-    r'\x1B\[([0-9]+[A-D]|s|u|[0-9]*[Jm])|'  # Various controls
-    r'\x1B\[6n|'  # Cursor position request
-    r'\x1B\[[0-9]*[GKL]|'  # Column/line operations
-    r'\x1B\[[?][0-9]+[hl]|'  # Private modes
-    r'\x1B\[[0-9]+;[0-9]+;[0-9]+m|'  # RGB colors
-    r'\x1B\[[0-9]+(;[0-9]+)*m|'  # Generic SGR sequences
-    r'\x1B\([B0]|'  # More charset selections
-    r'\x1B\)0|'  # Charset selections
-    r'\x1B[78]|'  # Save/restore cursor
-    r'\x1B\[[0-9]*(;[0-9]+)*[HfABCDsuJKmhlr]|'  # More complete control sequences
-    r'\x1B#[0-9]|'  # Line attributes
-    r'\x1BP[^\\]*\\|'  # DCS sequences
-    r'\x1B\[[0-9;]*~)'  # Special keys
+# Import compiled regex patterns for performance
+from .patterns import (
+    ANSI_PATTERN, FILE_PATH_PATTERN, NUMBERS_ONLY_PATTERN,
+    BOX_CONTENT_PATTERN, BOX_SEPARATOR_PATTERN, PROMPT_PATTERN,
+    SENTENCE_END_PATTERN, PROGRESS_PATTERNS as COMPILED_PROGRESS_PATTERNS,
+    ORPHANED_M_PATTERN, ANSI_NUMBER_M_PATTERN, CONTINUATION_LINE_PATTERN
 )
+
+# Import centralized configuration
+from .config import get_config
 
 # Global state - these are updated by TalkitoCore
 current_master_fd: Optional[int] = None
@@ -404,10 +386,10 @@ def clean_text(text: str) -> str:
     # This handles cases where 'm' appears after whitespace or at start of string
     # but NOT when it's part of a word (like 'am', 'pm', 'them', etc.)
     # Also preserve contractions like "I'm", "don't", etc.
-    text = re.sub(r'(?<![a-zA-Z0-9\'])m(?![a-zA-Z])', '', text)
+    text = ORPHANED_M_PATTERN.sub('', text)
     
     # Also remove patterns like "2m" or "22m" that might be left from ANSI codes
-    text = re.sub(r'(?<![a-zA-Z])\d{1,3}m\b', '', text)
+    text = ANSI_NUMBER_M_PATTERN.sub('', text)
     
     # Filter out non-printable characters
     return ''.join(char for char in text if ord(char) >= 32 or char in '\n\t')
@@ -429,12 +411,12 @@ def is_response_line(line: str) -> bool:
 
 def extract_box_content(line: str) -> Optional[str]:
     """Extract meaningful content from box drawing lines"""
-    box_match = re.match(BOX_CONTENT_PATTERN, line)
+    box_match = BOX_CONTENT_PATTERN.match(line)
     if box_match:
         box_content = box_match.group(1).strip()
         if (box_content and
-                not re.match(BOX_SEPARATOR_PATTERN, box_content) and
-                not re.match(PROMPT_PATTERN, box_content)):
+                not BOX_SEPARATOR_PATTERN.match(box_content) and
+                not PROMPT_PATTERN.match(box_content)):
             return box_content
     return None
 
@@ -507,7 +489,7 @@ def should_skip_line(line: str) -> bool:
 
     # Check for progress patterns
     try:
-        if any(re.match(p, line) for p in PROGRESS_PATTERNS if p):
+        if any(p.match(line) for p in COMPILED_PROGRESS_PATTERNS):
             log_message("FILTER", f"Skipped progress line: '{line}'")
             return True
     except Exception as e:
@@ -515,12 +497,12 @@ def should_skip_line(line: str) -> bool:
         # Continue processing on error
 
     # Skip lines that are just file paths
-    if re.match(r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$', line):
+    if FILE_PATH_PATTERN.match(line):
         log_message("FILTER", f"Skipped file path: '{line}'")
         return True
 
     # Skip lines that are just numbers (single or multiple), catches cases like "599" or "599 603 1117"
-    if re.match(r'^\s*\d+(\s+\d+)*\s*$', line):
+    if NUMBERS_ONLY_PATTERN.match(line):
         log_message("FILTER", f"Skipped line with only numbers: '{line}'")
         return True
 
@@ -851,7 +833,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
 
     new_buffer = [cleaned_line] if cleaned_line and cleaned_line.strip() else []
 
-    if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
+    if cleaned_line and SENTENCE_END_PATTERN.search(cleaned_line):
         if text_to_speak:
             log_message("INFO", f"Queueing buffered text before sentence end")
             queue_output(strip_profile_symbols(text_to_speak), line_number)
@@ -2408,8 +2390,12 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
 class TalkitoCore:
     """Core talkito functionality as a reusable class"""
     
-    def __init__(self, verbosity_level: int = 0, log_file_path: Optional[str] = None):
-        self.verbosity_level = verbosity_level
+    def __init__(self, verbosity_level: int = 0, log_file_path: Optional[str] = None, config=None):
+        # Use provided config or get global config
+        self.config = config or get_config()
+        
+        # Override config values with explicit parameters if provided
+        self.verbosity_level = verbosity_level if verbosity_level != 0 else self.config.verbosity
         self.logger: Optional[logging.Logger] = None
         self.current_master_fd: Optional[int] = None
         self.current_proc: Optional[asyncio.subprocess.Process] = None
@@ -2418,8 +2404,9 @@ class TalkitoCore:
         self.asr_state = ASRState()
         self.active_profile: Optional[Profile] = None  # Will be initialized to default profile
         
-        # Set up logging
-        self.setup_logging(log_file_path)
+        # Set up logging - use explicit log_file_path or fall back to config
+        log_path = log_file_path or self.config.log_file
+        self.setup_logging(log_path)
     
     def setup_logging(self, log_file_path: Optional[str] = None):
         """Set up logging configuration
@@ -2484,9 +2471,13 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGWINCH, debounced_winch_handler)
     
+    # Get configuration
+    config = kwargs.get('config') or get_config()
+    
     core = TalkitoCore(
         verbosity_level=kwargs.get('verbosity', 0),
-        log_file_path=kwargs.get('log_file')
+        log_file_path=kwargs.get('log_file'),
+        config=config
     )
     
     # Set up profile if specified
