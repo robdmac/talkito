@@ -403,14 +403,12 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         else:
             asr_emoji = "🟢" if status["asr"]["initialized"] and status["asr"]["enabled"] else "🔴"
         
-        # Communication status
+        # Communication status - check shared state instead of comm_manager
         comms = []
-        if status["whatsapp"]["configured"]:
-            emoji = "🟢" if status["whatsapp"]["mode_active"] else "⚪"
-            comms.append(f"{emoji} WhatsApp")
-        if status["slack"]["configured"]:
-            emoji = "🟢" if status["slack"]["mode_active"] else "⚪"
-            comms.append(f"{emoji} Slack")
+        if shared_state.whatsapp_mode_active:
+            comms.append("🟢 WhatsApp")
+        if shared_state.slack_mode_active:
+            comms.append("🟢 Slack")
         
         return f"TalkiTo: {tts_emoji} TTS ({status['tts']['provider']}) | {asr_emoji} ASR ({status['asr']['provider'] or 'none'}) | Comms: {', '.join(comms) if comms else 'none'}"
         
