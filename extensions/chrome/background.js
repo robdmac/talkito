@@ -3,6 +3,18 @@ let serverPort = null;
 let userPhoneNumber = null;
 let userSlackChannel = null;
 
+// Initialize monitoring state and discover server
+chrome.storage.local.get(['talkitoEnabled'], (result) => {
+  if (result.talkitoEnabled === undefined) {
+    chrome.storage.local.set({ talkitoEnabled: true });
+  }
+});
+
+// Try to discover server on startup
+setTimeout(() => {
+  discoverServerPort();
+}, 1000);
+
 chrome.runtime.onInstalled.addListener(() => {
   // Create context menu items
   chrome.contextMenus.create({
