@@ -33,10 +33,11 @@ import os
 import argparse
 import tempfile
 from collections import deque
-from typing import Optional, List, Tuple, Deque, Dict, Any
+from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
+from abc import ABC, abstractmethod
 
 # Import centralized logging utilities
 try:
@@ -319,6 +320,10 @@ SPEECH_BUFFER_TIME = 0.1  # Seconds to wait after TTS process ends for audio to 
 # Track the highest line number that has been spoken
 highest_spoken_line_number = -1
 
+# Thread safety locks
+_state_lock = threading.RLock()  # Reentrant lock for nested access
+_cache_lock = threading.Lock()  # Separate lock for cache operations
+
 
 # Wrapper for module-specific logging
 def log_message(level: str, message: str):
@@ -522,6 +527,71 @@ def validate_provider_config(provider: str) -> bool:
             return False
     
     return True
+
+
+class TTSProvider(ABC):
+    """Base class for all TTS providers"""
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """Initialize provider with optional configuration"""
+        self.config = config or {}
+        self.provider_name = self.__class__.__name__.replace('Provider', '')
+    
+    @abstractmethod
+    def synthesize(self, text: str) -> Optional[bytes]:
+        """Synthesize speech from text and return audio data as bytes
+        
+        Args:
+            text: The text to synthesize
+            
+        Returns:
+            Audio data as bytes, or None if synthesis failed
+        """
+        pass
+    
+    @abstractmethod
+    def validate_config(self) -> Tuple[bool, Optional[str]]:
+        """Validate provider configuration
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        pass
+    
+    def speak(self, text: str, use_process_control: bool = True) -> bool:
+        """Synthesize and play audio using the common pattern
+        
+        Args:
+            text: The text to speak
+            use_process_control: Whether to allow playback interruption
+            
+        Returns:
+            True if completed successfully, False otherwise
+        """
+        return synthesize_and_play(self.synthesize, text, use_process_control)
+    
+    def get_config_value(self, key: str, default: Any = None) -> Any:
+        """Get configuration value with fallback to environment variable
+        
+        Args:
+            key: Configuration key
+            default: Default value if not found
+            
+        Returns:
+            Configuration value
+        """
+        # First check instance config
+        if key in self.config:
+            return self.config[key]
+        
+        # Then check shared state
+        from .state import get_shared_state
+        shared_state = get_shared_state()
+        if hasattr(shared_state, 'tts') and hasattr(shared_state.tts, key):
+            return getattr(shared_state.tts, key)
+        
+        # Finally return default
+        return default
 
 
 def _synthesize_openai(text: str) -> Optional[bytes]:
@@ -1013,20 +1083,21 @@ def is_similar_to_recent(text: str) -> bool:
     """Check if text is similar to recently spoken text using fuzzy matching"""
     current_time = time.time()
 
-    # Clean up expired cache entries
-    while spoken_cache and (current_time - spoken_cache[0][1]) >= CACHE_TIMEOUT:
-        spoken_cache.popleft()
+    with _cache_lock:
+        # Clean up expired cache entries
+        while spoken_cache and (current_time - spoken_cache[0][1]) >= CACHE_TIMEOUT:
+            spoken_cache.popleft()
 
-    # Check for exact matches first
-    if any(cached_text == text for cached_text, _ in spoken_cache):
-        return True
-
-    # Check for similarity
-    for cached_text, _ in spoken_cache:
-        similarity = SequenceMatcher(None, text.lower(), cached_text.lower()).ratio()
-        if similarity >= SIMILARITY_THRESHOLD:
-            log_message("INFO", f"Text '{text}' is {similarity:.2%} similar to '{cached_text}'")
+        # Check for exact matches first
+        if any(cached_text == text for cached_text, _ in spoken_cache):
             return True
+
+        # Check for similarity
+        for cached_text, _ in spoken_cache:
+            similarity = SequenceMatcher(None, text.lower(), cached_text.lower()).ratio()
+            if similarity >= SIMILARITY_THRESHOLD:
+                log_message("INFO", f"Text '{text}' is {similarity:.2%} similar to '{cached_text}'")
+                return True
 
     return False
 
@@ -1088,7 +1159,7 @@ def speak_with_default(text, engine):
 
 def tts_worker(engine: str):
     """TTS worker thread - reads from queue and speaks"""
-    global current_speech_item, highest_spoken_line_number
+    global current_speech_item, highest_spoken_line_number, last_speech_end_time
     log_message("INFO", f"Started TTS worker with engine: {engine}")
 
     while not shutdown_event.is_set():
@@ -1121,11 +1192,12 @@ def tts_worker(engine: str):
                 speech_item = item
                 
             # Check if this line number is older than what we've already spoken
-            if speech_item.line_number is not None and speech_item.line_number <= highest_spoken_line_number:
-                log_message("INFO", f"Skipping line {speech_item.line_number} (already spoken up to line {highest_spoken_line_number}): '{speech_item.text[:50]}...'")
-                continue
+            with _state_lock:
+                if speech_item.line_number is not None and speech_item.line_number <= highest_spoken_line_number:
+                    log_message("INFO", f"Skipping line {speech_item.line_number} (already spoken up to line {highest_spoken_line_number}): '{speech_item.text[:50]}...'")
+                    continue
                 
-            current_speech_item = speech_item
+                current_speech_item = speech_item
 
             # Tell ASR to ignore input while we're speaking to prevent feedback
             try:
@@ -1145,21 +1217,23 @@ def tts_worker(engine: str):
             speak_text(speech_item.text, engine)
             
             # Update highest spoken line number if applicable
-            if speech_item.line_number is not None and speech_item.line_number > highest_spoken_line_number:
-                highest_spoken_line_number = speech_item.line_number
-                log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
+            with _state_lock:
+                if speech_item.line_number is not None and speech_item.line_number > highest_spoken_line_number:
+                    highest_spoken_line_number = speech_item.line_number
+                    log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
             
             # Check if we should skip current
             if playback_control.skip_current:
                 playback_control.reset_skip_flags()
                 
             # Add to history
-            speech_history.append(speech_item)
+            with _state_lock:
+                speech_history.append(speech_item)
             
             # Clear current item and track end time
-            current_speech_item = None
-            global last_speech_end_time
-            last_speech_end_time = time.time()
+            with _state_lock:
+                current_speech_item = None
+                last_speech_end_time = time.time()
             
             # Resume ASR input after speaking
             try:
@@ -1218,22 +1292,26 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
 
     # Debounce rapidly changing text
     current_time = time.time()
-    if (last_queued_text and
-            SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
-            current_time - last_queue_time < DEBOUNCE_TIME):
-        log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
-        last_queued_text = speakable_text
-        last_queue_time = current_time
-        return ""
+    with _state_lock:
+        if (last_queued_text and
+                SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
+                current_time - last_queue_time < DEBOUNCE_TIME):
+            log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
+            last_queued_text = speakable_text
+            last_queue_time = current_time
+            return ""
 
     if is_similar_to_recent(speakable_text):
         log_message("INFO", f"Recently spoken: '{speakable_text}'")
         return ""
 
     # Add to cache and queue
-    spoken_cache.append((speakable_text, current_time))
-    last_queued_text = speakable_text
-    last_queue_time = current_time
+    with _cache_lock:
+        spoken_cache.append((speakable_text, current_time))
+    
+    with _state_lock:
+        last_queued_text = speakable_text
+        last_queue_time = current_time
 
     # Create speech item
     speech_item = SpeechItem(
@@ -1262,12 +1340,15 @@ def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thre
 
 def reset_tts_cache():
     """Reset TTS caches - useful for testing"""
-    global spoken_cache, last_queued_text, last_queue_time, highest_spoken_line_number
+    global last_queued_text, last_queue_time, highest_spoken_line_number
     
-    spoken_cache.clear()
-    last_queued_text = ""
-    last_queue_time = 0
-    highest_spoken_line_number = -1
+    with _cache_lock:
+        spoken_cache.clear()
+    
+    with _state_lock:
+        last_queued_text = ""
+        last_queue_time = 0
+        highest_spoken_line_number = -1
     
     # Also clear the queue
     while not tts_queue.empty():
@@ -1290,7 +1371,10 @@ def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
         time.sleep(0.1)
     
     # Wait for current item to finish speaking
-    while current_speech_item is not None:
+    while True:
+        with _state_lock:
+            if current_speech_item is None:
+                break
         if timeout and (time.time() - start_time) > timeout:
             return False
         time.sleep(0.1)
@@ -1304,10 +1388,23 @@ def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
 
 def shutdown_tts():
     """Shutdown the TTS system gracefully"""
+    global tts_worker_thread
+    
+    # Signal shutdown
     shutdown_event.set()
-    tts_queue.put("__SHUTDOWN__")
-    if tts_worker_thread:
-        tts_worker_thread.join(timeout=0.5)
+    
+    # Send shutdown signal to queue
+    try:
+        tts_queue.put("__SHUTDOWN__", timeout=0.1)
+    except queue.Full:
+        pass
+    
+    # Wait for worker thread
+    with _state_lock:
+        thread = tts_worker_thread
+    
+    if thread and thread.is_alive():
+        thread.join(timeout=0.5)
 
 
 # Playback control functions

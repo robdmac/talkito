@@ -1694,61 +1694,66 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     """Run the command and process its output with PTY support for colors"""
     global current_master_fd, current_proc, _original_tty_attrs
 
-    # Set up terminal and spawn process
-    master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
-    current_master_fd = master_fd
-    current_proc = proc
+    # Initialize to ensure cleanup on error
+    master_fd = None
+    proc = None
     
-    # Initialize recorder if requested
-    recorder = SessionRecorder(record_file)
-    
-    if recorder.enabled:
-        log_message("INFO", f"Record mode enabled - saving raw output to: {record_file}")
-        asr_mode = "off"
-
-    # Process state
-    buffer = []
-    
-    # White input state tracking (outside the main loop)
-    in_input = False
-    prev_line = ""
-    line_buffer = b""
-
-    # Buffer for incomplete UTF-8 sequences
-    incomplete_utf8_buffer = b""
-
-    # Use LineBuffer to track all output
-    output_buffer = LineBuffer()
-    
-    # Initialize non-blocking output buffer
-    stdout_buffer = OutputBuffer()
-    
-    # Set stdout to non-blocking mode
-    stdout_flags = fcntl.fcntl(sys.stdout.fileno(), fcntl.F_GETFL)
-    fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags | os.O_NONBLOCK)
-
-    # Cursor tracking
-    current_cursor_row = 1
-    get_terminal_size()  # Initialize terminal dimensions
-
-    # Terminal state tracking
-    in_alternate_buffer = False
-    buffer_switch_time = 0
-    consecutive_redraws = 0
-    last_redraw_time = 0
-    skip_duplicate_mode = False
-    
-    # For periodic status updates
-    last_status_check = 0
-
-    old_tty_attrs = None
-    if sys.stdin.isatty():
-        old_tty_attrs = termios.tcgetattr(sys.stdin)
-        # Store globally for signal handler
-        _original_tty_attrs = old_tty_attrs
-        tty.setraw(sys.stdin.fileno())
-
     try:
+        # Set up terminal and spawn process
+        master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
+        current_master_fd = master_fd
+        current_proc = proc
+        
+        # Initialize recorder if requested
+        recorder = SessionRecorder(record_file)
+    
+        if recorder.enabled:
+            log_message("INFO", f"Record mode enabled - saving raw output to: {record_file}")
+            asr_mode = "off"
+
+        # Process state
+        buffer = []
+    
+        # White input state tracking (outside the main loop)
+        in_input = False
+        prev_line = ""
+        line_buffer = b""
+
+        # Buffer for incomplete UTF-8 sequences
+        incomplete_utf8_buffer = b""
+
+        # Use LineBuffer to track all output
+        output_buffer = LineBuffer()
+        
+        # Initialize non-blocking output buffer
+        stdout_buffer = OutputBuffer()
+        
+        # Set stdout to non-blocking mode
+        stdout_flags = fcntl.fcntl(sys.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags | os.O_NONBLOCK)
+
+        # Cursor tracking
+        current_cursor_row = 1
+        get_terminal_size()  # Initialize terminal dimensions
+
+        # Terminal state tracking
+        in_alternate_buffer = False
+        buffer_switch_time = 0
+        consecutive_redraws = 0
+        last_redraw_time = 0
+        skip_duplicate_mode = False
+        
+        # For periodic status updates
+        last_status_check = 0
+
+        old_tty_attrs = None
+        if sys.stdin.isatty():
+            old_tty_attrs = termios.tcgetattr(sys.stdin)
+            # Store globally for signal handler
+            _original_tty_attrs = old_tty_attrs
+            tty.setraw(sys.stdin.fileno())
+
+        # Main processing loop
         while True:
             if process_pending_resize(master_fd):
                 continue
@@ -1972,7 +1977,75 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     await drain_pty_output(master_fd, line_buffer)
                 break
 
+        # Process any remaining content after main loop exits
+        if line_buffer:
+            try:
+                line = line_buffer.decode('utf-8')
+            except UnicodeDecodeError:
+                line = line_buffer.decode('utf-8', errors='replace')
+                log_message("WARNING", "Incomplete UTF-8 sequence in final line buffer")
+            line_idx, action = output_buffer.add_or_update_line(line)
+
+            if action in ['added', 'modified']:
+                text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
+                if text_to_speak:
+                    queue_output(strip_profile_symbols(text_to_speak), line_idx)
+
+        if buffer:
+            # Use the last line index for any remaining buffer content
+            last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
+            process_remaining_buffer(buffer, last_idx)
+
+        # Flush any pending speech text before command completes
+        send_pending_text()
+
+        tts.wait_for_tts_to_finish()
+        
+        # Stop ASR if it was running
+        if ASR_AVAILABLE:
+            try:
+                asr.stop_dictation()
+            except Exception:
+                pass
+
+        # Log final buffer statistics
+        log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
+
+        # Save recorded data
+        recorder.save()
+
+        if proc:
+            await proc.wait()
+        
+        # Restore stdout to blocking mode
+        try:
+            fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags)
+            
+            # Flush any remaining buffered output
+            while len(stdout_buffer) > 0:
+                written = stdout_buffer.write_to_stdout()
+                if written == 0:
+                    # Force flush by writing directly in blocking mode
+                    remaining = bytes(stdout_buffer.buffer)
+                    if remaining:
+                        sys.stdout.buffer.write(remaining)
+                        sys.stdout.flush()
+                    break
+        except Exception as e:
+            log_message("ERROR", f"Error restoring stdout: {e}")
+
+        return proc.returncode if proc else 1
+
     finally:
+        # Close PTY file descriptor if it was opened
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+                log_message("INFO", "Closed master_fd in finally block")
+            except Exception as e:
+                log_message("ERROR", f"Failed to close master_fd: {e}")
+            current_master_fd = None
+        
         if old_tty_attrs is not None:
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSANOW, old_tty_attrs)
@@ -1993,66 +2066,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             sys.stdout.flush()
         except Exception:
             pass
-
-    if line_buffer:
-        try:
-            line = line_buffer.decode('utf-8')
-        except UnicodeDecodeError:
-            line = line_buffer.decode('utf-8', errors='replace')
-            log_message("WARNING", "Incomplete UTF-8 sequence in final line buffer")
-        line_idx, action = output_buffer.add_or_update_line(line)
-
-        if action in ['added', 'modified']:
-            text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
-            if text_to_speak:
-                queue_output(strip_profile_symbols(text_to_speak), line_idx)
-
-    if buffer:
-        # Use the last line index for any remaining buffer content
-        last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
-        process_remaining_buffer(buffer, last_idx)
-
-    # Flush any pending speech text before command completes
-    send_pending_text()
-
-    tts.wait_for_tts_to_finish()
-    
-    # Stop ASR if it was running
-    if ASR_AVAILABLE:
-        try:
-            asr.stop_dictation()
-        except Exception:
-            pass
-
-    # Log final buffer statistics
-    log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
-
-    os.close(master_fd)
-    current_master_fd = None
-
-    # Save recorded data
-    recorder.save()
-
-    await proc.wait()
-    
-    # Restore stdout to blocking mode
-    try:
-        fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags)
-        
-        # Flush any remaining buffered output
-        while len(stdout_buffer) > 0:
-            written = stdout_buffer.write_to_stdout()
-            if written == 0:
-                # Force flush by writing directly in blocking mode
-                remaining = bytes(stdout_buffer.buffer)
-                if remaining:
-                    sys.stdout.buffer.write(remaining)
-                    sys.stdout.flush()
-                break
-    except Exception as e:
-        log_message("ERROR", f"Error restoring stdout: {e}")
-
-    return proc.returncode
 
 
 def process_remaining_buffer(buffer: List[str], line_idx: int) -> None:
