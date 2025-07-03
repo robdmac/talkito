@@ -10,7 +10,7 @@ class ElementLogger {
     this.debounceTimer = null;
     this.pendingTextContent = null;
     this.pendingReason = null;
-    this.actionType = "talk"; // Default action type
+    this._actionType = "talk"; // Default action type (private)
     this.isManualAction = false; // Track if this was a manual user action
     
     // Store the last right-clicked element
@@ -20,6 +20,7 @@ class ElementLogger {
     
     // Listen for messages from background script
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+
       if (request.action === "startLogging") {
         this.actionType = request.actionType || "talk";
         this.isManualAction = request.isManualAction || false;
@@ -28,11 +29,26 @@ class ElementLogger {
     });
   }
   
+  // Getter and setter for actionType to track changes
+  get actionType() {
+    return this._actionType;
+  }
+  
+  set actionType(value) {
+    this._actionType = value;
+  }
+  
   startLogging(element) {
     if (!element) return;
     
-    // Stop any existing logging
-    this.stopLogging();
+    // Store the action type before stopping existing logging
+    const currentActionType = this.actionType;
+    
+    // Stop any existing logging but preserve action type
+    this.stopLogging(true);
+    
+    // Restore the action type
+    this.actionType = currentActionType;
     
     this.targetTagName = element.tagName.toLowerCase();
     this.targetHierarchyPattern = this.buildHierarchyPattern(element);
@@ -43,11 +59,10 @@ class ElementLogger {
     
     // Set up mutation observer to watch for new elements
     this.setupMutationObserver();
-    
-    console.log(`🎯 TalkiTo: Started monitoring <${this.targetTagName}> elements with hierarchy pattern: ${this.targetHierarchyPattern}`);
+
   }
   
-  stopLogging() {
+  stopLogging(preserveActionType = false) {
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
@@ -68,8 +83,12 @@ class ElementLogger {
     this.currentMonitoredElement = null;
     this.pendingTextContent = null;
     this.pendingReason = null;
-    this.actionType = "talk";
-    this.isManualAction = false;
+    
+    // Only reset action type if not preserving it
+    if (!preserveActionType) {
+      this.actionType = "talk";
+      this.isManualAction = false;
+    }
   }
   
   setCurrentMonitoredElement(element, reason) {
@@ -249,7 +268,7 @@ class ElementLogger {
     }
     
     const elementData = this.extractElementData(element, reason);
-    
+
     // Send to background script to send via server
     chrome.runtime.sendMessage({
       action: "sendToServer",
@@ -314,7 +333,6 @@ const elementLogger = new ElementLogger();
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'l') {
     elementLogger.stopLogging();
-    console.log('🛑 TalkiTo: Stopped monitoring');
   }
 });
 
