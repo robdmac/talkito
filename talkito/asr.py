@@ -1375,8 +1375,12 @@ class DictationEngine:
         self.microphone = sr.Microphone(sample_rate=16000, chunk_size=chunk_size)
         self.text_callback = text_callback
         self.partial_callback = partial_callback
-        self.is_active = False
-        self.is_stopped = False  # Track if already stopped
+        
+        # Thread-safe state management
+        self._state_lock = threading.RLock()  # Use RLock for nested access
+        self._is_active = False
+        self._is_stopped = False  # Track if already stopped
+        
         self.audio_queue = queue.Queue()
         self._stop_lock = threading.Lock()  # Prevent race condition in stop()
         
@@ -1405,6 +1409,30 @@ class DictationEngine:
         self.provider_config = provider_config or ASRConfig(provider='google_free')
         self.provider = None
         self._init_provider()
+    
+    @property
+    def is_active(self):
+        """Thread-safe getter for is_active"""
+        with self._state_lock:
+            return self._is_active
+    
+    @is_active.setter
+    def is_active(self, value):
+        """Thread-safe setter for is_active"""
+        with self._state_lock:
+            self._is_active = value
+    
+    @property
+    def is_stopped(self):
+        """Thread-safe getter for is_stopped"""
+        with self._state_lock:
+            return self._is_stopped
+    
+    @is_stopped.setter
+    def is_stopped(self, value):
+        """Thread-safe setter for is_stopped"""
+        with self._state_lock:
+            self._is_stopped = value
         
     def _init_provider(self):
         """Initialize the ASR provider"""
