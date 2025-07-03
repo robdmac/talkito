@@ -1,6 +1,6 @@
 # TalkiTo
 
-TalkiTo lets developers interact with AI systems through speech across multiple channels (terminal, API, phone). It can be used as both a command-line tool and a Python library.
+TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be used as a command-line tool, a web extension, and as a Python library.
 
 ## Quick Start Guide using Claude
 
@@ -16,36 +16,45 @@ pip install -e ".[all]"  # All features
 talkito claude
 ```
 
-### How It Works with Claude
+## AI Assistant Compatibility
 
-When you run `talkito claude`, it automatically:
+| AI Assistant                 | Method        | Status                |
+|------------------------------|---------------|-----------------------|
+| **Claude Code**              | Terminal      | **Fully Supported**   |
+| bolt.new                     | Web Extension | Partially Supported   |
+| v0.dev                       | Web Extension | Partially Supported   |
+| Gemini CLI                   | Terminal      | In Progress           |
+| Codex                        | Terminal      | In Progress           |
+| Aider                        | Terminal      | In Progress           |
+| Cursor                       | Terminal      | In Progress           |
+| Continue                     | Terminal      | In Progress           |
 
-1. **Starts an MCP SSE server** in the background for real-time notifications
-2. **Configures Claude** to connect to the talkito MCP server
-3. **Falls back gracefully** if SSE isn't supported (SSE → stdio → traditional wrapper)
+
 
 ### Voice Mode
 
-Once Claude is running with talkito, you can activate voice mode:
+When you run `talkito claude`, voice mode is enabled by default:
 
-1. **Enable voice mode**: Use the `talkito:turn_on` or simply "talkito on" in Claude
-2. **Continuous listening**: Claude will then automatically:
-   - Speak its responses using TTS
-   - Start listening for your voice input
-   - Process your speech as the next command
-   - Continue this loop until you say "stop voice mode"
+1. **Automatic voice interaction**: Claude will:
+   - Speak all responses using TTS
+   - Listen for your voice input after speaking
+   - Process your speech as the next user message
+   - Continue this loop automatically
 
-3. **Unified input handling**: All messages are treated as user input:
-   - Voice dictation: Processed as spoken commands
-   - Slack messages: Processed as typed commands (when connected)
-   - WhatsApp messages: Processed as typed commands (when connected)
+2. **Control voice mode**: 
+   - Voice mode starts ON by default
+   - Say or type "turn off talkito" to disable voice interaction
+   - Say or type "turn on talkito" to re-enable if turned off
 
-### Real-Time Notifications
+3. **Unified input handling**: All inputs are processed as user messages:
+   - Voice dictation: Your spoken words
+   - Slack messages: From configured channels
+   - WhatsApp messages: From configured numbers
 
-The SSE server enables Claude to receive notifications when:
-- New voice input is available
-- Messages arrive from Slack or WhatsApp
-- You can use `talkito:start_notification_stream` to begin receiving updates
+4. **Communication modes**: 
+   - Say "start slack mode #channel-name" to auto-send responses to Slack
+   - Say "start whatsapp mode +1234567890" to auto-send responses to WhatsApp
+   - Say "stop slack/whatsapp mode" to disable
 
 ### Communication Channels
 
@@ -63,30 +72,6 @@ export SLACK_APP_TOKEN='xapp-...'
 export SLACK_CHANNEL='#talkito-dev'
 ```
 
-Then in Claude voice mode:
-- Say "slack me at #channel" to enable Slack mode
-- Say "whatsapp me at +1234567890" to enable WhatsApp mode
-- All your responses will be automatically sent to the configured channel
-
-## Usage
-
-### Command-Line Usage
-
-The primary way to use this tool is through the `talkito` command, which wraps any command and speaks its output:
-
-```bash
-# Use with interactive programs
-talkito python
-talkito claude  # If you have Claude CLI installed
-talkito aider   # If you have Aider installed
-
-# MySQL with spoken output
-talkito mysql -u root -p
-
-# Long-running commands
-talkito npm run dev
-talkito python manage.py runserver
-```
 
 #### Advanced Options
 
@@ -104,10 +89,10 @@ talkito --tts-provider gcloud --tts-voice en-US-Journey-F echo "Hello with Googl
 talkito --asr-provider gcloud --asr-language en-US claude
 talkito --asr-language es-ES echo "Hola mundo"  # Spanish recognition
 
-# Enable remote communication
-talkito --comms sms --sms-recipients +1234567890 long-running-command
-talkito --comms slack python manage.py runserver
-talkito --comms sms,whatsapp,slack server-monitor.sh
+# Enable remote communication (configure via environment variables)
+talkito --slack-channel '#alerts' python manage.py runserver
+talkito --whatsapp-recipients +1234567890 long-running-command
+talkito --sms-recipients +1234567890,+0987654321 server-monitor.sh
 ```
 
 #### TTS Controls
@@ -161,36 +146,6 @@ except KeyboardInterrupt:
     asr.stop_dictation()
 ```
 
-### Library Usage
-
-Talkito can also be used as a Python library for integrating TTS and ASR into your applications:
-
-```python
-import asyncio
-import talkito
-
-# Simple command execution with TTS
-async def run_with_speech():
-    exit_code = await talkito.run_with_talkito(
-        ['echo', 'Hello from Python!'],
-        tts_config={'voice': 'nova'}
-    )
-    return exit_code
-
-# Use TTS functionality directly
-def speak_text():
-    engine = talkito.detect_tts_engine()
-    talkito.start_tts_worker(engine)
-    talkito.queue_for_speech("This is a test")
-    talkito.wait_for_tts_to_finish()
-    talkito.shutdown_tts()
-
-# Run the async example
-asyncio.run(run_with_speech())
-```
-
-See the `examples/` directory for more detailed examples of library usage.
-
 ### MCP Server Usage
 
 Talkito includes an MCP (Model Context Protocol) server that allows AI applications to use TTS and ASR capabilities:
@@ -204,9 +159,10 @@ talkito --mcp-server
 ```
 
 The MCP server provides tools for:
-- Text-to-Speech: `speak_text`, `skip_current_speech`, `configure_tts`
-- Speech Recognition: `start_voice_input`, `stop_voice_input`, `get_dictated_text`
-- Status monitoring: `get_speech_status`, `get_voice_input_status`
+- **Core**: `turn_on`/`turn_off` (enable voice mode), `get_talkito_status`
+- **TTS**: `enable_tts`/`disable_tts`, `speak_text`, `skip_current_speech`, `configure_tts`
+- **ASR**: `enable_asr`/`disable_asr`, `start_voice_input`/`stop_voice_input`, `get_dictated_text`
+- **Communication**: `start_whatsapp_mode`/`stop_whatsapp_mode`, `start_slack_mode`/`stop_slack_mode`, `send_whatsapp`, `send_slack`, `get_messages`
 
 Configure your AI application to connect to the talkito MCP server for voice capabilities.
 
@@ -297,7 +253,7 @@ Configure your AI application to connect to the talkito MCP server for voice cap
 - **Get Account**: https://www.twilio.com/try-twilio
 - **Setup**: Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` you will need to a verified number to avoid being filtered.
 - **Features**: Send command output via SMS, receive input via SMS
-- **Usage**: `--comms sms --sms-recipients +1234567890`
+- **Usage**: `--sms-recipients +1234567890`
 
 #### Twilio WhatsApp
 - **Get Started**: https://www.twilio.com/whatsapp
@@ -313,15 +269,19 @@ Configure your AI application to connect to the talkito MCP server for voice cap
   - Send the join code via WhatsApp to +1 415 523 8886
   - Install zrok and create a reserved share: `zrok reserve public http://localhost:8080`
   - Set webhook URL in Twilio Console to: `https://YOUR-TOKEN.share.zrok.io/whatsapp`
-- **Usage**: `--comms whatsapp --whatsapp-recipients +1234567890`
+- **Usage**: `--whatsapp-recipients +1234567890`
 
 #### Slack
 - **Create App**: https://api.slack.com/apps
 - **Setup**: Set `SLACK_BOT_TOKEN` and optionally `SLACK_APP_TOKEN`
 - **Features**: Send output to channels, receive commands
-- **Usage**: `--comms slack`
+- **Usage**: `--slack-channel '#channel-name'`
 
 ### Environment Configuration
+
+Talkito supports two environment files:
+- `.env` - Primary configuration (takes precedence)
+- `.talkito.env` - Secondary configuration (won't override `.env`)
 
 Copy `.env.example` to `.env` and add your API keys:
 
@@ -329,6 +289,9 @@ Copy `.env.example` to `.env` and add your API keys:
 cp .env.example .env
 # Edit .env with your API keys
 ```
+
+For WhatsApp setup with zrok tunneling:
+- `ZROK_RESERVED_TOKEN`: Your zrok reserved share token for webhook tunneling
 
 ## Requirements
 
