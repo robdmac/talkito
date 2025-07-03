@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      width: 200px;
+      padding: 10px;
+      font-family: Arial, sans-serif;
+    }
+    .toggle-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .toggle-switch {
+      position: relative;
+      width: 50px;
+      height: 24px;
+      background-color: #ccc;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+    .toggle-switch.active {
+      background-color: #4CAF50;
+    }
+    .toggle-slider {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      background-color: white;
+      border-radius: 50%;
+      transition: transform 0.3s;
+    }
+    .toggle-switch.active .toggle-slider {
+      transform: translateX(26px);
+    }
+    .status {
+      font-size: 12px;
+      color: #666;
+      margin-top: 10px;
+    }
+    .auto-site {
+      font-size: 11px;
+      color: #888;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="toggle-container">
+    <span>TalkiTo Monitor</span>
+    <div class="toggle-switch" id="toggle">
+      <div class="toggle-slider"></div>
+    </div>
+  </div>
+  <div class="status" id="status">Loading...</div>
+  <div class="auto-site">Auto-enabled on bolt.new</div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -12,6 +12,7 @@ class ElementLogger {
     this.pendingReason = null;
     this._actionType = "talk"; // Default action type (private)
     this.isManualAction = false; // Track if this was a manual user action
+    this.monitoringEnabled = true; // Track if monitoring is enabled via toggle
     
     // Store the last right-clicked element
     document.addEventListener('contextmenu', (e) => {
@@ -25,8 +26,36 @@ class ElementLogger {
         this.actionType = request.actionType || "talk";
         this.isManualAction = request.isManualAction || false;
         this.startLogging(this.lastClickedElement);
+      } else if (request.action === "toggleMonitoring") {
+        this.monitoringEnabled = request.enabled;
+        if (!request.enabled && this.isLogging) {
+          this.stopLogging();
+        }
       }
     });
+    
+    // Check monitoring state on load
+    chrome.storage.local.get(['talkitoEnabled'], (result) => {
+      this.monitoringEnabled = result.talkitoEnabled !== false; // Default to true
+    });
+    
+    // Auto-activate on bolt.new
+    if (window.location.hostname === 'bolt.new') {
+      console.log('🌐 TalkiTo: Detected bolt.new - preparing auto-monitoring');
+      this.setupBoltNewAutoMonitoring();
+    }
+    
+    // Auto-activate on v0.dev
+    if (window.location.hostname === 'v0.dev') {
+      console.log('🌐 TalkiTo: Detected v0.dev - preparing auto-monitoring');
+      this.setupV0DevAutoMonitoring();
+    }
+    
+    // Auto-activate on replit.com
+    if (window.location.hostname === 'replit.com' || window.location.hostname.endsWith('.replit.com')) {
+      console.log('🌐 TalkiTo: Detected replit.com - preparing auto-monitoring');
+      this.setupReplitAutoMonitoring();
+    }
   }
   
   // Getter and setter for actionType to track changes
@@ -59,7 +88,8 @@ class ElementLogger {
     
     // Set up mutation observer to watch for new elements
     this.setupMutationObserver();
-
+    
+    console.log(`🎯 TalkiTo: Started monitoring <${this.targetTagName}> elements with hierarchy pattern: ${this.targetHierarchyPattern}`);
   }
   
   stopLogging(preserveActionType = false) {
@@ -89,6 +119,154 @@ class ElementLogger {
       this.actionType = "talk";
       this.isManualAction = false;
     }
+  }
+  
+  setupBoltNewAutoMonitoring() {
+    // Wait for the page to load and then find the chat messages
+    const attemptAutoMonitor = () => {
+      // Check if monitoring is still enabled
+      if (!this.monitoringEnabled) {
+        console.log('🔴 TalkiTo: Monitoring disabled, skipping auto-activation');
+        return;
+      }
+      
+      // Look for P elements in the chat area - specifically targeting assistant responses
+      const selectors = [
+        // Target assistant messages specifically (in flex containers, 2nd MarkdownContent)
+        'div._BaseChat_1dk13_1 div._Chat_1dk13_5 div.flex div._MarkdownContent_19116_1:nth-of-type(2) p',
+        'div[class*="BaseChat"] div[class*="Chat"] div.flex div[class*="MarkdownContent"]:nth-of-type(2) p',
+        // Alternative selector for assistant messages
+        'section.flex div.relative div.grid div.flex div._MarkdownContent_19116_1:nth-of-type(2) p',
+        // Fallback to any assistant-like message structure
+        'div.grid > div.flex > div[class*="MarkdownContent"] p'
+      ];
+      
+      let targetElement = null;
+      for (const selector of selectors) {
+        targetElement = document.querySelector(selector);
+        if (targetElement) break;
+      }
+      
+      if (targetElement) {
+        console.log('🎯 TalkiTo: Auto-activating monitoring for bolt.new assistant responses');
+        console.log('📍 Found assistant message element:', targetElement);
+        console.log('📝 Content preview:', targetElement.textContent.substring(0, 100) + '...');
+        this.actionType = "talk";
+        this.isManualAction = false;
+        this.startLogging(targetElement);
+      } else {
+        // Retry after a bit if element not found yet
+        console.log('⏳ TalkiTo: Waiting for bolt.new assistant response elements...');
+        setTimeout(attemptAutoMonitor, 3000);
+      }
+    };
+    
+    // Initial delay to let page load
+    setTimeout(attemptAutoMonitor, 3000);
+  }
+  
+  setupV0DevAutoMonitoring() {
+    // Wait for the page to load and then find the chat messages
+    const attemptAutoMonitor = () => {
+      // Check if monitoring is still enabled
+      if (!this.monitoringEnabled) {
+        console.log('🔴 TalkiTo: Monitoring disabled, skipping auto-activation');
+        return;
+      }
+      
+      // Look for SPAN elements in v0.dev chat area - based on the provided hierarchy
+      const selectors = [
+        // Specific selector based on the provided example
+        'div#scroll-inner-container div.prose p span',
+        // Alternative selectors for v0.dev assistant messages
+        'div.group div.prose p span',
+        'div[class*="prose"] p span',
+        // More generic fallback
+        'main div.prose span, section div.prose span'
+      ];
+      
+      let targetElement = null;
+      for (const selector of selectors) {
+        targetElement = document.querySelector(selector);
+        if (targetElement) break;
+      }
+      
+      if (targetElement) {
+        console.log('🎯 TalkiTo: Auto-activating monitoring for v0.dev assistant responses');
+        console.log('📍 Found assistant message element:', targetElement);
+        console.log('📝 Content preview:', targetElement.textContent.substring(0, 100) + '...');
+        this.actionType = "talk";
+        this.isManualAction = false;
+        this.startLogging(targetElement);
+      } else {
+        // Retry after a bit if element not found yet
+        console.log('⏳ TalkiTo: Waiting for v0.dev assistant response elements...');
+        setTimeout(attemptAutoMonitor, 3000);
+      }
+    };
+    
+    // Initial delay to let page load
+    setTimeout(attemptAutoMonitor, 3000);
+  }
+  
+  setupReplitAutoMonitoring() {
+    // Wait for the page to load and then find the chat messages
+    const attemptAutoMonitor = () => {
+      // Check if monitoring is still enabled
+      if (!this.monitoringEnabled) {
+        console.log('🔴 TalkiTo: Monitoring disabled, skipping auto-activation');
+        return;
+      }
+      
+      // Look for P elements in Replit AI chat area - specifically AI responses
+      const selectors = [
+        // Target AI responses specifically - they don't have span.useView_view__C2mnv in hierarchy
+        'div.useView_view__C2mnv:not(:has(span.useView_view__C2mnv)) > div.rendered-markdown p',
+        // Look for the second occurrence in a conversation (AI response after user message)
+        'div.useView_view__C2mnv:nth-of-type(2) > div.rendered-markdown p',
+        // Target messages that are likely AI responses (even-numbered children)
+        'div.useView_view__C2mnv > div.useView_view__C2mnv:nth-child(even) div.rendered-markdown p',
+        // More specific selector avoiding user messages
+        'main#main-content div.useView_view__C2mnv > div.useView_view__C2mnv > div.useView_view__C2mnv:last-child div.rendered-markdown p',
+        // Fallback that tries to avoid user input areas
+        'div.rendered-markdown:not(:has(span)) p'
+      ];
+      
+      let targetElement = null;
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        // Try to find an element that's likely an AI response
+        for (const elem of elements) {
+          // Check if this element's hierarchy contains span.useView_view__C2mnv
+          // User messages have this span, AI responses don't
+          const hasSpanAncestor = elem.closest('span.useView_view__C2mnv');
+          if (!hasSpanAncestor) {
+            targetElement = elem;
+            break;
+          }
+        }
+        if (targetElement) break;
+      }
+      
+      if (targetElement) {
+        console.log('🎯 TalkiTo: Auto-activating monitoring for Replit AI responses');
+        console.log('📍 Found assistant message element:', targetElement);
+        console.log('📝 Content preview:', targetElement.textContent.substring(0, 100) + '...');
+        // Double-check we're not monitoring user input
+        const hierarchyPath = this.buildElementHierarchy(targetElement);
+        console.log('🔍 Hierarchy check - contains span:', hierarchyPath.includes('span.useView_view__C2mnv'));
+        this.actionType = "talk";
+        this.isManualAction = false;
+        this.startLogging(targetElement);
+      } else {
+        // Retry after a bit if element not found yet
+        console.log('⏳ TalkiTo: Waiting for Replit AI response elements...');
+        setTimeout(attemptAutoMonitor, 3000);
+      }
+    };
+    
+    // Initial delay to let page load
+    setTimeout(attemptAutoMonitor, 3000);
   }
   
   setCurrentMonitoredElement(element, reason) {
@@ -242,9 +420,9 @@ class ElementLogger {
       clearTimeout(this.debounceTimer);
     }
     
-    // Set new timer for 250ms
+    // Set new timer for 450ms
     this.debounceTimer = setTimeout(() => {
-      // Check if the content is still the same after 250ms
+      // Check if the content is still the same after 450ms
       const finalTextContent = element.textContent || '';
       
       if (finalTextContent === this.pendingTextContent) {
@@ -256,24 +434,39 @@ class ElementLogger {
       this.debounceTimer = null;
       this.pendingTextContent = null;
       this.pendingReason = null;
-    }, 250);
+    }, 450);
   }
   
   sendElement(element, reason = '🎯 Element Found') {
     if (!element) return;
+    
+    // Check if monitoring is enabled
+    if (!this.monitoringEnabled) {
+      return;
+    }
     
     // Check if element still exists in DOM
     if (!document.contains(element)) {
       return;
     }
     
-    const elementData = this.extractElementData(element, reason);
+    try {
+      const elementData = this.extractElementData(element, reason);
 
-    // Send to background script to send via server
-    chrome.runtime.sendMessage({
-      action: "sendToServer",
-      data: elementData
-    });
+      // Send to background script to send via server
+      chrome.runtime.sendMessage({
+        action: "sendToServer",
+        data: elementData
+      });
+    } catch (error) {
+      if (error.message && error.message.includes('Extension context invalidated')) {
+        // Extension was reloaded, stop monitoring
+        console.log('🔄 TalkiTo: Extension reloaded, stopping monitoring');
+        this.stopLogging();
+      } else {
+        console.error('❌ TalkiTo: Error sending element:', error);
+      }
+    }
   }
   
   // Function to build element hierarchy path (for display purposes)
