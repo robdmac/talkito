@@ -34,7 +34,18 @@ import queue
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
+import traceback
 from urllib.parse import urlparse
+
+# Load environment variables early
+try:
+    from dotenv import load_dotenv
+    # Load .env first (takes precedence)
+    load_dotenv()
+    # Also load .talkito.env (won't override existing vars from .env)
+    load_dotenv('.talkito.env')
+except ImportError:
+    pass
 
 # Import talkito functionality
 from . import tts
@@ -67,17 +78,16 @@ def log_message(level: str, message: str):
         # Only setup if not already enabled
         if not is_logging_enabled():
             setup_logging(_log_file_path, mode='a')  # Use append mode to not overwrite
-            print(f"[DEBUG] Logging re-initialized to: {_log_file_path}", file=sys.stderr)
-    
+
     # Also print important messages to stderr for debugging
-    if level in ["ERROR", "CRITICAL", "WARNING"]:
-        print(f"[{level}] [MCP-SSE] {message}", file=sys.stderr)
+    # if level in ["ERROR", "CRITICAL", "WARNING"]:
+    #     print(f"[{level}] [MCP-SSE] {message}", file=sys.stderr)
     
     # Always try to log, even if logging might be disabled
     try:
         _base_log_message(level, f"[MCP-SSE] {message}", __name__)
     except Exception as e:
-        print(f"[ERROR] Failed to log message: {e}", file=sys.stderr)
+        pass
 
 # Server configuration - Changed to include server name
 app = FastMCP("talkito-sse-server")
@@ -120,7 +130,7 @@ def _restore_logging_state():
     import logging
     
     if _log_file_path:
-        print(f"[INFO] Restoring logging configuration to: {_log_file_path}", file=sys.stderr)
+        log_message("INFO", f"[INFO] Restoring logging configuration to: {_log_file_path}")
         
         try:
             # Clear all handlers added by FastMCP/uvicorn
@@ -138,7 +148,7 @@ def _restore_logging_state():
             log_message("INFO", "Logging restored after FastMCP startup")
             log_message("DEBUG", "Testing restored logging with debug message")
         except Exception as e:
-            print(f"[ERROR] Failed to restore logging: {e}", file=sys.stderr)
+            log_message("ERROR", f"[ERROR] Failed to restore logging: {e}")
 
 # We'll restore logging in the first tool call instead of using on_event
 _logging_restored = False
@@ -1144,7 +1154,6 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
     except Exception as e:
         error_msg = f"Error starting voice input: {str(e)}"
         log_message("ERROR", f"start_voice_input error: {error_msg}")
-        import traceback
         log_message("ERROR", f"Traceback: {traceback.format_exc()}")
         return error_msg
 
@@ -1378,11 +1387,15 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
     """Internal function to send WhatsApp messages"""
     global _comms_manager
     
+    log_message("DEBUG", f"_send_whatsapp_internal called with message='{message[:50]}...', to_number={to_number}, with_tts={with_tts}")
+
     # Ensure we have a communication manager
     if not _comms_manager:
+        log_message("DEBUG", "No _comms_manager, attempting to create one")
         # Try to auto-configure with WhatsApp
         base_manager = comms.setup_communication(providers=['whatsapp'])
         if base_manager:
+            log_message("DEBUG", f"Created base_manager with providers: {base_manager.providers}")
             _comms_manager = NotifyingCommunicationManager(base_manager)
         else:
             error_msg = "WhatsApp not configured. Please call configure_communication first or set TWILIO credentials."
@@ -1390,10 +1403,15 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
             return error_msg
     
     # Check if WhatsApp provider exists
+    log_message("DEBUG", f"_comms_manager.providers: {_comms_manager.providers if _comms_manager else 'None'}")
     if not _comms_manager or not _comms_manager.providers:
         error_msg = "No communication providers configured."
         log_message("ERROR", f"send_whatsapp error: {error_msg}")
         return error_msg
+    
+    # Check provider types
+    provider_types = [type(p).__name__ for p in _comms_manager.providers]
+    log_message("DEBUG", f"Provider types found: {provider_types}")
     
     if not any(isinstance(p, TwilioWhatsAppProvider) for p in _comms_manager.providers):
         error_msg = "WhatsApp provider not available. Please configure with Twilio credentials."
@@ -1414,7 +1432,7 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
         error_msg = "WhatsApp provider not found in communication manager"
         log_message("ERROR", f"send_whatsapp error: {error_msg}")
         return error_msg
-    
+
     # Create a Message object for WhatsApp provider
     from .comms import Message
     whatsapp_message = Message(
@@ -1422,12 +1440,16 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
         sender=to_number,
         channel="whatsapp"
     )
+    
     success = whatsapp_provider.send_message(whatsapp_message)
-    
+
     # Also speak it if requested
-    if with_tts and get_shared_state().tts_initialized:
-        tts.queue_for_speech(message, None)
-    
+    if with_tts:
+        if get_shared_state().tts_initialized:
+            tts.queue_for_speech(message, None)
+        else:
+            log_message("ERROR", f"[DEBUG] TTS not initialized, skipping speech")
+
     if success:
         result_msg = f"WhatsApp message sent: '{message[:50]}...' to {to_number}"
     else:
@@ -1435,7 +1457,7 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
     log_message("INFO", f"send_whatsapp returning: {result_msg}")
     return result_msg
 
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = False) -> str:
     """
     Send a message via WhatsApp using Twilio
@@ -1448,12 +1470,14 @@ async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = Fa
     Returns:
         Status message about the sent message
     """
+    log_message("INFO", f"send_whatsapp tool called with message: {message}, to_number: {to_number}, with_tts: {with_tts}")
     try:
         await _init_processor_if_needed()
         return await _send_whatsapp_internal(message, to_number, with_tts)
     except Exception as e:
         error_msg = f"Error sending WhatsApp message: {str(e)}"
         log_message("ERROR", f"send_whatsapp error: {error_msg}")
+        log_message("ERROR", f"Traceback: {traceback.format_exc()}")
         return error_msg
 
 
@@ -1461,12 +1485,17 @@ async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = Fa
 async def _send_slack_internal(message: str, channel: str = None, with_tts: bool = False) -> str:
     """Internal function to send Slack messages"""
     global _comms_manager
+
+    log_message("DEBUG", f"_send_slack_internal called with message='{message[:50]}...', channel={channel}, with_tts={with_tts}")
+    log_message("DEBUG", f"_comms_manager exists: {_comms_manager is not None}")
     
     # Ensure we have a communication manager
     if not _comms_manager:
+        log_message("DEBUG", "No _comms_manager, attempting to create one")
         # Try to auto-configure with Slack
         base_manager = comms.setup_communication(providers=['slack'])
         if base_manager:
+            log_message("DEBUG", f"Created base_manager with providers: {base_manager.providers}")
             _comms_manager = NotifyingCommunicationManager(base_manager)
         else:
             error_msg = "Slack not configured. Please call configure_communication first or set SLACK_BOT_TOKEN."
@@ -1474,18 +1503,25 @@ async def _send_slack_internal(message: str, channel: str = None, with_tts: bool
             return error_msg
     
     # Check if Slack provider exists
-    if not _comms_manager or not _comms_manager.providers:
+    # Get the actual providers from the wrapped manager
+    providers = _comms_manager.wrapped.providers if hasattr(_comms_manager, 'wrapped') else _comms_manager.providers
+    log_message("DEBUG", f"providers: {providers}")
+    if not providers:
         error_msg = "No communication providers configured."
         log_message("ERROR", f"send_slack error: {error_msg}")
         return error_msg
     
-    if not any(isinstance(p, SlackProvider) for p in _comms_manager.providers):
+    # Check provider types
+    provider_types = [type(p).__name__ for p in providers]
+    log_message("DEBUG", f"Provider types found: {provider_types}")
+
+    if not any(isinstance(p, SlackProvider) for p in providers):
         error_msg = "Slack provider not available. Please configure with Slack bot token."
         log_message("ERROR", f"send_slack error: {error_msg}")
         return error_msg
     
     # Send the message
-    slack_provider = next((p for p in _comms_manager.providers if isinstance(p, SlackProvider)), None)
+    slack_provider = next((p for p in providers if isinstance(p, SlackProvider)), None)
     if not slack_provider:
         error_msg = "Slack provider not found in communication manager"
         log_message("ERROR", f"send_slack error: {error_msg}")
@@ -1504,7 +1540,18 @@ async def _send_slack_internal(message: str, channel: str = None, with_tts: bool
         sender=target_channel,
         channel="slack"
     )
-    success = slack_provider.send_message(slack_message)
+
+    last_error = None
+    try:
+        success = slack_provider.send_message(slack_message)
+        log_message("DEBUG", f"[DEBUG] slack_provider.send_message returned: {success}")
+        # Check if there was an error logged
+        if not success and hasattr(slack_provider, '_last_error'):
+            last_error = slack_provider._last_error
+    except Exception as e:
+        log_message("ERROR", f"[DEBUG] Exception in slack_provider.send_message: {type(e).__name__}: {str(e)}")
+        success = False
+        last_error = str(e)
     
     # Also speak it if requested
     if with_tts and get_shared_state().tts_initialized:
@@ -1513,11 +1560,19 @@ async def _send_slack_internal(message: str, channel: str = None, with_tts: bool
     if success:
         result_msg = f"Slack message sent: '{message[:50]}...' to {target_channel}"
     else:
-        result_msg = f"Failed to send Slack message to {target_channel}"
+        # Check if we captured an error
+        if last_error and "not_in_channel" in str(last_error):
+            result_msg = f"Bot is not in channel {target_channel}. Please invite the bot with: /invite @talkito"
+        elif last_error and "channel_not_found" in str(last_error):
+            result_msg = f"Channel {target_channel} not found. Please create the channel or use an existing one."
+        elif last_error:
+            result_msg = f"Failed to send Slack message to {target_channel}: {last_error}"
+        else:
+            result_msg = f"Failed to send Slack message to {target_channel}"
     log_message("INFO", f"send_slack returning: {result_msg}")
     return result_msg
 
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def send_slack(message: str, channel: str = None, with_tts: bool = False) -> str:
     """
     Send a message to Slack
@@ -1530,12 +1585,17 @@ async def send_slack(message: str, channel: str = None, with_tts: bool = False) 
     Returns:
         Status message about the sent message
     """
+    log_message("INFO", f"send_slack tool called with message: {message}, channel: {channel}, with_tts: {with_tts}")
+    log_message("INFO", f"_running_for_claude: {_running_for_claude}")
+    log_message("INFO", f"Tool is masked for Claude: {True if _running_for_claude else False}")
     try:
         await _init_processor_if_needed()
         return await _send_slack_internal(message, channel, with_tts)
     except Exception as e:
         error_msg = f"Error sending Slack message: {str(e)}"
         log_message("ERROR", f"send_slack error: {error_msg}")
+        import traceback
+        log_message("ERROR", f"Traceback: {traceback.format_exc()}")
         return error_msg
 
 
@@ -1599,11 +1659,13 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
     Returns:
         One-line formatted status summary (already visible in tool output - no need to repeat)
     """
+    global _comms_manager
+
     try:
         # Ensure message poller is initialized
         await _init_processor_if_needed()
         
-        global _whatsapp_recipient, _comms_manager
+        global _whatsapp_recipient
         
         # Determine recipient
         if phone_number:
@@ -1615,17 +1677,7 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
                 log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
                 return error_msg
         
-        # Ensure WhatsApp is configured
-        if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
-            base_manager = comms.setup_communication(providers=['whatsapp'])
-            if base_manager and any(isinstance(p, TwilioWhatsAppProvider) for p in base_manager.providers):
-                _comms_manager = NotifyingCommunicationManager(base_manager)
-            else:
-                error_msg = "Failed to configure WhatsApp. Check your Twilio credentials."
-                log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
-                return error_msg
-        
-        # Update shared state using thread-safe method
+        # Update shared state
         from .state import _shared_state
         _shared_state.set_whatsapp_mode(True)
         
@@ -1633,6 +1685,24 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         shared_state = get_shared_state()
         shared_state.communication.whatsapp_to_number = _whatsapp_recipient
         save_shared_state()
+        
+        # In standalone mode, we need to set up our own comm_manager
+        if not _running_for_claude:
+            # Ensure WhatsApp is configured
+            if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
+                base_manager = comms.setup_communication(providers=['whatsapp'])
+                if base_manager and any(isinstance(p, TwilioWhatsAppProvider) for p in base_manager.providers):
+                    _comms_manager = NotifyingCommunicationManager(base_manager)
+                else:
+                    error_msg = "Failed to configure WhatsApp. Check your Twilio credentials."
+                    log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
+                    return error_msg
+            
+            # Send confirmation
+            await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
+            log_message("INFO", f"WhatsApp mode enabled for {_whatsapp_recipient} (standalone mode)")
+        else:
+            log_message("INFO", f"WhatsApp mode enabled for {_whatsapp_recipient} (core will handle initialization)")
         
         # Send confirmation
         # await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
@@ -1737,32 +1807,6 @@ async def start_slack_mode(channel: str = None) -> str:
                 log_message("ERROR", f"start_slack_mode error: {error_msg}")
                 return error_msg
         
-        # Ensure Slack is configured
-        if not _comms_manager or not any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else [])):
-            base_manager = comms.setup_communication(providers=['slack'])
-            if not base_manager:
-                error_msg = "Failed to configure Slack. Check your Slack bot token."
-                log_message("ERROR", f"start_slack_mode error: {error_msg}")
-                return error_msg
-            
-            # The provider should be available immediately after setup_communication returns
-            if not any(isinstance(p, SlackProvider) for p in base_manager.providers):
-                error_msg = "Failed to configure Slack provider. Check your Slack bot token."
-                log_message("ERROR", f"start_slack_mode error: {error_msg}")
-                return error_msg
-            
-            _comms_manager = NotifyingCommunicationManager(base_manager)
-            
-            # Now wait for the actual connection
-            slack_provider = next((p for p in base_manager.providers if isinstance(p, SlackProvider)), None)
-            if slack_provider and hasattr(slack_provider, 'wait_for_connection'):
-                log_message("INFO", "Waiting for Slack connection...")
-                if not slack_provider.wait_for_connection(timeout=3.0):
-                    error_msg = "Slack connection timeout. Please check your credentials and network."
-                    log_message("ERROR", f"start_slack_mode error: {error_msg}")
-                    return error_msg
-                log_message("INFO", "Slack connection established")
-        
         _slack_mode = True
         
         # Update shared state
@@ -1771,10 +1815,40 @@ async def start_slack_mode(channel: str = None) -> str:
         shared_state.communication.slack_channel = _slack_channel
         save_shared_state()
         
-        # Send confirmation
-        await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
+        # In standalone mode, we need to set up our own comm_manager
+        if not _running_for_claude:
+            # Ensure Slack is configured
+            if not _comms_manager or not any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else [])):
+                base_manager = comms.setup_communication(providers=['slack'])
+                if not base_manager:
+                    error_msg = "Failed to configure Slack. Check your Slack bot token."
+                    log_message("ERROR", f"start_slack_mode error: {error_msg}")
+                    return error_msg
+                
+                # The provider should be available immediately after setup_communication returns
+                if not any(isinstance(p, SlackProvider) for p in base_manager.providers):
+                    error_msg = "Failed to configure Slack provider. Check your Slack bot token."
+                    log_message("ERROR", f"start_slack_mode error: {error_msg}")
+                    return error_msg
+                
+                _comms_manager = NotifyingCommunicationManager(base_manager)
+                
+                # Now wait for the actual connection
+                slack_provider = next((p for p in base_manager.providers if isinstance(p, SlackProvider)), None)
+                if slack_provider and hasattr(slack_provider, 'wait_for_connection'):
+                    log_message("INFO", "Waiting for Slack connection...")
+                    if not slack_provider.wait_for_connection(timeout=3.0):
+                        error_msg = "Slack connection timeout. Please check your credentials and network."
+                        log_message("ERROR", f"start_slack_mode error: {error_msg}")
+                        return error_msg
+                    log_message("INFO", "Slack connection established")
+            
+            # Send confirmation
+            await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
+            log_message("INFO", f"Slack mode enabled for {_slack_channel} (standalone mode)")
+        else:
+            log_message("INFO", f"Slack mode enabled for {_slack_channel} (core will handle initialization)")
         
-        log_message("INFO", f"start_slack_mode completed: Slack mode activated for {_slack_channel}")
         return _get_status_summary()
         
     except Exception as e:
@@ -1841,7 +1915,7 @@ async def get_slack_mode_status() -> dict[str, Any]:
     return status
 
 
-@app.tool()
+@conditional_tool(masked_for_claude=True)
 async def get_messages() -> dict[str, Any]:
     """
     Get all available messages from voice dictation, Slack, and WhatsApp.
@@ -2263,9 +2337,14 @@ def start_http_api_server(port=None):
         
         def handle_whatsapp(self, data):
             """Handle WhatsApp API call"""
+            # Ensure logging is working
+            _ensure_logging()
+            
             message = data.get("message", "")
             to_number = data.get("to_number", None)
             with_tts = data.get("with_tts", False)
+            
+            log_message("INFO", f"HTTP API: handle_whatsapp called with message='{message[:50]}...', to_number={to_number}")
             
             if not message:
                 self.send_error(400, "No message provided")
@@ -2280,6 +2359,8 @@ def start_http_api_server(port=None):
                 # Use the internal function directly
                 result = loop.run_until_complete(_send_whatsapp_internal(message=message, to_number=to_number, with_tts=with_tts))
                 
+                log_message("INFO", f"HTTP API: WhatsApp send result: {result}")
+                
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_cors_headers()
@@ -2288,15 +2369,21 @@ def start_http_api_server(port=None):
                 response = {"success": True, "message": result}
                 self.wfile.write(json.dumps(response).encode())
             except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_whatsapp: {str(e)}")
                 self.send_error(500, str(e))
             finally:
                 loop.close()
         
         def handle_slack(self, data):
             """Handle Slack API call"""
+            # Ensure logging is working
+            _ensure_logging()
+            
             message = data.get("message", "")
             channel = data.get("channel", None)
             with_tts = data.get("with_tts", False)
+            
+            log_message("INFO", f"HTTP API: handle_slack called with message='{message[:50]}...', channel={channel}")
             
             if not message:
                 self.send_error(400, "No message provided")
@@ -2311,6 +2398,8 @@ def start_http_api_server(port=None):
                 # Use the internal function directly
                 result = loop.run_until_complete(_send_slack_internal(message=message, channel=channel, with_tts=with_tts))
                 
+                log_message("INFO", f"HTTP API: Slack send result: {result}")
+                
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_cors_headers()
@@ -2319,6 +2408,7 @@ def start_http_api_server(port=None):
                 response = {"success": True, "message": result}
                 self.wfile.write(json.dumps(response).encode())
             except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_slack: {str(e)}")
                 self.send_error(500, str(e))
             finally:
                 loop.close()
@@ -2348,6 +2438,25 @@ def find_available_port(start_port=8000, max_attempts=100):
                 s.bind(('127.0.0.1', port))
                 return port
         except OSError:
+            continue
+    return None
+
+def find_two_consecutive_ports(start_port=8000, max_attempts=100):
+    """Find two consecutive available ports starting from start_port"""
+    import socket
+    for port in range(start_port, start_port + max_attempts - 1):
+        # Check if both port and port+1 are available
+        try:
+            # Test first port
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+                s1.bind(('127.0.0.1', port))
+                # Test second port
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                    s2.bind(('127.0.0.1', port + 1))
+                    # Both ports are available
+                    return port
+        except OSError:
+            # One or both ports are in use, try next pair
             continue
     return None
 
@@ -2425,11 +2534,19 @@ def main():
         if args.port:
             port = args.port
         else:
-            # Find an available port
-            port = find_available_port(8000)
-            if not port:
-                print("Error: Could not find an available port in range 8000-8100", file=sys.stderr)
-                sys.exit(1)
+            # Find available ports
+            if args.transport == 'sse' and not args.no_http_api:
+                # Need two consecutive ports for SSE + HTTP API
+                port = find_two_consecutive_ports(8000)
+                if not port:
+                    print("Error: Could not find two consecutive available ports in range 8000-8100", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                # Only need one port
+                port = find_available_port(8000)
+                if not port:
+                    print("Error: Could not find an available port in range 8000-8100", file=sys.stderr)
+                    sys.exit(1)
         
         # Set environment variables that various servers might respect
         os.environ['PORT'] = str(port)
