@@ -715,6 +715,9 @@ async def _enable_tts_internal() -> str:
         _ensure_logging_restored()
         _ensure_initialization()
         
+        # Clear any old queued messages before enabling
+        tts.clear_speech_queue()
+        
         # Update shared state using thread-safe method
         from .state import _shared_state
         _shared_state.set_tts_enabled(True)
@@ -741,6 +744,9 @@ async def _disable_tts_internal() -> str:
             tts.queue_for_speech("Text to speech is being disabled.", None)
             tts.wait_for_tts_to_finish(timeout=3.0)
         
+        # Clear any remaining items in the TTS queue
+        tts.clear_speech_queue()
+        
         # Update shared state using thread-safe method
         from .state import _shared_state
         _shared_state.set_tts_enabled(False)
@@ -763,45 +769,23 @@ async def _enable_asr_internal() -> str:
         if not ASR_AVAILABLE:
             return "❌ ASR not available. Install with: pip install talkito[asr]"
         
-        shared_state = get_shared_state()
-        
-        # Initialize ASR if needed
-        if not shared_state.asr_initialized:
-            best_asr_provider = asr.select_best_asr_provider()
-            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
-            
-            # Use the core callbacks directly
-            from .core import handle_dictated_text, handle_partial_transcript
-            
-            # For providers that require streaming (like AssemblyAI), we need to provide a partial callback
-            partial_callback = None
-            if best_asr_provider in ['assemblyai', 'deepgram', 'gcloud', 'azure', 'aws']:
-                # These providers work better with streaming, so use the core partial callback
-                partial_callback = handle_partial_transcript
-                log_message("INFO", f"Using streaming mode for {best_asr_provider}")
-            
-            asr.start_dictation(
-                text_callback=handle_dictated_text,
-                partial_callback=partial_callback
-            )
-            # Start in paused state so auto-input logic can manage it properly
-            asr.set_ignore_input(True)
-            log_message("INFO", "ASR initialized in paused state for auto-input management")
-            
-            # Reset ASR state to ensure auto-input logic works correctly
-            from .core import asr_state
-            if asr_state:
-                asr_state.asr_auto_started = False
-                log_message("INFO", "Reset asr_auto_started to False for clean state")
-            
-            # Update shared state using thread-safe method
-            shared_state.set_asr_initialized(True, provider=best_asr_provider)
-        
-        # Update shared state using thread-safe method
+        # Simply toggle the state - let core handle initialization
         from .state import _shared_state
         _shared_state.set_asr_enabled(True)
         
-        log_message("INFO", "ASR enabled")
+        log_message("INFO", "ASR enabled (core will handle initialization)")
+        
+        # Wait a moment for core to initialize ASR
+        import asyncio
+        for i in range(20):  # Try for up to 2 seconds
+            await asyncio.sleep(0.1)
+            shared_state = get_shared_state()
+            log_message("DEBUG", f"ASR init check {i}: enabled={shared_state.asr_enabled}, initialized={shared_state.asr_initialized}")
+            if shared_state.asr_initialized:
+                log_message("INFO", "ASR initialization confirmed")
+                break
+        else:
+            log_message("WARNING", "ASR initialization timeout - returning status anyway")
         
         return _get_status_summary()
         
@@ -813,22 +797,11 @@ async def _enable_asr_internal() -> str:
 async def _disable_asr_internal() -> str:
     """Internal function to disable ASR"""
     try:
-        # Update shared state using thread-safe method
+        # Simply toggle the state - let core handle cleanup
         from .state import _shared_state
         _shared_state.set_asr_enabled(False)
         
-        log_message("INFO", "ASR disabled")
-        
-        shared_state = get_shared_state()
-        
-        # Stop active dictation if running
-        if ASR_AVAILABLE and shared_state.asr_initialized and asr.is_dictation_active():
-            asr.stop_dictation()
-            log_message("INFO", "Stopped active dictation")
-        
-        # Always mark ASR as uninitialized when disabled
-        _shared_state.set_asr_initialized(False)
-        log_message("INFO", "ASR marked as uninitialized")
+        log_message("INFO", "ASR disabled (core will handle cleanup)")
         
         return _get_status_summary()
         

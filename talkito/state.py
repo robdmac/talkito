@@ -298,6 +298,12 @@ class SharedStateManager:
             self.state.set_asr_enabled(enabled)
             self.save_state()
     
+    def set_asr_initialized(self, initialized: bool, provider: Optional[str] = None):
+        """Thread-safe ASR initialized state update"""
+        with self._lock:
+            self.state.set_asr_initialized(initialized, provider)
+            self.save_state()
+    
     def set_voice_mode(self, active: bool):
         """Thread-safe voice mode update"""
         with self._lock:

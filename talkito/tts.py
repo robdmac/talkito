@@ -1360,6 +1360,20 @@ def reset_tts_cache():
     log_message("INFO", "TTS cache reset")
 
 
+def clear_speech_queue():
+    """Clear all pending items from the TTS queue"""
+    items_cleared = 0
+    while not tts_queue.empty():
+        try:
+            tts_queue.get_nowait()
+            items_cleared += 1
+        except:
+            break
+    
+    if items_cleared > 0:
+        log_message("INFO", f"Cleared {items_cleared} items from TTS queue")
+
+
 def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
     """Wait for all queued TTS to finish playing. Returns True if finished, False if timed out."""
     start_time = time.time()

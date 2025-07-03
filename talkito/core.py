@@ -363,11 +363,20 @@ def check_comms_input() -> Optional[str]:
 def send_pending_text():
     if terminal.pending_speech_text.strip():
         log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
-        speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
-        if speakable_text:
-            log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+        
+        # Check if TTS is enabled before queueing
+        shared_state = get_shared_state()
+        if shared_state.tts_enabled:
+            speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
+            if speakable_text:
+                log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+                terminal.pending_speech_text = ""
+                send_to_comms(speakable_text)
+        else:
+            log_message("DEBUG", "TTS disabled, not sending pending text to speech")
             terminal.pending_speech_text = ""
-            send_to_comms(speakable_text)
+            # Still send to comms even if TTS is disabled
+            send_to_comms(terminal.pending_speech_text)
 
 def queue_output(text: str, line_number: Optional[int] = None):
     """Queue text for both TTS and communication channels"""
@@ -375,6 +384,14 @@ def queue_output(text: str, line_number: Optional[int] = None):
     if line_number < terminal.last_line_number:
         log_message("DEBUG", f"queue_output skipping previously seen line number")
     elif text and text.strip():
+        # Check if TTS is enabled before accumulating text
+        shared_state = get_shared_state()
+        if not shared_state.tts_enabled:
+            log_message("DEBUG", "TTS disabled, not accumulating text for speech")
+            # Still send to comms even if TTS is disabled
+            send_to_comms(text)
+            return
+            
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
         append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
         terminal.last_line_number = line_number
@@ -1488,10 +1505,11 @@ def handle_partial_transcript(text: str):
     log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
-    if not text.strip():
-        return
 
     asr_state.current_partial = text # + '\u200b'
+
+    if not text.strip():
+        return
 
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
@@ -1571,21 +1589,115 @@ def check_tap_to_talk_timeout():
     return False
 
 
+def ensure_asr_cleanup():
+    """Ensure ASR is properly cleaned up when disabled.
+    
+    This function handles ASR cleanup when:
+    - MCP disables ASR
+    - ASR encounters errors requiring cleanup
+    """
+    if not ASR_AVAILABLE:
+        return
+        
+    shared_state = get_shared_state()
+    
+    # Check if ASR should be cleaned up
+    if not shared_state.asr_enabled and shared_state.asr_initialized:
+        log_message("INFO", "ASR disabled but still initialized - cleaning up")
+        
+        try:
+            # Stop active dictation if running
+            if asr.is_dictation_active():
+                asr.stop_dictation()
+                log_message("INFO", "Stopped active dictation")
+                
+            # Reset ASR state
+            if asr_state:
+                asr_state.asr_auto_started = False
+                asr_state.current_partial = ""
+                
+            # Mark as uninitialized
+            shared_state.set_asr_initialized(False)
+            log_message("INFO", "ASR cleanup completed")
+            
+        except Exception as e:
+            log_message("ERROR", f"Error during ASR cleanup: {e}")
+
+
+def ensure_asr_initialized():
+    """Ensure ASR is initialized if it's enabled but not yet initialized.
+    
+    This centralized function handles ASR initialization for all cases:
+    - Initial CLI startup with ASR enabled
+    - MCP enabling ASR after startup
+    - Re-initialization after ASR errors
+    
+    Returns:
+        bool: True if ASR was newly initialized, False otherwise
+    """
+    if not ASR_AVAILABLE:
+        return False
+        
+    shared_state = get_shared_state()
+    
+    # Check if ASR should be initialized
+    if shared_state.asr_enabled and not shared_state.asr_initialized:
+        log_message("INFO", "ASR enabled but not initialized - initializing now")
+        
+        try:
+            # Select the best ASR provider
+            best_asr_provider = asr.select_best_asr_provider()
+            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
+            
+            # Start ASR with the standard callbacks
+            asr.start_dictation(handle_dictated_text, handle_partial_transcript)
+            
+            # Start in paused state so auto-input logic can manage it
+            asr.set_ignore_input(True)
+            log_message("INFO", "ASR initialized and paused for auto-input management")
+            
+            # Update shared state
+            shared_state.set_asr_initialized(True, provider=best_asr_provider)
+            
+            # Reset ASR state for clean startup
+            if asr_state:
+                asr_state.asr_auto_started = False
+                
+            return True
+            
+        except Exception as e:
+            log_message("ERROR", f"Failed to initialize ASR: {e}")
+            # Mark as not initialized so we can retry later
+            shared_state.set_asr_initialized(False)
+            return False
+            
+    return False
+
+
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
     if not ASR_AVAILABLE:
         return False
+    
+    # First ensure ASR state is correct (initialize if needed, cleanup if disabled)
+    ensure_asr_initialized()
+    ensure_asr_cleanup()
         
     # Check shared state if available
     shared_state = get_shared_state()
     if not shared_state.asr_enabled:
         log_message("DEBUG", "ASR disabled in shared state, not auto-enabling")
         return False
+    
+    # If ASR is not initialized at this point, we can't proceed
+    if not shared_state.asr_initialized:
+        log_message("DEBUG", "ASR not initialized, cannot auto-enable")
+        return False
         
-    # If ASR was explicitly enabled and initialized via MCP, override CLI mode and treat as auto-input
-    if shared_state.asr_enabled and shared_state.asr_initialized and asr_mode == "off":
+    # If ASR was explicitly enabled via MCP when CLI had it off, treat as auto-input
+    if asr_mode == "off" and shared_state.asr_enabled:
         asr_mode = "auto-input"
-        log_message("DEBUG", f"ASR enabled and initialized via MCP, overriding CLI mode to auto-input")
+        log_message("DEBUG", f"ASR enabled via MCP, overriding CLI mode to auto-input")
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
@@ -2540,31 +2652,17 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     if 'asr_config' in kwargs and ASR_AVAILABLE:
         asr.configure_asr_from_dict(kwargs['asr_config'])
     
-    # Pre-start ASR if it's going to be used
+    # Set ASR state based on mode
     asr_mode = kwargs.get('asr_mode', 'auto-input')
-    if ASR_AVAILABLE and asr_mode != 'off':
-        log_message("INFO", f"Pre-initializing ASR for {asr_mode} mode...")
-        # Start ASR in a background thread to avoid blocking
-        def init_asr():
-            try:
-                # This will initialize the engine, calibrate the mic, etc.
-                asr.start_dictation(handle_dictated_text, handle_partial_transcript)
-                # But immediately pause it so it doesn't start listening yet
-                asr.set_ignore_input(True)
-                log_message("INFO", "ASR pre-initialized and paused")
-                
-                # Update shared state
-                from .state import get_shared_state
-                shared_state = get_shared_state()
-                asr_provider = kwargs.get('asr_config', {}).get('provider') if 'asr_config' in kwargs else None
-                if not asr_provider:
-                    asr_provider = asr.select_best_asr_provider()
-                shared_state.set_asr_initialized(True, asr_provider)
-            except Exception as e:
-                log_message("ERROR", f"Failed to pre-initialize ASR: {e}")
-        
-        asr_thread = threading.Thread(target=init_asr, daemon=True)
-        asr_thread.start()
+    if ASR_AVAILABLE:
+        if asr_mode != 'off':
+            # Enable ASR in shared state - centralized functions will handle initialization
+            log_message("INFO", f"Enabling ASR for {asr_mode} mode")
+            shared_state.set_asr_enabled(True)
+        else:
+            # Explicitly disable ASR when mode is 'off'
+            log_message("INFO", "Disabling ASR due to --asr-mode off")
+            shared_state.set_asr_enabled(False)
     
     # Set up communications if configured
     if 'comms_config' in kwargs and COMMS_AVAILABLE:
