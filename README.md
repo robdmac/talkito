@@ -15,6 +15,11 @@ pip install -e ".[all]"  # All features
 
 talkito claude
 ```
+or for the web extension run as
+```commandline
+talkito --mcp-sse-server
+```
+then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 
 ## AI Assistant Compatibility
 
