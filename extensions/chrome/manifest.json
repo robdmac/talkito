@@ -6,8 +6,17 @@
   "permissions": [
     "contextMenus",
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
   "host_permissions": [
     "http://localhost:8000/*",
     "http://localhost:8001/*",
@@ -19,7 +28,11 @@
     "http://localhost:8007/*",
     "http://localhost:8008/*",
     "http://localhost:8009/*",
-    "http://localhost:8010/*"
+    "http://localhost:8010/*",
+    "https://bolt.new/*",
+    "https://v0.dev/*",
+    "https://replit.com/*",
+    "https://*.replit.com/*"
   ],
   "background": {
     "service_worker": "background.js"
