@@ -18,16 +18,17 @@ talkito claude
 
 ## AI Assistant Compatibility
 
-| AI Assistant                 | Method        | Status                |
-|------------------------------|---------------|-----------------------|
-| **Claude Code**              | Terminal      | **Fully Supported**   |
-| bolt.new                     | Web Extension | Partially Supported   |
-| v0.dev                       | Web Extension | Partially Supported   |
-| Gemini CLI                   | Terminal      | In Progress           |
-| Codex                        | Terminal      | In Progress           |
-| Aider                        | Terminal      | In Progress           |
-| Cursor                       | Terminal      | In Progress           |
-| Continue                     | Terminal      | In Progress           |
+| AI Assistant                 | Method        | Status              |
+|------------------------------|---------------|---------------------|
+| **Claude Code**              | Terminal      | **Fully Supported** |
+| bolt.new                     | Web Extension | Output Only         |
+| v0.dev                       | Web Extension | Output Only         |
+| replit.com                   | Web Extension | Output Only         |
+| Gemini CLI                   | Terminal      | In Progress         |
+| Codex                        | Terminal      | In Progress         |
+| Aider                        | Terminal      | In Progress         |
+| Cursor                       | Terminal      | In Progress         |
+| Continue                     | Terminal      | In Progress         |
 
 
 
