@@ -363,11 +363,20 @@ def check_comms_input() -> Optional[str]:
 def send_pending_text():
     if terminal.pending_speech_text.strip():
         log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
-        speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
-        if speakable_text:
-            log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+        
+        # Check if TTS is enabled before queueing
+        shared_state = get_shared_state()
+        if shared_state.tts_enabled:
+            speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
+            if speakable_text:
+                log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
+                terminal.pending_speech_text = ""
+                send_to_comms(speakable_text)
+        else:
+            log_message("DEBUG", "TTS disabled, not sending pending text to speech")
             terminal.pending_speech_text = ""
-            send_to_comms(speakable_text)
+            # Still send to comms even if TTS is disabled
+            send_to_comms(terminal.pending_speech_text)
 
 def queue_output(text: str, line_number: Optional[int] = None):
     """Queue text for both TTS and communication channels"""
@@ -375,6 +384,14 @@ def queue_output(text: str, line_number: Optional[int] = None):
     if line_number < terminal.last_line_number:
         log_message("DEBUG", f"queue_output skipping previously seen line number")
     elif text and text.strip():
+        # Check if TTS is enabled before accumulating text
+        shared_state = get_shared_state()
+        if not shared_state.tts_enabled:
+            log_message("DEBUG", "TTS disabled, not accumulating text for speech")
+            # Still send to comms even if TTS is disabled
+            send_to_comms(text)
+            return
+            
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
         append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
         terminal.last_line_number = line_number
@@ -1488,10 +1505,11 @@ def handle_partial_transcript(text: str):
     log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
-    if not text.strip():
-        return
 
     asr_state.current_partial = text # + '\u200b'
+
+    if not text.strip():
+        return
 
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
@@ -1571,16 +1589,115 @@ def check_tap_to_talk_timeout():
     return False
 
 
+def ensure_asr_cleanup():
+    """Ensure ASR is properly cleaned up when disabled.
+    
+    This function handles ASR cleanup when:
+    - MCP disables ASR
+    - ASR encounters errors requiring cleanup
+    """
+    if not ASR_AVAILABLE:
+        return
+        
+    shared_state = get_shared_state()
+    
+    # Check if ASR should be cleaned up
+    if not shared_state.asr_enabled and shared_state.asr_initialized:
+        log_message("INFO", "ASR disabled but still initialized - cleaning up")
+        
+        try:
+            # Stop active dictation if running
+            if asr.is_dictation_active():
+                asr.stop_dictation()
+                log_message("INFO", "Stopped active dictation")
+                
+            # Reset ASR state
+            if asr_state:
+                asr_state.asr_auto_started = False
+                asr_state.current_partial = ""
+                
+            # Mark as uninitialized
+            shared_state.set_asr_initialized(False)
+            log_message("INFO", "ASR cleanup completed")
+            
+        except Exception as e:
+            log_message("ERROR", f"Error during ASR cleanup: {e}")
+
+
+def ensure_asr_initialized():
+    """Ensure ASR is initialized if it's enabled but not yet initialized.
+    
+    This centralized function handles ASR initialization for all cases:
+    - Initial CLI startup with ASR enabled
+    - MCP enabling ASR after startup
+    - Re-initialization after ASR errors
+    
+    Returns:
+        bool: True if ASR was newly initialized, False otherwise
+    """
+    if not ASR_AVAILABLE:
+        return False
+        
+    shared_state = get_shared_state()
+    
+    # Check if ASR should be initialized
+    if shared_state.asr_enabled and not shared_state.asr_initialized:
+        log_message("INFO", "ASR enabled but not initialized - initializing now")
+        
+        try:
+            # Select the best ASR provider
+            best_asr_provider = asr.select_best_asr_provider()
+            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
+            
+            # Start ASR with the standard callbacks
+            asr.start_dictation(handle_dictated_text, handle_partial_transcript)
+            
+            # Start in paused state so auto-input logic can manage it
+            asr.set_ignore_input(True)
+            log_message("INFO", "ASR initialized and paused for auto-input management")
+            
+            # Update shared state
+            shared_state.set_asr_initialized(True, provider=best_asr_provider)
+            
+            # Reset ASR state for clean startup
+            if asr_state:
+                asr_state.asr_auto_started = False
+                
+            return True
+            
+        except Exception as e:
+            log_message("ERROR", f"Failed to initialize ASR: {e}")
+            # Mark as not initialized so we can retry later
+            shared_state.set_asr_initialized(False)
+            return False
+            
+    return False
+
+
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
-    if not ASR_AVAILABLE or asr_mode == "off":
+    if not ASR_AVAILABLE:
         return False
+    
+    # First ensure ASR state is correct (initialize if needed, cleanup if disabled)
+    ensure_asr_initialized()
+    ensure_asr_cleanup()
         
     # Check shared state if available
     shared_state = get_shared_state()
     if not shared_state.asr_enabled:
         log_message("DEBUG", "ASR disabled in shared state, not auto-enabling")
         return False
+    
+    # If ASR is not initialized at this point, we can't proceed
+    if not shared_state.asr_initialized:
+        log_message("DEBUG", "ASR not initialized, cannot auto-enable")
+        return False
+        
+    # If ASR was explicitly enabled via MCP when CLI had it off, treat as auto-input
+    if asr_mode == "off" and shared_state.asr_enabled:
+        asr_mode = "auto-input"
+        log_message("DEBUG", f"ASR enabled via MCP, overriding CLI mode to auto-input")
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
@@ -1694,61 +1811,66 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     """Run the command and process its output with PTY support for colors"""
     global current_master_fd, current_proc, _original_tty_attrs
 
-    # Set up terminal and spawn process
-    master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
-    current_master_fd = master_fd
-    current_proc = proc
+    # Initialize to ensure cleanup on error
+    master_fd = None
+    proc = None
     
-    # Initialize recorder if requested
-    recorder = SessionRecorder(record_file)
-    
-    if recorder.enabled:
-        log_message("INFO", f"Record mode enabled - saving raw output to: {record_file}")
-        asr_mode = "off"
-
-    # Process state
-    buffer = []
-    
-    # White input state tracking (outside the main loop)
-    in_input = False
-    prev_line = ""
-    line_buffer = b""
-
-    # Buffer for incomplete UTF-8 sequences
-    incomplete_utf8_buffer = b""
-
-    # Use LineBuffer to track all output
-    output_buffer = LineBuffer()
-    
-    # Initialize non-blocking output buffer
-    stdout_buffer = OutputBuffer()
-    
-    # Set stdout to non-blocking mode
-    stdout_flags = fcntl.fcntl(sys.stdout.fileno(), fcntl.F_GETFL)
-    fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags | os.O_NONBLOCK)
-
-    # Cursor tracking
-    current_cursor_row = 1
-    get_terminal_size()  # Initialize terminal dimensions
-
-    # Terminal state tracking
-    in_alternate_buffer = False
-    buffer_switch_time = 0
-    consecutive_redraws = 0
-    last_redraw_time = 0
-    skip_duplicate_mode = False
-    
-    # For periodic status updates
-    last_status_check = 0
-
-    old_tty_attrs = None
-    if sys.stdin.isatty():
-        old_tty_attrs = termios.tcgetattr(sys.stdin)
-        # Store globally for signal handler
-        _original_tty_attrs = old_tty_attrs
-        tty.setraw(sys.stdin.fileno())
-
     try:
+        # Set up terminal and spawn process
+        master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
+        current_master_fd = master_fd
+        current_proc = proc
+        
+        # Initialize recorder if requested
+        recorder = SessionRecorder(record_file)
+    
+        if recorder.enabled:
+            log_message("INFO", f"Record mode enabled - saving raw output to: {record_file}")
+            asr_mode = "off"
+
+        # Process state
+        buffer = []
+    
+        # White input state tracking (outside the main loop)
+        in_input = False
+        prev_line = ""
+        line_buffer = b""
+
+        # Buffer for incomplete UTF-8 sequences
+        incomplete_utf8_buffer = b""
+
+        # Use LineBuffer to track all output
+        output_buffer = LineBuffer()
+        
+        # Initialize non-blocking output buffer
+        stdout_buffer = OutputBuffer()
+        
+        # Set stdout to non-blocking mode
+        stdout_flags = fcntl.fcntl(sys.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags | os.O_NONBLOCK)
+
+        # Cursor tracking
+        current_cursor_row = 1
+        get_terminal_size()  # Initialize terminal dimensions
+
+        # Terminal state tracking
+        in_alternate_buffer = False
+        buffer_switch_time = 0
+        consecutive_redraws = 0
+        last_redraw_time = 0
+        skip_duplicate_mode = False
+        
+        # For periodic status updates
+        last_status_check = 0
+
+        old_tty_attrs = None
+        if sys.stdin.isatty():
+            old_tty_attrs = termios.tcgetattr(sys.stdin)
+            # Store globally for signal handler
+            _original_tty_attrs = old_tty_attrs
+            tty.setraw(sys.stdin.fileno())
+
+        # Main processing loop
         while True:
             if process_pending_resize(master_fd):
                 continue
@@ -1972,7 +2094,75 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     await drain_pty_output(master_fd, line_buffer)
                 break
 
+        # Process any remaining content after main loop exits
+        if line_buffer:
+            try:
+                line = line_buffer.decode('utf-8')
+            except UnicodeDecodeError:
+                line = line_buffer.decode('utf-8', errors='replace')
+                log_message("WARNING", "Incomplete UTF-8 sequence in final line buffer")
+            line_idx, action = output_buffer.add_or_update_line(line)
+
+            if action in ['added', 'modified']:
+                text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
+                if text_to_speak:
+                    queue_output(strip_profile_symbols(text_to_speak), line_idx)
+
+        if buffer:
+            # Use the last line index for any remaining buffer content
+            last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
+            process_remaining_buffer(buffer, last_idx)
+
+        # Flush any pending speech text before command completes
+        send_pending_text()
+
+        tts.wait_for_tts_to_finish()
+        
+        # Stop ASR if it was running
+        if ASR_AVAILABLE:
+            try:
+                asr.stop_dictation()
+            except Exception:
+                pass
+
+        # Log final buffer statistics
+        log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
+
+        # Save recorded data
+        recorder.save()
+
+        if proc:
+            await proc.wait()
+        
+        # Restore stdout to blocking mode
+        try:
+            fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags)
+            
+            # Flush any remaining buffered output
+            while len(stdout_buffer) > 0:
+                written = stdout_buffer.write_to_stdout()
+                if written == 0:
+                    # Force flush by writing directly in blocking mode
+                    remaining = bytes(stdout_buffer.buffer)
+                    if remaining:
+                        sys.stdout.buffer.write(remaining)
+                        sys.stdout.flush()
+                    break
+        except Exception as e:
+            log_message("ERROR", f"Error restoring stdout: {e}")
+
+        return proc.returncode if proc else 1
+
     finally:
+        # Close PTY file descriptor if it was opened
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+                log_message("INFO", "Closed master_fd in finally block")
+            except Exception as e:
+                log_message("ERROR", f"Failed to close master_fd: {e}")
+            current_master_fd = None
+        
         if old_tty_attrs is not None:
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSANOW, old_tty_attrs)
@@ -1993,66 +2183,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             sys.stdout.flush()
         except Exception:
             pass
-
-    if line_buffer:
-        try:
-            line = line_buffer.decode('utf-8')
-        except UnicodeDecodeError:
-            line = line_buffer.decode('utf-8', errors='replace')
-            log_message("WARNING", "Incomplete UTF-8 sequence in final line buffer")
-        line_idx, action = output_buffer.add_or_update_line(line)
-
-        if action in ['added', 'modified']:
-            text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
-            if text_to_speak:
-                queue_output(strip_profile_symbols(text_to_speak), line_idx)
-
-    if buffer:
-        # Use the last line index for any remaining buffer content
-        last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
-        process_remaining_buffer(buffer, last_idx)
-
-    # Flush any pending speech text before command completes
-    send_pending_text()
-
-    tts.wait_for_tts_to_finish()
-    
-    # Stop ASR if it was running
-    if ASR_AVAILABLE:
-        try:
-            asr.stop_dictation()
-        except Exception:
-            pass
-
-    # Log final buffer statistics
-    log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
-
-    os.close(master_fd)
-    current_master_fd = None
-
-    # Save recorded data
-    recorder.save()
-
-    await proc.wait()
-    
-    # Restore stdout to blocking mode
-    try:
-        fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL, stdout_flags)
-        
-        # Flush any remaining buffered output
-        while len(stdout_buffer) > 0:
-            written = stdout_buffer.write_to_stdout()
-            if written == 0:
-                # Force flush by writing directly in blocking mode
-                remaining = bytes(stdout_buffer.buffer)
-                if remaining:
-                    sys.stdout.buffer.write(remaining)
-                    sys.stdout.flush()
-                break
-    except Exception as e:
-        log_message("ERROR", f"Error restoring stdout: {e}")
-
-    return proc.returncode
 
 
 def process_remaining_buffer(buffer: List[str], line_idx: int) -> None:
@@ -2522,31 +2652,17 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     if 'asr_config' in kwargs and ASR_AVAILABLE:
         asr.configure_asr_from_dict(kwargs['asr_config'])
     
-    # Pre-start ASR if it's going to be used
+    # Set ASR state based on mode
     asr_mode = kwargs.get('asr_mode', 'auto-input')
-    if ASR_AVAILABLE and asr_mode != 'off':
-        log_message("INFO", f"Pre-initializing ASR for {asr_mode} mode...")
-        # Start ASR in a background thread to avoid blocking
-        def init_asr():
-            try:
-                # This will initialize the engine, calibrate the mic, etc.
-                asr.start_dictation(handle_dictated_text, handle_partial_transcript)
-                # But immediately pause it so it doesn't start listening yet
-                asr.set_ignore_input(True)
-                log_message("INFO", "ASR pre-initialized and paused")
-                
-                # Update shared state
-                from .state import get_shared_state
-                shared_state = get_shared_state()
-                asr_provider = kwargs.get('asr_config', {}).get('provider') if 'asr_config' in kwargs else None
-                if not asr_provider:
-                    asr_provider = asr.select_best_asr_provider()
-                shared_state.set_asr_initialized(True, asr_provider)
-            except Exception as e:
-                log_message("ERROR", f"Failed to pre-initialize ASR: {e}")
-        
-        asr_thread = threading.Thread(target=init_asr, daemon=True)
-        asr_thread.start()
+    if ASR_AVAILABLE:
+        if asr_mode != 'off':
+            # Enable ASR in shared state - centralized functions will handle initialization
+            log_message("INFO", f"Enabling ASR for {asr_mode} mode")
+            shared_state.set_asr_enabled(True)
+        else:
+            # Explicitly disable ASR when mode is 'off'
+            log_message("INFO", "Disabling ASR due to --asr-mode off")
+            shared_state.set_asr_enabled(False)
     
     # Set up communications if configured
     if 'comms_config' in kwargs and COMMS_AVAILABLE:
