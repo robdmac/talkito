@@ -770,9 +770,30 @@ async def _enable_asr_internal() -> str:
             best_asr_provider = asr.select_best_asr_provider()
             log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
             
+            # Use the core callbacks directly
+            from .core import handle_dictated_text, handle_partial_transcript
+            
+            # For providers that require streaming (like AssemblyAI), we need to provide a partial callback
+            partial_callback = None
+            if best_asr_provider in ['assemblyai', 'deepgram', 'gcloud', 'azure', 'aws']:
+                # These providers work better with streaming, so use the core partial callback
+                partial_callback = handle_partial_transcript
+                log_message("INFO", f"Using streaming mode for {best_asr_provider}")
+            
             asr.start_dictation(
-                text_callback=_dictation_callback_with_notification
+                text_callback=handle_dictated_text,
+                partial_callback=partial_callback
             )
+            # Start in paused state so auto-input logic can manage it properly
+            asr.set_ignore_input(True)
+            log_message("INFO", "ASR initialized in paused state for auto-input management")
+            
+            # Reset ASR state to ensure auto-input logic works correctly
+            from .core import asr_state
+            if asr_state:
+                asr_state.asr_auto_started = False
+                log_message("INFO", "Reset asr_auto_started to False for clean state")
+            
             # Update shared state using thread-safe method
             shared_state.set_asr_initialized(True, provider=best_asr_provider)
         

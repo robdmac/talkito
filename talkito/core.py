@@ -1573,7 +1573,7 @@ def check_tap_to_talk_timeout():
 
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
-    if not ASR_AVAILABLE or asr_mode == "off":
+    if not ASR_AVAILABLE:
         return False
         
     # Check shared state if available
@@ -1581,6 +1581,11 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     if not shared_state.asr_enabled:
         log_message("DEBUG", "ASR disabled in shared state, not auto-enabling")
         return False
+        
+    # If ASR was explicitly enabled and initialized via MCP, override CLI mode and treat as auto-input
+    if shared_state.asr_enabled and shared_state.asr_initialized and asr_mode == "off":
+        asr_mode = "auto-input"
+        log_message("DEBUG", f"ASR enabled and initialized via MCP, overriding CLI mode to auto-input")
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
