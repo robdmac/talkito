@@ -21,11 +21,21 @@ asr.py - Automatic Speech Recognition module
 Demonstrates a more DRY and maintainable approach to supporting multiple ASR providers
 """
 
+# Suppress pkg_resources deprecation warnings from Google Cloud SDK dependencies
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='google.rpc')
+
+# Suppress absl and gRPC warnings
+import os
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_TRACE'] = ''
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logging if used
+
 import speech_recognition as sr
 import threading
 import queue
 import argparse
-import os
 import time
 import tempfile
 from typing import Optional, Callable, Dict, Any, Tuple

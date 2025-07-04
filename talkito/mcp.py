@@ -51,7 +51,7 @@ except ImportError:
 from . import tts
 from . import comms
 from .comms import SlackProvider, TwilioWhatsAppProvider, TwilioSMSProvider
-from .core import TalkitoCore
+from .core import TalkitoCore, ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
 
@@ -1116,6 +1116,112 @@ async def disable_asr() -> str:
         One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     return await _disable_asr_internal()
+
+async def _change_asr_internal(provider: str = None, language: str = "en-US", model: str = None) -> str:
+    """Internal function to configure ASR"""
+    try:
+        # Get shared state
+        shared_state = get_shared_state()
+        
+        # If provider not specified, use current or select best
+        if provider is None:
+            if shared_state.asr_provider:
+                provider = shared_state.asr_provider
+            else:
+                provider = asr.select_best_asr_provider()
+        
+        # Build config dict
+        asr_config = {'provider': provider}
+        if language:
+            asr_config['language'] = language
+        if model:
+            asr_config['model'] = model
+        
+        # Configure ASR
+        if not asr.configure_asr_from_dict(asr_config):
+            error_msg = f"Failed to configure ASR provider: {provider}"
+            log_message("ERROR", f"configure_asr error: {error_msg}")
+            return error_msg
+        
+        # Update shared state with new configuration
+        from .state import set_asr_config_thread_safe
+        set_asr_config_thread_safe(provider=provider, language=language, model=model)
+        
+        # If ASR is already initialized and enabled, restart with new config
+        if shared_state.asr_initialized and shared_state.asr_enabled:
+            # Temporarily disable ASR to prevent race conditions
+            was_enabled = shared_state.asr_enabled
+            shared_state.set_asr_enabled(False)
+            
+            # Stop current ASR
+            try:
+                asr.stop_dictation()
+            except Exception as e:
+                log_message("WARNING", f"Error stopping ASR during reconfiguration: {e}")
+            
+            shared_state.set_asr_initialized(False)
+            
+            # Re-enable and initialize with new config
+            if was_enabled:
+                shared_state.set_asr_enabled(True)
+                # Small delay to ensure cleanup is complete
+                import time
+                time.sleep(0.1)
+                ensure_asr_initialized()
+        
+        config_parts = [f"provider={provider}"]
+        if language: config_parts.append(f"language={language}")
+        if model: config_parts.append(f"model={model}")
+        
+        success_msg = f"ASR configuration updated: {', '.join(config_parts)}"
+        log_message("INFO", success_msg)
+        
+        # Return current status
+        status = get_status_summary()
+        return status
+        
+    except Exception as e:
+        error_msg = f"Error configuring ASR: {str(e)}"
+        log_message("ERROR", error_msg)
+        return error_msg
+
+@app.tool()
+async def change_asr(provider: str = None, language: str = "en-US", model: str = None) -> str:
+    """
+    Change ASR (speech recognition) configuration
+    
+    Args:
+        provider: ASR provider (google, gcloud, assemblyai, deepgram, houndify, aws, bing)
+        language: Language code for speech recognition (e.g., en-US, es-ES, fr-FR)
+        model: Model to use (provider-specific, e.g., 'enhanced' for gcloud)
+        
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. Confirm to the user that the ASR has been changed
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    return await _change_asr_internal(provider, language, model)
+
+@app.tool()
+async def configure_asr(provider: str = None, language: str = "en-US", model: str = None) -> str:
+    """
+    Configure ASR provider
+    
+    Args:
+        provider: ASR provider (google, gcloud, assemblyai, deepgram, houndify, aws, bing)
+        language: Language code for speech recognition (e.g., en-US, es-ES, fr-FR)
+        model: Model to use (provider-specific, e.g., 'enhanced' for gcloud)
+        
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. Confirm to the user that the ASR has been configured
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    return await _change_asr_internal(provider, language, model)
 
 @app.tool()
 async def start_voice_input(language: str = "en-US", provider: str = None) -> str:
@@ -2782,6 +2888,10 @@ def main():
         _log_file_path = args.log_file
         setup_logging(args.log_file)
         log_message("INFO", f"MCP SSE server starting with log file: {args.log_file}")
+    
+    # Start background update checker
+    from .update import start_background_update_checker
+    start_background_update_checker()
     
     try:
         print("=" * 60, file=sys.stderr)
