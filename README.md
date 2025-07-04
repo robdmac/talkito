@@ -21,6 +21,10 @@ talkito --mcp-sse-server
 ```
 then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 
+## Demo Video
+
+[![TalkiTo Demo](https://img.youtube.com/vi/FJdYTYZK_0U/maxresdefault.jpg)](https://youtu.be/FJdYTYZK_0U)
+
 ## AI Assistant Compatibility
 
 | AI Assistant                 | Method        | Status              |

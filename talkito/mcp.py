@@ -1053,9 +1053,7 @@ async def change_tts(provider: str = "system", voice: str = None, region: str = 
 
     CRITICAL INSTRUCTIONS:
     1. The tool result will be displayed automatically - DO NOT repeat it
-    2. DO NOT speak, summarize, or comment on the status
-    3. DO NOT use talkito:speak_text after this tool
-    4. Simply return to waiting for user input after the tool result is shown
+    2. Confirm to the user that the TTS has been changed
 
     Returns:
         One-line formatted status summary (already visible in tool output - no need to repeat)
@@ -1077,9 +1075,7 @@ async def configure_tts(provider: str = "system", voice: str = None, region: str
         
     CRITICAL INSTRUCTIONS:
     1. The tool result will be displayed automatically - DO NOT repeat it
-    2. DO NOT speak, summarize, or comment on the status
-    3. DO NOT use talkito:speak_text after this tool
-    4. Simply return to waiting for user input after the tool result is shown
+    2. Confirm to the user that the TTS has been changed
 
     Returns:
         One-line formatted status summary (already visible in tool output - no need to repeat)

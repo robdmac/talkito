@@ -2019,7 +2019,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                 # Auto-submit if:
                 # - It's been at least 3 seconds since the last finalized transcript
                 # - No partial transcripts have been received in the last 3 seconds
-                if time_since_last_finalized >= 0.5 and time_since_last_partial >= 2.0:
+                if time_since_last_finalized >= 0.2 and time_since_last_partial >= 1.0:
                     try:
                         os.write(current_master_fd, RETURN)
                         asr_state.has_pending_transcript = False
