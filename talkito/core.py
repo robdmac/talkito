@@ -2424,6 +2424,36 @@ atexit.register(cleanup_terminal)
 
 def signal_handler(signum):
     """Handle shutdown signals"""
+    # For Ctrl-C, implement a fast exit path
+    if signum == signal.SIGINT:
+        # First priority: restore terminal for user
+        if _original_tty_attrs:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, _original_tty_attrs)
+            except Exception:
+                pass
+        
+        # Ensure cursor is visible
+        try:
+            sys.stdout.write('\033[?25h')  # Show cursor
+            sys.stdout.flush()
+        except Exception:
+            pass
+        
+        # Stop TTS immediately
+        try:
+            from .tts import stop_tts_immediately
+            stop_tts_immediately()
+        except Exception:
+            pass
+        
+        # Quick terminal cleanup
+        cleanup_terminal()
+        
+        # Exit immediately with SIGINT code
+        os._exit(130)  # type: ignore[attr-defined]
+    
+    # For other signals, do a more graceful shutdown
     # Restore terminal attributes first
     if _original_tty_attrs:
         try:
