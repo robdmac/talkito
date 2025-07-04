@@ -1663,9 +1663,15 @@ def ensure_asr_initialized():
         log_message("INFO", "ASR enabled but not initialized - initializing now")
         
         try:
-            # Select the best ASR provider
-            best_asr_provider = asr.select_best_asr_provider()
-            log_message("INFO", f"Initializing ASR with provider: {best_asr_provider}")
+            # Get the configured provider if available, otherwise select the best
+            if hasattr(asr, '_stored_config') and asr._stored_config:
+                asr_provider = asr._stored_config.provider
+                log_message("INFO", f"Using configured ASR provider: {asr_provider}")
+            else:
+                asr_provider = asr.select_best_asr_provider()
+                log_message("INFO", f"Selected best ASR provider: {asr_provider}")
+            
+            log_message("INFO", f"Initializing ASR with provider: {asr_provider}")
             
             # Start ASR with the standard callbacks
             asr.start_dictation(handle_dictated_text, handle_partial_transcript)
@@ -1675,7 +1681,7 @@ def ensure_asr_initialized():
             log_message("INFO", "ASR initialized and paused for auto-input management")
             
             # Update shared state
-            shared_state.set_asr_initialized(True, provider=best_asr_provider)
+            shared_state.set_asr_initialized(True, provider=asr_provider)
             
             # Reset ASR state for clean startup
             if asr_state:
@@ -2797,6 +2803,10 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     
     # Start TTS worker
     tts.start_tts_worker(engine, auto_skip_tts)
+    
+    # Start background update checker
+    from .update import start_background_update_checker
+    start_background_update_checker()
     
     # Update shared state for TTS initialization
     from .state import get_shared_state
