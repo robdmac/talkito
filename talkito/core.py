@@ -195,6 +195,10 @@ class ASRState:
     refresh_spaces_added: int = 0
     partial_enabled: bool = True
     question_mode: bool = False
+    # Auto-submit timer fields
+    last_finalized_transcript_time: float = 0
+    last_partial_transcript_time: float = 0
+    has_pending_transcript: bool = False
 
 # State instances will be created by TalkitoCore
 active_profile: Optional[Profile] = None  # Will be initialized to default profile
@@ -1251,6 +1255,8 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
 
             if b'\r' in input_data or b'\n' in input_data:
                 log_message("INFO", "User pressed Enter, exiting user input mode")
+                # Reset pending transcript flag since user manually submitted
+                asr_state.has_pending_transcript = False
                 return False
             else:
                 return True
@@ -1514,6 +1520,7 @@ def handle_partial_transcript(text: str):
         return
 
     asr_state.current_partial = text # + '\u200b'
+    asr_state.last_partial_transcript_time = time.time()
 
     if not text.strip():
         return
@@ -1536,6 +1543,10 @@ def handle_dictated_text(text: str):
         return
     
     log_message("INFO", f"[ASR TRANSCRIPTION] Received dictated text: '{text}'")
+    
+    # Update timing for auto-submit
+    asr_state.last_finalized_transcript_time = time.time()
+    asr_state.has_pending_transcript = True
 
     # Clear the partial transcript
     if asr_state.partial_enabled:
@@ -1998,6 +2009,23 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     log_message("INFO", f"Sent comms input to PTY: {comms_input}")
                 except Exception as e:
                     log_message("ERROR", f"Failed to send comms input to PTY: {e}")
+
+            # Check for auto-submit of dictated text after 3 seconds of silence
+            if asr_state.has_pending_transcript and current_master_fd:
+                current_time = time.time()
+                time_since_last_finalized = current_time - asr_state.last_finalized_transcript_time
+                time_since_last_partial = current_time - asr_state.last_partial_transcript_time
+                
+                # Auto-submit if:
+                # - It's been at least 3 seconds since the last finalized transcript
+                # - No partial transcripts have been received in the last 3 seconds
+                if time_since_last_finalized >= 0.5 and time_since_last_partial >= 2.0:
+                    try:
+                        os.write(current_master_fd, RETURN)
+                        asr_state.has_pending_transcript = False
+                        log_message("INFO", "[ASR AUTO-SUBMIT] Auto-submitted dictated text after 3 seconds of silence")
+                    except Exception as e:
+                        log_message("ERROR", f"[ASR AUTO-SUBMIT] Failed to auto-submit: {e}")
 
             if sys.stdin in rlist:
                 # Handle record mode for input
