@@ -252,6 +252,7 @@ CLAUDE_PROFILE = Profile(
         (2, r'cwd:'),
         (2, r'⎿'),                           # subheadings underneath an edit block like "Wrote 122 lines to x.py"
         (2, r'^  \+'),
+        (2, r'^  \['),
         
         # Level 3: Filter unless -vvv (code content, implementation details)
         (3, r'import\s+\w+…\)'),              # Skip import statements in tool output
