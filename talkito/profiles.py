@@ -264,6 +264,7 @@ CLAUDE_PROFILE = Profile(
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'     '),                        # Indent usually means code
         (3, r'  - '),                         # Indent with dash usually means code
+        (3, r'talkito:'),
 
         # Level 4: Always filter (these would need -vvvv which we don't allow)
         (4, r'Error File content'),           # Skip file size error messages

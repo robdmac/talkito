@@ -820,6 +820,56 @@ async def _disable_asr_internal() -> str:
         log_message("ERROR", error_msg)
         return error_msg
 
+
+async def _change_tts_internal(provider: str = "system", voice: str = None, region: str = None, language: str = None, rate: float = None, pitch: float = None) -> str:
+    """Internal function to disable ASR"""
+    try:
+        # Build config dict
+        tts_config = {'provider': provider}
+        if voice:
+            tts_config['voice'] = voice
+        if region:
+            tts_config['region'] = region
+        if language:
+            tts_config['language'] = language
+        if rate is not None:
+            tts_config['rate'] = rate
+        if pitch is not None:
+            tts_config['pitch'] = pitch
+
+        # Configure TTS
+        if provider != 'system':
+            if not tts.configure_tts_from_dict(tts_config):
+                error_msg = f"Failed to configure TTS provider: {provider}"
+                log_message("ERROR", f"configure_tts error: {error_msg}")
+                return error_msg
+
+        # Update shared state with new configuration
+        from .state import set_tts_config_thread_safe
+        set_tts_config_thread_safe(provider=provider, voice=voice, region=region,
+                                   language=language, rate=rate, pitch=pitch)
+
+        # Restart TTS worker with new config
+        if get_shared_state().tts_initialized:
+            tts.shutdown_tts()
+
+        engine = provider if provider != 'system' else tts.detect_tts_engine()
+        tts.start_tts_worker(engine, auto_skip_tts=False)
+
+        config_parts = [f"provider={provider}"]
+        if voice: config_parts.append(f"voice={voice}")
+        if region: config_parts.append(f"region={region}")
+        if language: config_parts.append(f"language={language}")
+        if rate is not None: config_parts.append(f"rate={rate}")
+        if pitch is not None: config_parts.append(f"pitch={pitch}")
+
+        result = f"Configured TTS: {', '.join(config_parts)}"
+        log_message("INFO", f"configure_tts result: {result}")
+    except Exception as e:
+        error_msg = f"Error configuring TTS: {str(e)}"
+        log_message("ERROR", f"configure_tts error: {error_msg}")
+    return _get_status_summary()
+
 # MCP Tools for TTS functionality
 
 @app.tool()
@@ -986,10 +1036,36 @@ async def wait_for_speech_completion(timeout: float = 30.0) -> str:
         log_message("ERROR", f"wait_for_speech_completion error: {error_msg}")
         return error_msg
 
+
+@app.tool()
+async def change_tts(provider: str = "system", voice: str = None, region: str = None, language: str = None,
+                        rate: float = None, pitch: float = None) -> str:
+    """
+    Change TTS provider
+
+    Args:
+        provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs)
+        voice: Voice name (provider-specific)
+        region: Region for cloud providers
+        language: Language code (e.g., en-US)
+        rate: Speech rate (provider-specific, typically 0.5-2.0)
+        pitch: Speech pitch (provider-specific)
+
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    return await _change_tts_internal(provider, voice, region, language, rate, pitch)
+
 @app.tool()
 async def configure_tts(provider: str = "system", voice: str = None, region: str = None, language: str = None, rate: float = None, pitch: float = None) -> str:
     """
-    Configure TTS provider and voice settings
+    Configure TTS provider
     
     Args:
         provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs)
@@ -999,57 +1075,17 @@ async def configure_tts(provider: str = "system", voice: str = None, region: str
         rate: Speech rate (provider-specific, typically 0.5-2.0)
         pitch: Speech pitch (provider-specific)
         
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
     Returns:
-        Status message about configuration
+        One-line formatted status summary (already visible in tool output - no need to repeat)
     """
-    try:
-        # Build config dict
-        tts_config = {'provider': provider}
-        if voice:
-            tts_config['voice'] = voice
-        if region:
-            tts_config['region'] = region  
-        if language:
-            tts_config['language'] = language
-        if rate is not None:
-            tts_config['rate'] = rate
-        if pitch is not None:
-            tts_config['pitch'] = pitch
-        
-        # Configure TTS
-        if provider != 'system':
-            if not tts.configure_tts_from_dict(tts_config):
-                error_msg = f"Failed to configure TTS provider: {provider}"
-                log_message("ERROR", f"configure_tts error: {error_msg}")
-                return error_msg
-        
-        # Update shared state with new configuration
-        from .state import set_tts_config_thread_safe
-        set_tts_config_thread_safe(provider=provider, voice=voice, region=region, 
-                                  language=language, rate=rate, pitch=pitch)
-        
-        # Restart TTS worker with new config
-        if get_shared_state().tts_initialized:
-            tts.shutdown_tts()
-        
-        engine = provider if provider != 'system' else tts.detect_tts_engine()
-        tts.start_tts_worker(engine, auto_skip_tts=False)
-        
-        config_parts = [f"provider={provider}"]
-        if voice: config_parts.append(f"voice={voice}")
-        if region: config_parts.append(f"region={region}")
-        if language: config_parts.append(f"language={language}")
-        if rate is not None: config_parts.append(f"rate={rate}")
-        if pitch is not None: config_parts.append(f"pitch={pitch}")
-        
-        result = f"Configured TTS: {', '.join(config_parts)}"
-        log_message("INFO", f"configure_tts returning: {result}")
-        return result
-        
-    except Exception as e:
-        error_msg = f"Error configuring TTS: {str(e)}"
-        log_message("ERROR", f"configure_tts error: {error_msg}")
-        return error_msg
+    return await _change_tts_internal(provider, voice, region, language, rate, pitch)
+
 
 # MCP Tools for ASR functionality
 
