@@ -3,7 +3,7 @@
 <head>
   <style>
     body {
-      width: 200px;
+      width: 250px;
       padding: 10px;
       font-family: Arial, sans-serif;
     }
@@ -12,6 +12,10 @@
       align-items: center;
       justify-content: space-between;
       margin-bottom: 10px;
+    }
+    .toggle-container.sub-toggle {
+      padding-left: 20px;
+      margin-bottom: 8px;
     }
     .toggle-switch {
       position: relative;
@@ -24,6 +28,10 @@
     }
     .toggle-switch.active {
       background-color: #4CAF50;
+    }
+    .toggle-switch.disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
     .toggle-slider {
       position: absolute;
@@ -48,17 +56,53 @@
       color: #888;
       margin-top: 5px;
     }
+    .divider {
+      border-top: 1px solid #eee;
+      margin: 10px 0;
+    }
+    .sub-toggles {
+      display: none;
+    }
+    .sub-toggles.show {
+      display: block;
+    }
   </style>
 </head>
 <body>
   <div class="toggle-container">
-    <span>TalkiTo Monitor</span>
+    <span><strong>TalkiTo Monitor</strong></span>
     <div class="toggle-switch" id="toggle">
       <div class="toggle-slider"></div>
     </div>
   </div>
+  
+  <div class="sub-toggles" id="subToggles">
+    <div class="divider"></div>
+    
+    <div class="toggle-container sub-toggle">
+      <span>TTS (Text-to-Speech)</span>
+      <div class="toggle-switch" id="ttsToggle">
+        <div class="toggle-slider"></div>
+      </div>
+    </div>
+    
+    <div class="toggle-container sub-toggle">
+      <span>WhatsApp</span>
+      <div class="toggle-switch" id="whatsappToggle">
+        <div class="toggle-slider"></div>
+      </div>
+    </div>
+    
+    <div class="toggle-container sub-toggle">
+      <span>Slack</span>
+      <div class="toggle-switch" id="slackToggle">
+        <div class="toggle-slider"></div>
+      </div>
+    </div>
+  </div>
+  
   <div class="status" id="status">Loading...</div>
-  <div class="auto-site">Auto-enabled on bolt.new</div>
+  <div class="auto-site">Auto-enabled on bolt.new, v0.dev, replit.com</div>
   <script src="popup.js"></script>
 </body>
 </html>

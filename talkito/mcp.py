@@ -1642,25 +1642,11 @@ async def get_communication_status() -> dict[str, Any]:
         return error_dict
 
 
-@app.tool()
-async def start_whatsapp_mode(phone_number: str = None) -> str:
-    """
-    Start WhatsApp mode - all responses will also be sent to WhatsApp
-    
-    Args:
-        phone_number: Phone number to send messages to (optional, uses TWILIO_WHATSAPP_NUMBER if not provided)
-        
-    CRITICAL INSTRUCTIONS:
-    1. The tool result will be displayed automatically - DO NOT repeat it
-    2. DO NOT speak, summarize, or comment on the status
-    3. DO NOT use talkito:speak_text after this tool
-    4. Simply return to waiting for user input after the tool result is shown
-
-    Returns:
-        One-line formatted status summary (already visible in tool output - no need to repeat)
-    """
+# Internal function for starting WhatsApp mode
+async def _start_whatsapp_mode_internal(phone_number: str = None) -> str:
+    """Internal function to start WhatsApp mode"""
     global _comms_manager
-
+    
     try:
         # Ensure message poller is initialized
         await _init_processor_if_needed()
@@ -1714,6 +1700,26 @@ async def start_whatsapp_mode(phone_number: str = None) -> str:
         error_msg = f"Error starting WhatsApp mode: {str(e)}"
         log_message("ERROR", f"start_whatsapp_mode error: {error_msg}")
         return error_msg
+
+
+@app.tool()
+async def start_whatsapp_mode(phone_number: str = None) -> str:
+    """
+    Start WhatsApp mode - all responses will also be sent to WhatsApp
+    
+    Args:
+        phone_number: Phone number to send messages to (optional, uses TWILIO_WHATSAPP_NUMBER if not provided)
+        
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    return await _start_whatsapp_mode_internal(phone_number)
 
 
 @app.tool()
@@ -1776,23 +1782,10 @@ async def get_whatsapp_mode_status() -> dict[str, Any]:
     return status
 
 
-@app.tool()
-async def start_slack_mode(channel: str = None) -> str:
-    """
-    Start Slack mode - all responses will also be sent to Slack
+# Internal function for starting Slack mode
+async def _start_slack_mode_internal(channel: str = None) -> str:
+    """Internal function to start Slack mode"""
     
-    Args:
-        channel: Slack channel to send messages to (optional, uses SLACK_CHANNEL if not provided)
-        
-    CRITICAL INSTRUCTIONS:
-    1. The tool result will be displayed automatically - DO NOT repeat it
-    2. DO NOT speak, summarize, or comment on the status
-    3. DO NOT use talkito:speak_text after this tool
-    4. Simply return to waiting for user input after the tool result is shown
-
-    Returns:
-        One-line formatted status summary (already visible in tool output - no need to repeat)
-    """
     try:
         await _init_processor_if_needed()
         global _slack_mode, _slack_channel, _comms_manager
@@ -1855,6 +1848,26 @@ async def start_slack_mode(channel: str = None) -> str:
         error_msg = f"Error starting Slack mode: {str(e)}"
         log_message("ERROR", f"start_slack_mode error: {error_msg}")
         return error_msg
+
+
+@app.tool()
+async def start_slack_mode(channel: str = None) -> str:
+    """
+    Start Slack mode - all responses will also be sent to Slack
+    
+    Args:
+        channel: Slack channel to send messages to (optional, uses SLACK_CHANNEL if not provided)
+        
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    return await _start_slack_mode_internal(channel)
 
 
 @app.tool()
@@ -2251,6 +2264,12 @@ def start_http_api_server(port=None):
                         "speak": "POST /api/speak",
                         "whatsapp": "POST /api/whatsapp",
                         "slack": "POST /api/slack",
+                        "tts_enable": "POST /api/tts/enable",
+                        "tts_disable": "POST /api/tts/disable",
+                        "whatsapp_start": "POST /api/whatsapp/start",
+                        "whatsapp_stop": "POST /api/whatsapp/stop",
+                        "slack_start": "POST /api/slack/start",
+                        "slack_stop": "POST /api/slack/stop",
                         "sse": f"GET http://127.0.0.1:{_http_api_port - 1}/sse/"
                     }
                 }
@@ -2279,11 +2298,26 @@ def start_http_api_server(port=None):
                 self.handle_whatsapp(data)
             elif parsed_path.path == '/api/slack':
                 self.handle_slack(data)
+            elif parsed_path.path == '/api/tts/enable':
+                self.handle_tts_enable(data)
+            elif parsed_path.path == '/api/tts/disable':
+                self.handle_tts_disable(data)
+            elif parsed_path.path == '/api/whatsapp/start':
+                self.handle_whatsapp_start(data)
+            elif parsed_path.path == '/api/whatsapp/stop':
+                self.handle_whatsapp_stop(data)
+            elif parsed_path.path == '/api/slack/start':
+                self.handle_slack_start(data)
+            elif parsed_path.path == '/api/slack/stop':
+                self.handle_slack_stop(data)
             else:
                 self.send_error(404, "Not Found")
         
         def handle_speak(self, data):
             """Handle speak API call"""
+            # Access global variables needed for forwarding
+            global _whatsapp_recipient, _slack_channel
+            
             text = data.get("text", "")
             clean_text_flag = data.get("clean_text_flag", True)
             
@@ -2320,6 +2354,48 @@ def start_http_api_server(port=None):
                         # Queue for speech
                         tts.queue_for_speech(processed_text, None)
                         result = f"Queued for speech: '{processed_text[:50]}...'"
+                        
+                        # Check if we should also send to WhatsApp/Slack
+                        shared_state = get_shared_state()
+                        
+                        # Run async operations if needed
+                        if shared_state.whatsapp_mode_active or shared_state.slack_mode_active:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                # Ensure processor is initialized
+                                loop.run_until_complete(_init_processor_if_needed())
+                                
+                                # Prepare async tasks
+                                tasks = []
+                                
+                                if shared_state.whatsapp_mode_active:
+                                    # Use whatsapp recipient from global or shared state
+                                    recipient = _whatsapp_recipient or shared_state.communication.whatsapp_to_number
+                                    if recipient:
+                                        tasks.append(_send_whatsapp_internal(message=processed_text, to_number=recipient, with_tts=False))
+                                
+                                if shared_state.slack_mode_active:
+                                    # Use slack channel from global or shared state
+                                    channel = _slack_channel or shared_state.communication.slack_channel
+                                    if channel:
+                                        tasks.append(_send_slack_internal(message=processed_text, channel=channel, with_tts=False))
+                                
+                                # Run all tasks
+                                if tasks:
+                                    results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                                    
+                                    # Check results
+                                    for i, res in enumerate(results):
+                                        if isinstance(res, Exception):
+                                            log_message("ERROR", f"Task {i} failed: {res}")
+                                    
+                                    result += f" (forwarded to {'WhatsApp' if shared_state.whatsapp_mode_active else ''}{' and ' if shared_state.whatsapp_mode_active and shared_state.slack_mode_active else ''}{'Slack' if shared_state.slack_mode_active else ''})"
+                                    
+                            except Exception as e:
+                                log_message("ERROR", f"Error forwarding to channels: {str(e)}")
+                            finally:
+                                loop.close()
                 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -2412,6 +2488,176 @@ def start_http_api_server(port=None):
                 self.send_error(500, str(e))
             finally:
                 loop.close()
+        
+        def handle_tts_enable(self, data):
+            """Handle TTS enable API call"""
+            _ensure_logging()
+            
+            log_message("INFO", "HTTP API: handle_tts_enable called")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the internal enable_tts function
+                result = loop.run_until_complete(_enable_tts_internal())
+                
+                log_message("INFO", f"HTTP API: TTS enable result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_tts_enable: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
+        
+        def handle_tts_disable(self, data):
+            """Handle TTS disable API call"""
+            _ensure_logging()
+            
+            log_message("INFO", "HTTP API: handle_tts_disable called")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the internal disable_tts function
+                result = loop.run_until_complete(_disable_tts_internal())
+                
+                log_message("INFO", f"HTTP API: TTS disable result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_tts_disable: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
+        
+        def handle_whatsapp_start(self, data):
+            """Handle WhatsApp mode start API call"""
+            _ensure_logging()
+            
+            phone_number = data.get("phone_number", None)
+            log_message("INFO", f"HTTP API: handle_whatsapp_start called with phone_number={phone_number}")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the internal function directly
+                result = loop.run_until_complete(_start_whatsapp_mode_internal(phone_number=phone_number))
+                
+                log_message("INFO", f"HTTP API: WhatsApp start result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_whatsapp_start: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
+        
+        def handle_whatsapp_stop(self, data):
+            """Handle WhatsApp mode stop API call"""
+            _ensure_logging()
+            
+            log_message("INFO", "HTTP API: handle_whatsapp_stop called")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the stop_whatsapp_mode function directly
+                result = loop.run_until_complete(stop_whatsapp_mode())
+                
+                log_message("INFO", f"HTTP API: WhatsApp stop result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_whatsapp_stop: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
+        
+        def handle_slack_start(self, data):
+            """Handle Slack mode start API call"""
+            _ensure_logging()
+            
+            channel = data.get("channel", None)
+            log_message("INFO", f"HTTP API: handle_slack_start called with channel={channel}")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the internal function directly
+                result = loop.run_until_complete(_start_slack_mode_internal(channel=channel))
+                
+                log_message("INFO", f"HTTP API: Slack start result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_slack_start: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
+        
+        def handle_slack_stop(self, data):
+            """Handle Slack mode stop API call"""
+            _ensure_logging()
+            
+            log_message("INFO", "HTTP API: handle_slack_stop called")
+            
+            # Run async function in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Use the stop_slack_mode function directly
+                result = loop.run_until_complete(stop_slack_mode())
+                
+                log_message("INFO", f"HTTP API: Slack stop result: {result}")
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                
+                response = {"success": True, "message": result}
+                self.wfile.write(json.dumps(response).encode())
+            except Exception as e:
+                log_message("ERROR", f"HTTP API: Error in handle_slack_stop: {str(e)}")
+                self.send_error(500, str(e))
+            finally:
+                loop.close()
     
     # Create and start the server in a separate thread
     def run_server():
@@ -2462,7 +2708,6 @@ def find_two_consecutive_ports(start_port=8000, max_attempts=100):
 
 def main():
     """Main entry point for the MCP server"""
-    print("[DEBUG] MCP main() called", file=sys.stderr)
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Talkito MCP Server - TTS/ASR via Model Context Protocol')
@@ -2482,7 +2727,6 @@ def main():
                         help='The command that is using this MCP server (e.g., claude)')
     args = parser.parse_args()
     
-    print(f"[DEBUG] Parsed args: log_file={args.log_file}, port={args.port}, transport={args.transport}, tts_provider={args.tts_provider}, asr_provider={args.asr_provider}", file=sys.stderr)
     
     # Set up logging if log file specified
     global _log_file_path, _cors_enabled, _running_for_claude
@@ -2490,7 +2734,6 @@ def main():
     # Check if we're running for Claude
     if args.client_command == 'claude':
         _running_for_claude = True
-        print(f"[DEBUG] Running for Claude - certain tools will be masked", file=sys.stderr)
     
     # CORS is always enabled for SSE transport
     if args.transport == 'sse':
@@ -2499,20 +2742,14 @@ def main():
     # Set TTS/ASR provider preferences from command line arguments
     if args.tts_provider:
         os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
-        print(f"[DEBUG] Set TTS provider preference to: {args.tts_provider}", file=sys.stderr)
     
     if args.asr_provider:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
-        print(f"[DEBUG] Set ASR provider preference to: {args.asr_provider}", file=sys.stderr)
     
     if args.log_file:
         _log_file_path = args.log_file
-        print(f"[DEBUG] Setting up logging to: {args.log_file}", file=sys.stderr)
         setup_logging(args.log_file)
         log_message("INFO", f"MCP SSE server starting with log file: {args.log_file}")
-        # Test that logging is working
-        log_message("DEBUG", "Test debug message")
-        log_message("WARNING", "Test warning message")
     
     try:
         print("=" * 60, file=sys.stderr)
