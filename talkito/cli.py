@@ -188,6 +188,12 @@ def parse_arguments():
     parser.add_argument('--setup-whatsapp', action='store_true',
                         help='Show instructions for setting up WhatsApp with Twilio')
     
+    # Update command
+    parser.add_argument('--update', action='store_true',
+                        help='Check for updates and install the latest version')
+    parser.add_argument('--force-update', action='store_true',
+                        help='Force update even if already up to date')
+    
     # Command and arguments
     parser.add_argument('command', nargs='?', 
                         help='Command to run')
@@ -215,9 +221,14 @@ def parse_arguments():
         args.show_whatsapp_setup = True
         return args
     
+    # Handle update command
+    if args.update or args.force_update:
+        args.show_update = True
+        return args
+    
     # Validate arguments
-    if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp:
-        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp or init claude')
+    if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp and not args.update and not args.force_update:
+        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp, --update or init claude')
     
     # Check if any command arguments look like talkito options
     if args.command and args.arguments:
@@ -322,8 +333,21 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
+    # Force state initialization by importing and accessing it
+    from .state import get_shared_state
+    _ = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    
     # Get the status summary using the shared function
-    status = get_status_summary(tts_override=True, asr_override=(args.asr_mode != "off"))
+    # Pass the configured providers from args if available
+    configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
+    configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
+    
+    status = get_status_summary(
+        tts_override=True, 
+        asr_override=(args.asr_mode != "off"),
+        configured_tts_provider=configured_tts_provider,
+        configured_asr_provider=configured_asr_provider
+    )
 
     # Print with the same format but add the note about .talkito.env
     print(f"╭ {status}")
@@ -916,6 +940,10 @@ async def main_async() -> int:
 
 def main():
     """Main entry point for the CLI"""
+    # Check and apply any staged updates first
+    from .update import check_and_apply_staged_update
+    check_and_apply_staged_update()
+    
     # Handle MCP server mode before entering asyncio context
     args = parse_arguments()
     
@@ -932,6 +960,12 @@ def main():
     if hasattr(args, 'show_whatsapp_setup') and args.show_whatsapp_setup:
         show_whatsapp_setup()
         sys.exit(0)
+    
+    if hasattr(args, 'show_update') and args.show_update:
+        from .update import TalkitoUpdater
+        updater = TalkitoUpdater()
+        success = updater.update(force=args.force_update)
+        sys.exit(0 if success else 1)
     
     if args.mcp_server:
         run_mcp_server()

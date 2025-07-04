@@ -46,6 +46,10 @@ class TalkitoState:
     tts_rate: Optional[float] = None
     tts_pitch: Optional[float] = None
     
+    # ASR configuration details
+    asr_language: Optional[str] = None
+    asr_model: Optional[str] = None
+    
     # Communication modes
     whatsapp_mode_active: bool = False
     slack_mode_active: bool = False
@@ -141,6 +145,17 @@ class TalkitoState:
             self.tts_pitch = pitch
         self._trigger_callbacks('tts_config_changed', provider=provider, voice=voice)
     
+    def set_asr_config(self, provider: Optional[str] = None, language: Optional[str] = None,
+                       model: Optional[str] = None):
+        """Set ASR configuration"""
+        if provider is not None:
+            self.asr_provider = provider
+        if language is not None:
+            self.asr_language = language
+        if model is not None:
+            self.asr_model = model
+        self._trigger_callbacks('asr_config_changed', provider=provider, language=language, model=model)
+    
     def turn_off_all(self):
         """Master off switch - disable all modes"""
         self.set_voice_mode(False)
@@ -162,6 +177,8 @@ class TalkitoState:
             'tts_rate': self.tts_rate,
             'tts_pitch': self.tts_pitch,
             'asr_provider': self.asr_provider,
+            'asr_language': self.asr_language,
+            'asr_model': self.asr_model,
             'whatsapp_mode_active': self.whatsapp_mode_active,
             'slack_mode_active': self.slack_mode_active,
             'voice_mode_active': self.voice_mode_active,
@@ -221,6 +238,10 @@ class SharedStateManager:
                         self.state.tts_pitch = data['tts_pitch']
                     if 'asr_provider' in data:
                         self.state.asr_provider = data['asr_provider']
+                    if 'asr_language' in data:
+                        self.state.asr_language = data['asr_language']
+                    if 'asr_model' in data:
+                        self.state.asr_model = data['asr_model']
                     # Communication config
                     if 'communication' in data:
                         comm = data['communication']
@@ -298,6 +319,13 @@ class SharedStateManager:
             self.state.set_asr_enabled(enabled)
             self.save_state()
     
+    def set_asr_config(self, provider: Optional[str] = None, language: Optional[str] = None,
+                       model: Optional[str] = None):
+        """Thread-safe ASR configuration update"""
+        with self._lock:
+            self.state.set_asr_config(provider, language, model)
+            self.save_state()
+    
     def set_asr_initialized(self, initialized: bool, provider: Optional[str] = None):
         """Thread-safe ASR initialized state update"""
         with self._lock:
@@ -338,13 +366,18 @@ def save_shared_state():
 
 
 def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channel=None,
-                       tts_override=False, asr_override=False) -> str:
+                       tts_override=False, asr_override=False, 
+                       configured_tts_provider=None, configured_asr_provider=None) -> str:
     """Generate a one-line status summary for TalkiTo components
     
     Args:
         comms_manager: Communication manager instance (optional)
         whatsapp_recipient: Current WhatsApp recipient (optional)
         slack_channel: Current Slack channel (optional)
+        tts_override: Whether TTS is being overridden to show as enabled
+        asr_override: Whether ASR is being overridden to show as enabled
+        configured_tts_provider: TTS provider from command line args (optional)
+        configured_asr_provider: ASR provider from command line args (optional)
     
     Returns:
         One-line formatted status string
@@ -371,14 +404,14 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
                 "initialized": shared_state.tts_initialized,
                 "enabled": shared_state.tts_enabled,
                 "is_speaking": tts.is_speaking() if shared_state.tts_initialized else False,
-                "provider": shared_state.tts_provider or tts.select_best_tts_provider()
+                "provider": configured_tts_provider or shared_state.tts_provider or tts.select_best_tts_provider()
             },
             "asr": {
                 "available": ASR_AVAILABLE,
                 "initialized": shared_state.asr_initialized,
                 "enabled": shared_state.asr_enabled,
                 "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and shared_state.asr_initialized else False,
-                "provider": shared_state.asr_provider or (asr.select_best_asr_provider() if ASR_AVAILABLE else None)
+                "provider": configured_asr_provider or shared_state.asr_provider or (asr.select_best_asr_provider() if ASR_AVAILABLE else None)
             },
             "whatsapp": {
                 "mode_active": shared_state.whatsapp_mode_active,
@@ -421,3 +454,9 @@ def set_tts_config_thread_safe(provider: Optional[str] = None, voice: Optional[s
                                rate: Optional[float] = None, pitch: Optional[float] = None):
     """Thread-safe helper to update TTS configuration"""
     _shared_state.set_tts_config(provider, voice, region, language, rate, pitch)
+
+
+def set_asr_config_thread_safe(provider: Optional[str] = None, language: Optional[str] = None,
+                               model: Optional[str] = None):
+    """Thread-safe helper to update ASR configuration"""
+    _shared_state.set_asr_config(provider, language, model)

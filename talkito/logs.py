@@ -82,6 +82,14 @@ def setup_logging(log_file_path: Optional[str] = None, mode: str = 'w') -> None:
     logging.getLogger('starlette').setLevel(logging.WARNING)
     logging.getLogger('anyio').setLevel(logging.WARNING)
     
+    # Suppress Google Speech Recognition related logs
+    logging.getLogger('absl').setLevel(logging.ERROR)
+    logging.getLogger('grpc').setLevel(logging.ERROR)
+    logging.getLogger('grpc._channel').setLevel(logging.ERROR)
+    logging.getLogger('google').setLevel(logging.WARNING)
+    logging.getLogger('google.auth').setLevel(logging.WARNING)
+    logging.getLogger('google.cloud').setLevel(logging.WARNING)
+    
     # Redirect stderr to separate .err file if requested
     # _redirect_stderr(log_file_path)
     
