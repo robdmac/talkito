@@ -66,22 +66,6 @@ When you run `talkito claude`, voice mode is enabled by default:
    - Say "start whatsapp mode +1234567890" to auto-send responses to WhatsApp
    - Say "stop slack/whatsapp mode" to disable
 
-### Communication Channels
-
-Configure environment variables to enable remote messaging:
-
-```bash
-# WhatsApp setup (run `talkito --setup-whatsapp` for full instructions)
-export TWILIO_ACCOUNT_SID='your_sid'
-export TWILIO_AUTH_TOKEN='your_token'
-export TWILIO_WHATSAPP_NUMBER='whatsapp:+14155238886'
-
-# Slack setup (run `talkito --setup-slack` for full instructions)
-export SLACK_BOT_TOKEN='xoxb-...'
-export SLACK_APP_TOKEN='xapp-...'
-export SLACK_CHANNEL='#talkito-dev'
-```
-
 
 #### Advanced Options
 
@@ -104,12 +88,6 @@ talkito --slack-channel '#alerts' python manage.py runserver
 talkito --whatsapp-recipients +1234567890 long-running-command
 talkito --sms-recipients +1234567890,+0987654321 server-monitor.sh
 ```
-
-#### TTS Controls
-
-While talkito.py is running:
-- **Left Arrow (←)**: Restart current speech item
-- **Right Arrow (→)**: Skip to next speech item
 
 ### Using tts.py (Standalone TTS)
 
