@@ -1333,6 +1333,8 @@ def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thre
     """Start the TTS worker thread"""
     global tts_worker_thread, auto_skip_tts_enabled
     auto_skip_tts_enabled = auto_skip_tts
+    # Clear the shutdown event in case it was set from a previous shutdown
+    shutdown_event.clear()
     tts_worker_thread = threading.Thread(target=tts_worker, args=(engine,), daemon=True)
     tts_worker_thread.start()
     return tts_worker_thread
@@ -1419,6 +1421,22 @@ def shutdown_tts():
     
     if thread and thread.is_alive():
         thread.join(timeout=0.5)
+
+
+def stop_tts_immediately():
+    """Immediately stop all TTS playback and shutdown - for Ctrl-C handling"""
+    # Kill any current TTS process
+    playback_control.skip_all_items()
+    
+    # Clear the queue
+    while not tts_queue.empty():
+        try:
+            tts_queue.get_nowait()
+        except:
+            break
+    
+    # Signal shutdown
+    shutdown_event.set()
 
 
 # Playback control functions
