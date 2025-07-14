@@ -275,6 +275,7 @@ CLAUDE_PROFILE = Profile(
         (4, r'\(node:'),
         (4, r'^\['),
         (4, r'Press Ctrl-C'),
+        (4, r'⏵⏵ auto-accept edits'),         # Skip auto-accept edits status line
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
