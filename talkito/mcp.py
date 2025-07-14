@@ -893,61 +893,55 @@ async def disable_tts() -> str:
     return await _disable_tts_internal()
 
 @conditional_tool(masked_for_claude=True)
-async def speak_text(text: str, clean_text_flag: bool = True) -> str:
+async def speak_text(text: str, clean_text_flag: bool = True) -> None:
     """
     Convert text to speech using the talkito TTS engine
     
     Args:
         text: Text to speak
         clean_text_flag: Whether to clean ANSI codes and symbols from text
-    
-    Returns:
-        Status message about the speech request
     """
     try:
         global _last_spoken_text, _last_spoken_time
-        
+
         _ensure_initialization()
         log_message("INFO", f"speak_text called with text length: {len(text)}, clean_text_flag: {clean_text_flag}")
-        
+
         # Clean text if requested
         processed_text = text
         if clean_text_flag:
             from .core import clean_text, strip_profile_symbols
             processed_text = clean_text(text)
             processed_text = strip_profile_symbols(processed_text)
-        
+
         # Skip empty or unwanted text
         from .core import should_skip_line
         if not processed_text.strip() or should_skip_line(processed_text):
-            result = f"Skipped speaking: '{text[:50]}...' (filtered out)"
-            log_message("INFO", f"speak_text returning: {result}")
-            return result
-        
+            log_message("INFO", f"Skipped speaking: '{text[:50]}...' (filtered out)")
+            return None
+
         # Check for duplicate text
         if _last_spoken_text == processed_text:
             # Check time difference to allow re-speaking after some time (e.g., 5 seconds)
             current_time = time.time()
             if _last_spoken_time and (current_time - _last_spoken_time) < 5.0:
-                result = f"Skipped duplicate text: '{processed_text[:50]}...' (spoken {current_time - _last_spoken_time:.1f}s ago)"
-                log_message("INFO", f"speak_text duplicate detected and skipped: {result}")
-                return result
-        
+                log_message("INFO", f"Skipped duplicate text: '{processed_text[:50]}...' (spoken {current_time - _last_spoken_time:.1f}s ago)")
+                return None
+
         # Update last spoken text and time
         _last_spoken_text = processed_text
         _last_spoken_time = time.time()
-        
+
         # Queue for speech
         tts.queue_for_speech(processed_text, None)
-        
-        result = f"Queued for speech: '{processed_text[:50]}...'"
-        log_message("INFO", f"speak_text returning: {result}")
-        return result
-        
+
+        log_message("INFO", "speak_text completed")
+        return None
+
     except Exception as e:
         error_msg = f"Error speaking text: {str(e)}"
         log_message("ERROR", f"speak_text error: {error_msg}")
-        return error_msg
+        return None
 
 @app.tool()
 async def skip_current_speech() -> str:
