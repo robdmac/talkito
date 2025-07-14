@@ -11,10 +11,20 @@ TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be
 git clone https://github.com/robdmac/talkito.git
 cd talkito
 
-pip install -e ".[all]"  # All features
+# Create and activate virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
 
+# Install system dependencies (macOS)
+brew install portaudio
+
+# Install package with all features
+pip install -e ".[all]"
+
+# Run this in a directory you want to use claude with
 talkito claude
 ```
+
 or for the web extension run as
 ```commandline
 talkito --mcp-sse-server

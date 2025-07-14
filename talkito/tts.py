@@ -68,7 +68,7 @@ except ImportError:
 # Configuration constants
 MIN_SPEAK_LENGTH = 1  # Minimum characters before speaking
 CACHE_SIZE = 1000  # Cache size for similarity checking
-CACHE_TIMEOUT = 1800  # Seconds before a cached item can be spoken again
+CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
 
