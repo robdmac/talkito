@@ -1317,8 +1317,9 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                 tts_queue.get_nowait()
             except:
                 break
-        # Also skip current item if playing
-        playback_control.skip_current_item()
+        # Only skip current item if something is actually playing
+        if playback_control.current_process is not None:
+            playback_control.skip_current_item()
 
     # Debounce rapidly changing text
     current_time = time.time()
@@ -1363,6 +1364,7 @@ def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thre
     """Start the TTS worker thread"""
     global tts_worker_thread, auto_skip_tts_enabled
     auto_skip_tts_enabled = auto_skip_tts
+    log_message("INFO", f"TTS worker started with auto_skip_tts={auto_skip_tts}")
     # Clear the shutdown event in case it was set from a previous shutdown
     shutdown_event.clear()
     tts_worker_thread = threading.Thread(target=tts_worker, args=(engine,), daemon=True)
