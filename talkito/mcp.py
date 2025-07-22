@@ -34,6 +34,7 @@ import queue
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
+import random
 import traceback
 from urllib.parse import urlparse
 
@@ -97,6 +98,31 @@ _cors_enabled = False
 
 # Track if we're running for Claude (to mask certain tools)
 _running_for_claude = False
+
+# Available voices for each TTS provider
+AVAILABLE_VOICES = {
+    'openai': ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
+    'aws': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
+    'polly': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
+    'azure': ['en-US-AriaNeural', 'en-US-GuyNeural', 'en-US-JennyNeural', 'en-US-AmberNeural', 'en-US-AshleyNeural', 'en-US-BrandonNeural', 'en-US-ChristopherNeural', 'en-US-CoraNeural', 'en-US-DavisNeural', 'en-US-ElizabethNeural', 'en-US-EricNeural', 'en-US-JacobNeural', 'en-US-JaneNeural', 'en-US-JasonNeural', 'en-US-MichelleNeural', 'en-US-MonicaNeural', 'en-US-NancyNeural', 'en-US-RogerNeural', 'en-US-SaraNeural', 'en-US-SteffanNeural', 'en-US-TonyNeural'],
+    'gcloud': ['en-US-Standard-A', 'en-US-Standard-B', 'en-US-Standard-C', 'en-US-Standard-D', 'en-US-Standard-E', 'en-US-Standard-F', 'en-US-Standard-G', 'en-US-Standard-H', 'en-US-Standard-I', 'en-US-Standard-J', 'en-US-Journey-D', 'en-US-Journey-F', 'en-US-News-K', 'en-US-News-L', 'en-US-News-M', 'en-US-News-N', 'en-US-Polyglot-1', 'en-US-Studio-M', 'en-US-Studio-O', 'en-US-Wavenet-A', 'en-US-Wavenet-B', 'en-US-Wavenet-C', 'en-US-Wavenet-D', 'en-US-Wavenet-E', 'en-US-Wavenet-F'],
+    'elevenlabs': [
+        ('21m00Tcm4TlvDq8ikWAM', 'Rachel'),
+        ('AZnzlk1XvdvUeBnXmlld', 'Domi'),
+        ('EXAVITQu4vr4xnSDxMaL', 'Bella'),
+        ('ErXwobaYiN019PkySvjV', 'Antoni'),
+        ('MF3mGyEYCl7XYWbV9V6O', 'Elli'),
+        ('TxGEqnHWrfWFTfGW9XjX', 'Josh'),
+        ('VR6AewLTigWG4xSOukaG', 'Arnold'),
+        ('pNInz6obpgDQGcFmaJgB', 'Adam'),
+        ('yoZ06aMxZJJ28mfd3POQ', 'Sam'),
+    ],
+    'deepgram': ['aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en'],
+    'system': []  # System voices depend on the OS
+}
+
+# Track current voice index for cycling
+_current_voice_index = {}
 
 # Track if auto-skip TTS is enabled
 _auto_skip_tts = False
@@ -396,20 +422,9 @@ _pending_notifications = []
 # Shutdown flag for graceful exit
 _shutdown_requested = False
 
-# Helper function to conditionally register tools
-def conditional_tool(masked_for_claude=False):
-    """Decorator to conditionally register tools based on client"""
-    def decorator(func):
-        if masked_for_claude and _running_for_claude:
-            # Don't register this tool for Claude
-            return func
-        else:
-            # Register the tool normally
-            return app.tool()(func)
-    return decorator
 
 # Tool that runs a notification loop within the request context
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def start_notification_stream(ctx: Context, duration: int = 30, exit_on_first: bool = True) -> str:
     """
     Start streaming notifications for a specified duration.
@@ -912,7 +927,7 @@ async def disable_tts() -> str:
     """
     return await _disable_tts_internal()
 
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def speak_text(text: str, clean_text_flag: bool = True) -> None:
     """
     Convert text to speech using the talkito TTS engine
@@ -1120,6 +1135,165 @@ async def configure_tts(provider: str = "system", voice: str = None, region: str
         One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     return await _change_tts_internal(provider, voice, region, language, rate, pitch)
+
+@app.tool()
+async def list_tts_voices(provider: str = None) -> dict[str, Any]:
+    """
+    List available voices for TTS providers
+    
+    Args:
+        provider: TTS provider to list voices for. If not specified, lists voices for current provider.
+                 Options: openai, aws, polly, azure, gcloud, elevenlabs, deepgram
+    
+    Returns:
+        Dictionary with provider name and available voices
+    """
+    try:
+        # Get current provider if not specified
+        if provider is None:
+            shared_state = get_shared_state()
+            provider = shared_state.tts_provider or 'system'
+            
+        # Normalize provider name
+        if provider == 'system':
+            return {
+                'provider': 'system',
+                'voices': [],
+                'message': 'System TTS uses OS-specific voices. Use OS settings to configure.'
+            }
+            
+        if provider not in AVAILABLE_VOICES:
+            return {
+                'error': f'Unknown provider: {provider}',
+                'available_providers': list(AVAILABLE_VOICES.keys())
+            }
+            
+        voices = AVAILABLE_VOICES[provider]
+        
+        # Handle ElevenLabs special case (voice IDs with names)
+        if provider == 'elevenlabs':
+            return {
+                'provider': provider,
+                'voices': [{'id': voice_id, 'name': name} for voice_id, name in voices],
+                'current_voice': get_shared_state().tts_voice,
+                'note': 'Use the voice ID (not name) when configuring'
+            }
+        else:
+            return {
+                'provider': provider,
+                'voices': voices,
+                'current_voice': get_shared_state().tts_voice
+            }
+            
+    except Exception as e:
+        return {'error': f'Error listing voices: {str(e)}'}
+
+@app.tool()
+async def randomize_tts_voice(provider: str = None) -> str:
+    """
+    Randomly select a voice for the TTS provider
+    
+    Args:
+        provider: TTS provider to randomize voice for. If not specified, uses current provider.
+    
+    Returns:
+        Status message with the selected voice
+    """
+    try:
+        # Get current provider if not specified
+        shared_state = get_shared_state()
+        if provider is None:
+            provider = shared_state.tts_provider or 'system'
+            
+        if provider == 'system':
+            return "Cannot randomize system TTS voices"
+            
+        if provider not in AVAILABLE_VOICES:
+            return f"Unknown provider: {provider}"
+            
+        voices = AVAILABLE_VOICES[provider]
+        if not voices:
+            return f"No voices available for {provider}"
+            
+        # Handle ElevenLabs special case
+        if provider == 'elevenlabs':
+            voice_id, voice_name = random.choice(voices)
+            result = await _change_tts_internal(provider, voice_id)
+            return f"Selected random voice: {voice_name} (ID: {voice_id})"
+        else:
+            selected_voice = random.choice(voices)
+            result = await _change_tts_internal(provider, selected_voice)
+            return f"Selected random voice: {selected_voice}"
+            
+    except Exception as e:
+        return f"Error randomizing voice: {str(e)}"
+
+@app.tool()
+async def cycle_tts_voice(direction: str = "next") -> str:
+    """
+    Cycle through available voices for the current TTS provider
+    
+    Args:
+        direction: Direction to cycle - "next" or "previous"
+    
+    Returns:
+        Status message with the selected voice
+    """
+    try:
+        global _current_voice_index
+        
+        # Get current provider
+        shared_state = get_shared_state()
+        provider = shared_state.tts_provider or 'system'
+        
+        if provider == 'system':
+            return "Cannot cycle system TTS voices"
+            
+        if provider not in AVAILABLE_VOICES:
+            return f"Unknown provider: {provider}"
+            
+        voices = AVAILABLE_VOICES[provider]
+        if not voices:
+            return f"No voices available for {provider}"
+            
+        # Initialize index if needed
+        if provider not in _current_voice_index:
+            # Try to find current voice in the list
+            current_voice = shared_state.tts_voice
+            if provider == 'elevenlabs':
+                # Find by voice ID
+                for i, (voice_id, _) in enumerate(voices):
+                    if voice_id == current_voice:
+                        _current_voice_index[provider] = i
+                        break
+                else:
+                    _current_voice_index[provider] = 0
+            else:
+                try:
+                    _current_voice_index[provider] = voices.index(current_voice)
+                except (ValueError, TypeError):
+                    _current_voice_index[provider] = 0
+        
+        # Cycle the index
+        current_idx = _current_voice_index[provider]
+        if direction == "next":
+            current_idx = (current_idx + 1) % len(voices)
+        else:  # previous
+            current_idx = (current_idx - 1) % len(voices)
+        _current_voice_index[provider] = current_idx
+        
+        # Set the new voice
+        if provider == 'elevenlabs':
+            voice_id, voice_name = voices[current_idx]
+            result = await _change_tts_internal(provider, voice_id)
+            return f"Cycled to voice: {voice_name} (ID: {voice_id}) [{current_idx + 1}/{len(voices)}]"
+        else:
+            selected_voice = voices[current_idx]
+            result = await _change_tts_internal(provider, selected_voice)
+            return f"Cycled to voice: {selected_voice} [{current_idx + 1}/{len(voices)}]"
+            
+    except Exception as e:
+        return f"Error cycling voice: {str(e)}"
 
 
 # MCP Tools for ASR functionality
@@ -1378,7 +1552,7 @@ async def stop_voice_input() -> str:
         return error_msg
 
 
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
     """
     Get the most recent dictated text from voice input
@@ -1634,7 +1808,7 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
     log_message("INFO", f"send_whatsapp returning: {result_msg}")
     return result_msg
 
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def send_whatsapp(message: str, to_number: str = None, with_tts: bool = False) -> str:
     """
     Send a message via WhatsApp using Twilio
@@ -1749,7 +1923,7 @@ async def _send_slack_internal(message: str, channel: str = None, with_tts: bool
     log_message("INFO", f"send_slack returning: {result_msg}")
     return result_msg
 
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def send_slack(message: str, channel: str = None, with_tts: bool = False) -> str:
     """
     Send a message to Slack
@@ -2105,7 +2279,7 @@ async def get_slack_mode_status() -> dict[str, Any]:
     return status
 
 
-@conditional_tool(masked_for_claude=True)
+@app.tool()
 async def get_messages() -> dict[str, Any]:
     """
     Get all available messages from voice dictation, Slack, and WhatsApp.
@@ -2908,9 +3082,17 @@ def main():
     # Set up logging if log file specified
     global _log_file_path, _cors_enabled, _running_for_claude
     
+    # IMPORTANT: Set up logging BEFORE any log_message calls
+    if args.log_file:
+        _log_file_path = args.log_file
+        setup_logging(args.log_file)
+    
     # Check if we're running for Claude
     if args.client_command == 'claude':
         _running_for_claude = True
+        log_message("INFO", "Running for Claude client")
+    else:
+        log_message("INFO", f"Running for client: {args.client_command or 'unknown'} - all tools available")
     
     # CORS is always enabled for SSE transport
     if args.transport == 'sse':
@@ -2922,11 +3104,6 @@ def main():
     
     if args.asr_provider:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
-    
-    if args.log_file:
-        _log_file_path = args.log_file
-        setup_logging(args.log_file)
-        log_message("INFO", f"MCP SSE server starting with log file: {args.log_file}")
     
     # Start background update checker
     from .update import start_background_update_checker
@@ -3000,11 +3177,9 @@ def main():
         try:
             if args.transport == 'stdio':
                 log_message("INFO", "Starting stdio server")
-                print(f"[INFO] Starting FastMCP app.run() with stdio transport", file=sys.stderr)
                 app.run(transport="stdio")
             else:
                 log_message("INFO", f"Starting SSE server on port {port}")
-                print(f"[INFO] Starting FastMCP app.run() on port {port}", file=sys.stderr)
                 app.run(
                     transport="sse",
                     host="127.0.0.1",
