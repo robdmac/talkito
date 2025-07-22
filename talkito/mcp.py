@@ -98,6 +98,20 @@ _cors_enabled = False
 # Track if we're running for Claude (to mask certain tools)
 _running_for_claude = False
 
+def configure_mcp_server(cors_enabled=None, running_for_claude=None, log_file_path=None):
+    """Configure MCP server settings through a public interface"""
+    global _cors_enabled, _running_for_claude, _log_file_path
+    
+    if cors_enabled is not None:
+        _cors_enabled = cors_enabled
+    
+    if running_for_claude is not None:
+        _running_for_claude = running_for_claude
+    
+    if log_file_path is not None:
+        _log_file_path = log_file_path
+        setup_logging(log_file_path)
+
 def add_cors_headers(headers):
     """Add CORS headers to response"""
     if _cors_enabled:
@@ -973,6 +987,31 @@ async def skip_current_speech() -> str:
     except Exception as e:
         error_msg = f"Error skipping speech: {str(e)}"
         log_message("ERROR", f"skip_current_speech error: {error_msg}")
+        return error_msg
+
+@app.tool()
+async def stop_all_speech() -> str:
+    """
+    Immediately stop all speech and clear the TTS queue
+    
+    Returns:
+        Status message about the stop action
+    """
+    try:
+        _ensure_initialization()
+        
+        log_message("INFO", "stop_all_speech called")
+        
+        # Stop all TTS immediately
+        tts.skip_all()
+        
+        result = "Stopped all speech and cleared the queue"
+        log_message("INFO", f"stop_all_speech returning: {result}")
+        return result
+            
+    except Exception as e:
+        error_msg = f"Error stopping speech: {str(e)}"
+        log_message("ERROR", f"stop_all_speech error: {error_msg}")
         return error_msg
 
 @app.tool()

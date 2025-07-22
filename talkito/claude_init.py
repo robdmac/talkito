@@ -235,9 +235,11 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
         claude_path = shutil.which('claude')
         if claude_path:
             # Run the claude mcp add command
+            mcp_url = None  # Initialize for scope
             if transport == "sse":
+                mcp_url = address+str(port)+"/sse"
                 result = subprocess.run(
-                    ['claude', 'mcp', 'add', 'talkito', address+str(port)+"/sse", '--transport', transport,],
+                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport,],
                     capture_output=True,
                     text=True
                 )
@@ -249,14 +251,29 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
                 )
             if result.returncode != 0:
                 if "already exists" in result.stderr:
-                    print("Talkito MCP server already configured")
+                    # Try to update the configuration by removing and re-adding
+                    remove_result = subprocess.run(
+                        ['claude', 'mcp', 'remove', 'talkito'],
+                        capture_output=True,
+                        text=True
+                    )
+                    if remove_result.returncode == 0:
+                        # Now re-add with the new configuration
+                        if transport == "sse":
+                            result = subprocess.run(
+                                ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport,],
+                                capture_output=True,
+                                text=True
+                            )
+                            if result.returncode != 0:
+                                print(f"✗ Failed to re-add MCP server: {result.stderr}")
+                                success = False
                 else:
                     print(f"✗ Failed to add MCP server: {result.stderr}")
-                    print("  Run manually: claude mcp add talkito talkito -- --mcp-server")
                     success = False
         else:
             print("✗ Claude CLI not found")
-            print("  Install Claude CLI and run: claude mcp add talkito talkito -- --mcp-server")
+            print("Install Claude CLI and run: claude mcp add talkito talkito -- --mcp-server")
             success = False
     except Exception as e:
         print(f"✗ Error adding MCP server: {e}")

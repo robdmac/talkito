@@ -39,11 +39,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Optional, List, Tuple, Dict, Union, Deque, Any
+from concurrent.futures import ThreadPoolExecutor
 
 from . import tts
 from .profiles import get_profile, Profile
 from .logs import setup_logging, get_logger, log_message, restore_stderr, log_debug, is_logging_enabled
 from .state import get_shared_state
+from .tts import stop_tts_immediately
 
 try:
     from . import asr
@@ -164,6 +166,37 @@ current_proc: Optional[asyncio.subprocess.Process] = None
 verbosity_level: int = 0
 comm_manager: Optional[Any] = None  # Will be CommunicationManager when initialized
 
+# Thread pool for blocking I/O operations
+_io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='talkito-io')
+
+# Register cleanup on exit
+def _cleanup_io_executor():
+    """Cleanup thread pool executor on exit"""
+    _io_executor.shutdown(wait=False)
+
+atexit.register(_cleanup_io_executor)
+
+# Non-blocking I/O helpers
+async def async_read(fd: int, size: int) -> bytes:
+    """Non-blocking read using thread pool"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_io_executor, os.read, fd, size)
+
+async def async_write(fd: int, data: bytes) -> int:
+    """Non-blocking write using thread pool"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_io_executor, os.write, fd, data)
+
+async def async_stdout_write(data: bytes) -> None:
+    """Non-blocking stdout write using thread pool"""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(_io_executor, _blocking_stdout_write, data)
+
+def _blocking_stdout_write(data: bytes) -> None:
+    """Helper for blocking stdout write"""
+    sys.stdout.buffer.write(data)
+    sys.stdout.flush()
+
 # Simple state grouping to reduce globals
 @dataclass
 class TerminalState:
@@ -251,7 +284,15 @@ class LineBuffer:
         self.next_index = 0
         self.similarity_threshold = similarity_threshold
         # Keep a sliding window of recent lines to detect modifications
-        self.recent_lines: deque = deque(maxlen=RECENT_LINES_CACHE_SIZE)  # (index, content) pairs
+        self.recent_lines: deque = deque(maxlen=RECENT_LINES_CACHE_SIZE)  # (index, content, hash) tuples
+        
+    def _compute_line_hash(self, content: str) -> int:
+        """Compute a simple hash for quick filtering"""
+        # Use length and a few character samples for quick comparison
+        if not content:
+            return 0
+        # Sample first, middle, and last characters + length
+        return hash((len(content), content[:20], content[-20:] if len(content) > 20 else ''))
 
     def _get_similarity(self, s1: str, s2: str) -> float:
         """Calculate similarity ratio between two strings"""
@@ -261,8 +302,18 @@ class LineBuffer:
 
     def _find_similar_line(self, content: str) -> Optional[int]:
         """Find a similar line in recent history"""
-        for idx, line_content in self.recent_lines:
+        content_hash = self._compute_line_hash(content)
+        content_len = len(content)
+        
+        # Pre-filter: only check lines with similar length
+        for idx, line_content, line_hash in self.recent_lines:
             if idx in self.lines:  # Still exists
+                # Quick filters before expensive similarity check
+                line_len = len(line_content)
+                if abs(line_len - content_len) > content_len * 0.2:  # Skip if length differs by >20%
+                    continue
+                    
+                # Only do expensive similarity check for potentially similar lines
                 similarity = self._get_similarity(content, line_content)
                 if similarity >= self.similarity_threshold:
                     return idx
@@ -286,15 +337,17 @@ class LineBuffer:
                 # Similar but different - this is a modification
                 self.lines[similar_idx] = raw_line
                 log_message("BUFFER", f"Line {similar_idx} modified: '{old_content[:MAX_LINE_PREVIEW]}...' -> '{raw_line[:MAX_LINE_PREVIEW]}...'")
-                # Update in recent lines
-                self.recent_lines.append((similar_idx, raw_line))
+                # Update in recent lines with new hash
+                line_hash = self._compute_line_hash(raw_line)
+                self.recent_lines.append((similar_idx, raw_line, line_hash))
                 return similar_idx, 'modified'
 
         # New line
         idx = self.next_index
         self.next_index += 1
         self.lines[idx] = raw_line
-        self.recent_lines.append((idx, raw_line))
+        line_hash = self._compute_line_hash(raw_line)
+        self.recent_lines.append((idx, raw_line, line_hash))
         log_message("BUFFER", f"Line {idx} added: '{raw_line[:MAX_LINE_PREVIEW]}...'")
         return idx, 'added'
 
@@ -1035,24 +1088,41 @@ def process_pending_resize(master_fd):
 
 async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int, int, asyncio.subprocess.Process]:
     """Set up PTY and spawn subprocess for command execution"""
-    master_fd, slave_fd, stdin_flags = setup_pty_with_scrollback()
+    master_fd = None
+    slave_fd = None
+    try:
+        master_fd, slave_fd, stdin_flags = setup_pty_with_scrollback()
 
-    env = os.environ.copy()
-    env['TERM'] = os.environ.get('TERM', 'xterm-256color')
-    rows, cols = get_terminal_size()
-    env['LINES'] = str(rows)
-    env['COLUMNS'] = str(cols - 2 if cols > 2 else cols)
+        env = os.environ.copy()
+        env['TERM'] = os.environ.get('TERM', 'xterm-256color')
+        rows, cols = get_terminal_size()
+        env['LINES'] = str(rows)
+        env['COLUMNS'] = str(cols - 2 if cols > 2 else cols)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=env
-    )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env
+        )
 
-    os.close(slave_fd)
-    return master_fd, slave_fd, stdin_flags, proc
+        os.close(slave_fd)
+        slave_fd = None  # Mark as closed
+        return master_fd, slave_fd, stdin_flags, proc
+    except Exception:
+        # Clean up on error
+        if slave_fd is not None:
+            try:
+                os.close(slave_fd)
+            except:
+                pass
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except:
+                pass
+        raise
 
 
 async def periodic_status_check(master_fd: int, asr_mode: str,
@@ -1228,7 +1298,7 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
 async def handle_stdin_input(master_fd: int, asr_mode: str):
     """Handle input from stdin and forward to PTY"""
     try:
-        input_data = os.read(sys.stdin.fileno(), 4096)
+        input_data = await async_read(sys.stdin.fileno(), 4096)
         if input_data:
             # Check for tap-to-talk keys in tap-to-talk mode
             if asr_mode == "tap-to-talk":
@@ -1251,7 +1321,7 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
 
             # Forward to PTY
             if input_data:  # Only forward if there's data left after filtering
-                os.write(master_fd, input_data)
+                await async_write(master_fd, input_data)
 
             if b'\r' in input_data or b'\n' in input_data:
                 log_message("INFO", "User pressed Enter, exiting user input mode")
@@ -1527,7 +1597,8 @@ def handle_partial_transcript(text: str):
 
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            os.write(current_master_fd, '>'.encode('utf-8'))
+            # os.write(current_master_fd, '>'.encode('utf-8'))
+            os.write(current_master_fd, SPACE_THEN_BACK)
         except Exception as e:
             log_message("ERROR", f"Failed to trigger screen update: {e}")
 
@@ -1888,11 +1959,10 @@ async def drain_pty_output(master_fd: int, line_buffer: bytes):
     """Drain any remaining output from PTY when process exits"""
     try:
         while True:
-            data = os.read(master_fd, 4096)
+            data = await async_read(master_fd, 4096)
             if not data:
                 break
-            sys.stdout.buffer.write(data)
-            sys.stdout.flush()
+            await async_stdout_write(data)
             line_buffer += data
     except:
         pass
@@ -1922,6 +1992,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     try:
         # Set up terminal and spawn process
         master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
+        # Immediately assign to global to ensure cleanup
         current_master_fd = master_fd
         current_proc = proc
         
@@ -2009,8 +2080,8 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     input_bytes = comms_input.encode('utf-8')
                     if prepend_esc:
                         input_bytes = ESC + input_bytes
-                    os.write(current_master_fd, input_bytes)
-                    os.write(current_master_fd, RETURN)
+                    await async_write(current_master_fd, input_bytes)
+                    await async_write(current_master_fd, RETURN)
                     sys.stdout.flush()
                     log_message("INFO", f"Sent comms input to PTY: {comms_input}")
                 except Exception as e:
@@ -2027,7 +2098,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                 # - No partial transcripts have been received in the last 3 seconds
                 if time_since_last_finalized >= 0.2 and time_since_last_partial >= 1.0:
                     try:
-                        os.write(current_master_fd, RETURN)
+                        await async_write(current_master_fd, RETURN)
                         asr_state.has_pending_transcript = False
                         log_message("INFO", "[ASR AUTO-SUBMIT] Auto-submitted dictated text after 3 seconds of silence")
                     except Exception as e:
@@ -2037,11 +2108,11 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                 # Handle record mode for input
                 if recorder.enabled:
                     try:
-                        input_data = os.read(sys.stdin.fileno(), 4096)
+                        input_data = await async_read(sys.stdin.fileno(), 4096)
                         if input_data:
                             recorder.record_event('INPUT', input_data)
                             # Forward to PTY
-                            os.write(master_fd, input_data)
+                            await async_write(master_fd, input_data)
                     except (BlockingIOError, OSError):
                         pass
                 else:
@@ -2049,7 +2120,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
             if master_fd in rlist or enabled_auto_listen:
                 try:
-                    data = os.read(master_fd, PTY_READ_SIZE)
+                    data = await async_read(master_fd, PTY_READ_SIZE)
                     if not data:
                         break
 
@@ -2180,12 +2251,11 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     # In record mode, drain and record any remaining output
                     try:
                         while True:
-                            data = os.read(master_fd, PTY_READ_SIZE)
+                            data = await async_read(master_fd, PTY_READ_SIZE)
                             if not data:
                                 break
                             recorder.record_event('OUTPUT', data)
-                            sys.stdout.buffer.write(data)
-                            sys.stdout.flush()
+                            await async_stdout_write(data)
                             # IMPORTANT: Also process this data for TTS
                             line_buffer += data
 
@@ -2266,8 +2336,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     # Force flush by writing directly in blocking mode
                     remaining = bytes(stdout_buffer.buffer)
                     if remaining:
-                        sys.stdout.buffer.write(remaining)
-                        sys.stdout.flush()
+                        await async_stdout_write(remaining)
                     break
         except Exception as e:
             log_message("ERROR", f"Error restoring stdout: {e}")
@@ -2275,6 +2344,18 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         return proc.returncode if proc else 1
 
     finally:
+        # Clean up process if still running
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            except Exception as e:
+                log_message("ERROR", f"Failed to terminate process: {e}")
+        current_proc = None
+        
         # Close PTY file descriptor if it was opened
         if master_fd is not None:
             try:
@@ -2353,6 +2434,12 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         if line.strip():
             log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()[:100]}...'")
         
+        # Check if this is a Ctrl-C prompt from Claude
+        if "Press Ctrl-C again to exit" in line:
+            log_message("INFO", "Detected Ctrl-C prompt - stopping all TTS")
+            # Use skip_all instead of stop_tts_immediately to avoid shutting down the TTS system
+            tts.skip_all()
+        
         # Only process lines that have been added or modified
         if action in ['added', 'modified']:
             text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
@@ -2428,8 +2515,9 @@ def cleanup_terminal():
 # Register cleanup function to run at exit
 atexit.register(cleanup_terminal)
 
-def signal_handler(signum):
+def signal_handler(signum, frame=None):
     """Handle shutdown signals"""
+    log_message("INFO", f"Received signal {signum} - stopping TTS immediately")
     # For Ctrl-C, implement a fast exit path
     if signum == signal.SIGINT:
         # First priority: restore terminal for user
@@ -2448,10 +2536,9 @@ def signal_handler(signum):
         
         # Stop TTS immediately
         try:
-            from .tts import stop_tts_immediately
             stop_tts_immediately()
-        except Exception:
-            pass
+        except Exception as e:
+            log_message("ERROR", f"Failed to stop TTS immediately: {e}")
         
         # Quick terminal cleanup
         cleanup_terminal()

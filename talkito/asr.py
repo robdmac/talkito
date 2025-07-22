@@ -71,13 +71,17 @@ def temp_audio_file(audio_data: bytes, suffix: str = '.wav'):
     tmp_path = None
     try:
         tmp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp_path = tmp_file.name  # Get the path immediately after creation
         try:
             tmp_file.write(audio_data)
             tmp_file.flush()  # Ensure data is written
-            tmp_path = tmp_file.name
         finally:
             # Always close the file, even if write fails
-            tmp_file.close()
+            if tmp_file:
+                try:
+                    tmp_file.close()
+                except Exception as e:
+                    log_message("WARNING", f"Failed to close temp file: {e}")
         yield tmp_path
     finally:
         # Clean up the file if it was created
@@ -1033,59 +1037,69 @@ class AzureSpeechProvider(ASRProvider):
             
             # Create push stream and audio config
             stream = speechsdk.audio.PushAudioInputStream()
-            audio_config = speechsdk.audio.AudioConfig(stream=stream)
-            
-            # Create recognizer
-            recognizer = speechsdk.SpeechRecognizer(
-                speech_config=speech_config,
-                audio_config=audio_config
-            )
-            
-            # Set up callbacks
-            recognizer.recognizing.connect(lambda evt: handler.handle_partial(evt.result.text))
-            recognizer.recognized.connect(lambda evt: handler.handle_final(evt.result.text) if evt.result.text else None)
-            recognizer.session_started.connect(lambda evt: log_message('INFO', 'SESSION STARTED: {}'.format(evt)))
+            recognizer = None
+            try:
+                audio_config = speechsdk.audio.AudioConfig(stream=stream)
+                
+                # Create recognizer
+                recognizer = speechsdk.SpeechRecognizer(
+                    speech_config=speech_config,
+                    audio_config=audio_config
+                )
+                
+                # Set up callbacks
+                recognizer.recognizing.connect(lambda evt: handler.handle_partial(evt.result.text))
+                recognizer.recognized.connect(lambda evt: handler.handle_final(evt.result.text) if evt.result.text else None)
+                recognizer.session_started.connect(lambda evt: log_message('INFO', 'SESSION STARTED: {}'.format(evt)))
 
-            def canceled_callback(evt):
-                log_message("ERROR", f"Azure canceled: {format(evt)}")
-                if hasattr(evt, 'result') and hasattr(evt.result, 'cancellation_details'):
-                    details = evt.result.cancellation_details
-                    if hasattr(details, 'error_details'):
-                        print(f'Azure Error: {details.error_details}')
-                    else:
-                        print(f'Azure Error: {details.reason}')
+                def canceled_callback(evt):
+                    log_message("ERROR", f"Azure canceled: {format(evt)}")
+                    if hasattr(evt, 'result') and hasattr(evt.result, 'cancellation_details'):
+                        details = evt.result.cancellation_details
+                        if hasattr(details, 'error_details'):
+                            print(f'Azure Error: {details.error_details}')
+                        else:
+                            print(f'Azure Error: {details.reason}')
 
-            recognizer.canceled.connect(canceled_callback)
+                recognizer.canceled.connect(canceled_callback)
 
-            def session_stopped(evt):
-                log_message("INFO", f"Azure session stopped: {evt.session_id}")
-                # Don't automatically stop the engine - Azure may restart the session
-                engine.is_active = False
-                engine.stop_event.set()
+                def session_stopped(evt):
+                    log_message("INFO", f"Azure session stopped: {evt.session_id}")
+                    # Don't automatically stop the engine - Azure may restart the session
+                    engine.is_active = False
+                    engine.stop_event.set()
 
-            recognizer.session_stopped.connect(session_stopped)
-            
-            # Start continuous recognition
-            recognizer.start_continuous_recognition()
-            log_message("INFO", "Azure continuous recognition started")
-            
-            # Stream audio
-            while engine.is_active and not engine.stop_event.is_set():
-                try:
-                    chunk = audio_queue.get(timeout=0.1)
-                    if chunk is None:
+                recognizer.session_stopped.connect(session_stopped)
+                
+                # Start continuous recognition
+                recognizer.start_continuous_recognition()
+                log_message("INFO", "Azure continuous recognition started")
+                
+                # Stream audio
+                while engine.is_active and not engine.stop_event.is_set():
+                    try:
+                        chunk = audio_queue.get(timeout=0.1)
+                        if chunk is None:
+                            break
+                        stream.write(chunk)
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        if engine.is_active:
+                            log_message("ERROR", f"Error streaming to Azure: {e}")
                         break
-                    stream.write(chunk)
-                except queue.Empty:
-                    continue
+            finally:
+                # Always clean up resources
+                if recognizer:
+                    try:
+                        recognizer.stop_continuous_recognition()
+                    except Exception as e:
+                        log_message("WARNING", f"Error stopping recognizer: {e}")
+                
+                try:
+                    stream.close()
                 except Exception as e:
-                    if engine.is_active:
-                        log_message("ERROR", f"Error streaming to Azure: {e}")
-                    break
-            
-            # Stop recognition
-            recognizer.stop_continuous_recognition()
-            stream.close()
+                    log_message("WARNING", f"Error closing stream: {e}")
         
         common_stream_loop("Azure", engine, microphone, process_audio)
 
