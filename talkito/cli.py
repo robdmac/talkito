@@ -361,6 +361,7 @@ async def run_claude_wrapper(args) -> int:
         'verbosity': args.verbose,
         'asr_mode': args.asr_mode,
         'record_file': args.record,
+        'auto_skip_tts': args.auto_skip_tts,  # Pass auto-skip-tts flag
     }
 
     # Add other configurations...
@@ -579,6 +580,9 @@ async def run_claude_hybrid(args) -> int:
             
             if args.log_file:
                 config['log_file_path'] = args.log_file
+                
+            if args.auto_skip_tts:
+                config['auto_skip_tts'] = True
             
             # Apply configuration
             mcp.configure_mcp_server(**config)
@@ -751,6 +755,7 @@ async def run_talkito_command(args) -> int:
         'verbosity': args.verbose,
         'asr_mode': args.asr_mode,
         'record_file': args.record,
+        'auto_skip_tts': args.auto_skip_tts,  # Pass auto-skip-tts flag
     }
     
     # Add log file if specified
