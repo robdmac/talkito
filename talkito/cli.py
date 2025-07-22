@@ -18,11 +18,11 @@
 
 """Talkito CLI - Command-line interface for the talkito package"""
 
-import sys
 import os
 import argparse
 import asyncio
 import signal
+import sys
 from typing import List, Optional, Union, Tuple
 
 # Suppress websockets deprecation warnings early
@@ -517,8 +517,10 @@ async def run_claude_hybrid(args) -> int:
     """Run Claude with in-process MCP server and wrapper functionality"""
     import threading
     import time
+    import signal
     from .mcp import app, find_available_port
     from .claude_init import init_claude
+    from .tts import stop_tts_immediately
     
     # Find available port
     port = args.port if args.port else find_available_port(8000)
@@ -536,30 +538,102 @@ async def run_claude_hybrid(args) -> int:
     server_ready = threading.Event()
     server_thread = None
     
+    # Set up signal handler for hybrid mode
+    def hybrid_signal_handler(signum, frame):
+        """Handle signals in hybrid mode - stop TTS immediately"""
+        if signum == signal.SIGINT:
+            try:
+                stop_tts_immediately()
+            except Exception:
+                pass
+            # Exit with conventional SIGINT exit code to avoid race conditions
+            sys.exit(128 + signal.SIGINT)
+    
+    # Install our signal handler
+    original_sigint_handler = signal.signal(signal.SIGINT, hybrid_signal_handler)
+    
+    def check_port_listening(host='127.0.0.1', check_port=None, timeout=0.1):
+        """Check if a port is listening"""
+        import socket
+        check_port = check_port or port  # Use the outer scope port if not specified
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, check_port))
+            sock.close()
+            return result == 0
+        except:
+            return False
+    
     def run_mcp_server():
         """Run the MCP server in a thread"""
         try:
-            # Enable CORS for SSE
+            # Configure MCP server through public interface
             from . import mcp
-            mcp._cors_enabled = True
             
-            # Set flag to indicate we're running for Claude
+            # Build configuration
+            config = {'cors_enabled': True}
+            
             if args.command == 'claude':
-                mcp._running_for_claude = True
+                config['running_for_claude'] = True
             
-            # Set up logging if specified
             if args.log_file:
-                mcp._log_file_path = args.log_file
-                mcp.setup_logging(mcp._log_file_path)
+                config['log_file_path'] = args.log_file
             
-            # Signal that we're about to start
-            server_ready.set()
+            # Apply configuration
+            mcp.configure_mcp_server(**config)
             
-            # Temporarily redirect stderr to suppress the startup message
-            import sys
+            # Start a thread to check when server is actually listening
+            def monitor_server_startup():
+                import time
+                import urllib.request
+                import urllib.error
+                start_time = time.time()
+                
+                # First wait for port to be listening
+                while time.time() - start_time < 10:  # 10 second timeout
+                    if check_port_listening('127.0.0.1', port):
+                        break
+                    time.sleep(0.1)
+                else:
+                    # Timeout waiting for port
+                    return
+                
+                # Then wait for FastMCP to be ready to accept connections
+                # The port being open doesn't mean FastMCP is fully initialized
+                # We'll do a simple check and then add a small delay
+                while time.time() - start_time < 15:  # 15 second total timeout
+                    try:
+                        # Just try a simple GET request to see if server responds
+                        req = urllib.request.Request(f'http://127.0.0.1:{port}/')
+                        with urllib.request.urlopen(req, timeout=1) as response:
+                            # Server is responding
+                            # Give FastMCP a bit more time to fully initialize its internals
+                            # This is the key - even when responding, it needs more time
+                            time.sleep(1.5)
+                            server_ready.set()
+                            return
+                    except urllib.error.HTTPError as e:
+                        # HTTP errors (4xx, 5xx) mean server is at least responding
+                        if 400 <= e.code < 600:
+                            # Server is up and responding, just not to this endpoint
+                            time.sleep(1.5)  # Give it time to fully initialize
+                            server_ready.set()
+                            return
+                    except Exception:
+                        # Connection refused or timeout - server not ready yet
+                        pass
+                    
+                    time.sleep(0.3)  # Wait before retrying
+            
+            monitor_thread = threading.Thread(target=monitor_server_startup, daemon=True)
+            monitor_thread.start()
+            
+            # Temporarily redirect stderr to capture startup messages
             import io
             old_stderr = sys.stderr
-            sys.stderr = io.StringIO()
+            stderr_capture = io.StringIO()
+            sys.stderr = stderr_capture
             
             try:
                 # Run the server (this blocks)
@@ -569,24 +643,50 @@ async def run_claude_hybrid(args) -> int:
                     port=port,
                     log_level="error"  # Changed from warning to error
                 )
-            finally:
-                # Restore stderr
+            except Exception as e:
+                # Restore stderr first so we can print
                 sys.stderr = old_stderr
+                
+                # Get captured stderr content
+                stderr_content = stderr_capture.getvalue()
+                if stderr_content:
+                    print(f"MCP server stderr output:\n{stderr_content}", file=sys.stderr)
+                
+                print(f"MCP server error: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                
+                # Don't set server_ready on error - let it timeout
+                return
+            finally:
+                # Restore stderr if not already restored
+                if sys.stderr is not old_stderr:
+                    sys.stderr = old_stderr
         except Exception as e:
-            print(f"MCP server error: {e}", file=sys.stderr)
-            server_ready.set()  # Signal even on error so we don't hang
+            print(f"MCP server thread error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
     
     try:
         # Start the MCP server thread
         server_thread = threading.Thread(target=run_mcp_server, daemon=True)
         server_thread.start()
         
-        # Wait for server to be ready (max 5 seconds)
-        if not server_ready.wait(5):
-            print("Warning: MCP server startup timeout", file=sys.stderr)
-        
-        # Give it a bit more time to fully initialize
-        time.sleep(1)
+        # Wait for server to be ready (max 15 seconds)
+        if not server_ready.wait(15):
+            print("Warning: MCP server startup timeout - server may not be fully initialized", file=sys.stderr)
+            # Double-check if server is actually running despite timeout
+            if not check_port_listening('127.0.0.1', port):
+                print("Error: MCP server failed to start on port", port, file=sys.stderr)
+                return 1
+            else:
+                # Port is listening but server might not be fully ready
+                print("Note: MCP server port is listening but may still be initializing", file=sys.stderr)
+                # Give it a bit more time
+                time.sleep(2)
+        else:
+            # Server signaled ready - give it a tiny bit more time to be safe
+            time.sleep(0.2)
         
         # Restore logging after FastMCP has messed with it
         if args.log_file:
@@ -605,11 +705,16 @@ async def run_claude_hybrid(args) -> int:
             setup_logging(args.log_file, mode='a')
 
         # Initialize Claude with SSE configuration
+        print(f"[Main] Configuring Claude to use MCP server at port {port}", file=sys.stderr)
         if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
             print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
         
         # Show configuration status
         print_configuration_status(args)
+        
+        # Re-install our signal handler right before running Claude
+        # This ensures it's the last one installed and will be called first
+        signal.signal(signal.SIGINT, hybrid_signal_handler)
         
         # Now run Claude using the wrapper approach
         return await run_claude_wrapper(args)
@@ -619,6 +724,9 @@ async def run_claude_hybrid(args) -> int:
         # Fall back to regular wrapper
         print("Falling back to standard wrapper mode...")
         return await run_claude_wrapper(args)
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, original_sigint_handler)
 
 
 async def run_talkito_command(args) -> int:
@@ -727,7 +835,6 @@ def run_mcp_server():
         from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
         # but remove the --mcp-server argument itself
-        import sys
         original_argv = sys.argv[:]
         sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-server']
         mcp_main()
@@ -738,7 +845,6 @@ def run_mcp_server():
 
 def run_mcp_sse_server():
     """Run the MCP server with SSE transport"""
-    import sys
     try:
         from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
