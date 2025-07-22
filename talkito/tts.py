@@ -28,10 +28,10 @@ import re
 import time
 import threading
 import queue
-import logging
 import os
 import argparse
 import tempfile
+import sys
 from collections import deque
 from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
@@ -445,7 +445,18 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     
     # Wait for completion or interruption
     try:
-        process.wait()
+        # Poll process with timeout to check for interruptions
+        while process.poll() is None:
+            # Check if we should stop
+            if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
+                process.terminate()
+                try:
+                    process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return False
+            time.sleep(0.01)  # Small sleep to avoid busy waiting
+        
         return process.returncode == 0
     except:
         return False
@@ -628,7 +639,7 @@ def speak_with_openai(text: str) -> bool:
             log_message("ERROR", "OPENAI_API_KEY environment variable not set")
             return False
         
-        return synthesize_and_play(_synthesize_openai, text, use_process_control=False)
+        return synthesize_and_play(_synthesize_openai, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("OpenAI", "pip install openai")
     except Exception as e:
@@ -663,7 +674,7 @@ def speak_with_polly(text: str) -> bool:
     """Speak text using AWS Polly TTS API"""
     try:
         import boto3
-        return synthesize_and_play(_synthesize_polly, text, use_process_control=False)
+        return synthesize_and_play(_synthesize_polly, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("boto3", "pip install boto3")
     except Exception as e:
@@ -1135,16 +1146,33 @@ def speak_with_default(text, engine):
             kwargs["stdin"] = subprocess.PIPE
         
         # Store process in playback control
+        # On macOS, create a new process group so we can kill the entire group
+        if sys.platform == 'darwin':
+            kwargs['preexec_fn'] = os.setsid
+        
         process = subprocess.Popen(cmd, **kwargs)
+        log_message("DEBUG", f"Started {engine} process with PID: {process.pid}")
         with playback_control.lock:
             playback_control.current_process = process
         
         # Wait for completion or interruption
         try:
             if engine in ["festival", "flite"] and "input" in kwargs:
-                process.communicate(input=kwargs["input"])
+                # For stdin-based engines, we can't easily poll, so just communicate
+                stdout, stderr = process.communicate(input=kwargs["input"])
             else:
-                process.wait()
+                # Poll process with timeout to check for interruptions
+                while process.poll() is None:
+                    # Check if we should stop
+                    if shutdown_event.is_set() or playback_control.skip_current or playback_control.skip_all:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=0.1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        return False
+                    time.sleep(0.01)  # Small sleep to avoid busy waiting
+            
             return process.returncode == 0
         except:
             return False
@@ -1222,9 +1250,11 @@ def tts_worker(engine: str):
                     highest_spoken_line_number = speech_item.line_number
                     log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
             
-            # Check if we should skip current
-            if playback_control.skip_current:
+            # Check if we should skip current or if shutdown was requested
+            if playback_control.skip_current or shutdown_event.is_set():
                 playback_control.reset_skip_flags()
+                if shutdown_event.is_set():
+                    break
                 
             # Add to history
             with _state_lock:
@@ -1425,18 +1455,50 @@ def shutdown_tts():
 
 def stop_tts_immediately():
     """Immediately stop all TTS playback and shutdown - for Ctrl-C handling"""
+    log_message("INFO", "stop_tts_immediately called - killing all audio")
+    # Signal shutdown first to stop the worker thread
+    shutdown_event.set()
+    
     # Kill any current TTS process
     playback_control.skip_all_items()
     
-    # Clear the queue
-    while not tts_queue.empty():
-        try:
+    # Clear the queue completely
+    try:
+        while True:
             tts_queue.get_nowait()
-        except:
-            break
+    except queue.Empty:
+        pass
     
-    # Signal shutdown
-    shutdown_event.set()
+    # Force terminate any subprocess that might be running
+    with playback_control.lock:
+        if playback_control.current_process:
+            try:
+                # For macOS 'say' command, we might need to kill the entire process group
+                pid = playback_control.current_process.pid
+                log_message("INFO", f"Attempting to kill TTS process PID: {pid}")
+                if sys.platform == 'darwin':  # macOS
+                    try:
+                        # Kill the process group to ensure audio stops
+                        import signal
+                        # When using setsid, the pgid is the same as pid
+                        os.killpg(pid, signal.SIGKILL)
+                        log_message("INFO", f"Successfully killed process group {pid}")
+                    except Exception as e:
+                        log_message("ERROR", f"Failed to kill process group: {e}")
+                        # Fallback to regular kill
+                        playback_control.current_process.kill()
+                        log_message("INFO", "Used fallback kill method")
+                else:
+                    # For other platforms, use terminate then kill
+                    playback_control.current_process.terminate()
+                    try:
+                        playback_control.current_process.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        playback_control.current_process.kill()
+            except:
+                pass
+            finally:
+                playback_control.current_process = None
 
 
 # Playback control functions

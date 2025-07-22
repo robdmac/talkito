@@ -30,8 +30,10 @@ import sys
 import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Callable
+from typing import Optional, List, Callable, Tuple, Deque
 from queue import Queue, Empty
+from collections import deque
+from difflib import SequenceMatcher
 
 # Import centralized logging utilities
 from .logs import log_message as _base_log_message
@@ -497,6 +499,11 @@ class SlackProvider(CommsProvider):
 class CommunicationManager:
     """Manages all communication providers and message routing"""
     
+    # Cache configuration constants (matching tts.py pattern)
+    CACHE_SIZE = 1000  # Cache size for similarity checking
+    CACHE_TIMEOUT = 18000  # 5 hours - Seconds before a cached message can be sent again
+    SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
+    
     def __init__(self, config: CommsConfig):
         self.config = config
         self.providers: List[CommsProvider] = []
@@ -509,10 +516,50 @@ class CommunicationManager:
         self.active = False
         self.worker_thread = None
         self.current_session_id = self._generate_session_id()
+        
+        # Message cache to prevent duplicate sends
+        self.sent_cache: Deque[Tuple[str, str, float]] = deque(maxlen=self.CACHE_SIZE)  # (content, channel, timestamp)
+        self._cache_lock = threading.Lock()
     
     def _generate_session_id(self) -> str:
         """Generate unique session ID"""
         return hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
+    
+    def _is_duplicate_message(self, content: str, channel: str) -> bool:
+        """Check if message was recently sent to the same channel"""
+        current_time = time.time()
+        
+        with self._cache_lock:
+            # Clean up expired cache entries
+            while self.sent_cache and (current_time - self.sent_cache[0][2]) >= self.CACHE_TIMEOUT:
+                self.sent_cache.popleft()
+            
+            # Check for exact matches first
+            for cached_content, cached_channel, _ in self.sent_cache:
+                if cached_content == content and cached_channel == channel:
+                    log_message("DEBUG", f"Duplicate message detected (exact match): '{content[:50]}...' to {channel}")
+                    return True
+            
+            # Check for similarity
+            for cached_content, cached_channel, _ in self.sent_cache:
+                if cached_channel == channel:
+                    similarity = SequenceMatcher(None, content.lower(), cached_content.lower()).ratio()
+                    if similarity >= self.SIMILARITY_THRESHOLD:
+                        log_message("INFO", f"Message '{content[:50]}...' is {similarity:.2%} similar to '{cached_content[:50]}...' on {channel}")
+                        return True
+        
+        return False
+    
+    def _add_to_cache(self, content: str, channel: str):
+        """Add message to sent cache"""
+        with self._cache_lock:
+            self.sent_cache.append((content, channel, time.time()))
+    
+    def reset_message_cache(self):
+        """Reset message cache - useful for testing"""
+        with self._cache_lock:
+            self.sent_cache.clear()
+        log_message("INFO", "Communication message cache reset")
     
     def add_provider(self, provider_type: str, recipients: List[str] = None) -> bool:
         """Add a communication provider - returns True if successful, False otherwise."""
@@ -632,13 +679,19 @@ class CommunicationManager:
         # Send to SMS recipients
         sms_recipients = recipients or self.config.sms_recipients
         for phone in sms_recipients:
-            msg = Message(
-                content=text,
-                sender=phone,
-                channel="sms",
-                session_id=self.current_session_id
-            )
-            self.output_queue.put(msg)
+            # Check for duplicate before queuing
+            channel_key = f"sms:{phone}"
+            if not self._is_duplicate_message(text, channel_key):
+                msg = Message(
+                    content=text,
+                    sender=phone,
+                    channel="sms",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
+                self._add_to_cache(text, channel_key)
+            else:
+                log_message("INFO", f"Recently sent to SMS {phone}: '{text[:50]}...'")
         
         # Send to WhatsApp recipients (include mode recipient if active)
         whatsapp_recipients = list(self.config.whatsapp_recipients)
@@ -647,27 +700,39 @@ class CommunicationManager:
                 whatsapp_recipients.append(shared_state.communication.whatsapp_to_number)
         
         for phone in whatsapp_recipients:
-            msg = Message(
-                content=text,
-                sender=phone,
-                channel="whatsapp",
-                session_id=self.current_session_id
-            )
-            self.output_queue.put(msg)
+            # Check for duplicate before queuing
+            channel_key = f"whatsapp:{phone}"
+            if not self._is_duplicate_message(text, channel_key):
+                msg = Message(
+                    content=text,
+                    sender=phone,
+                    channel="whatsapp",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
+                self._add_to_cache(text, channel_key)
+            else:
+                log_message("INFO", f"Recently sent to WhatsApp {phone}: '{text[:50]}...'")
         
         # Send to Slack (use mode channel if active)
         if any(isinstance(p, SlackProvider) for p in self.providers):
             slack_channel = self.config.slack_channel
             if shared_state.slack_mode_active and shared_state.communication.slack_channel:
                 slack_channel = shared_state.communication.slack_channel
-                
-            msg = Message(
-                content=text,
-                sender=slack_channel,
-                channel="slack",
-                session_id=self.current_session_id
-            )
-            self.output_queue.put(msg)
+            
+            # Check for duplicate before queuing
+            channel_key = f"slack:{slack_channel}"
+            if not self._is_duplicate_message(text, channel_key):
+                msg = Message(
+                    content=text,
+                    sender=slack_channel,
+                    channel="slack",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
+                self._add_to_cache(text, channel_key)
+            else:
+                log_message("INFO", f"Recently sent to Slack {slack_channel}: '{text[:50]}...'")
     
     def get_input(self, timeout: float = None) -> Optional[str]:
         """Get input from communication channels."""
