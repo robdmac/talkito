@@ -216,6 +216,16 @@ class Profile:
         return text.strip()
 
 
+# Common patterns that should be applied to all profiles
+COMMON_SKIP_PATTERNS = [
+    # Timestamp patterns - filter log lines with timestamps in first 20 chars
+    (2, r'^.{0,20}\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}'),  # [YYYY-MM-DD HH:MM:SS format
+    (2, r'^.{0,20}\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}'),    # YYYY-MM-DD HH:MM:SS format (no brackets)
+    (2, r'^.{0,20}\d{2}:\d{2}:\d{2}'),                         # HH:MM:SS format in first 20 chars
+    (2, r'^.{0,20}\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}'),    # YYYY/MM/DD HH:MM:SS format
+    (2, r'^.{0,20}\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}'),    # MM/DD/YYYY HH:MM:SS format
+]
+
 # Profile definitions
 CLAUDE_PROFILE = Profile(
     name='claude',
@@ -231,7 +241,7 @@ CLAUDE_PROFILE = Profile(
         (1, r'\s*✻'),                         # Interim thinking
         (0, r'│ Do'),
     ],
-    skip_patterns=[
+    skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
         (1, r'[A-Z][a-z]+…'),                 # Single words like "Sparkling.", "Running."
         (1, r'Tip:'),                         # Tips
@@ -293,7 +303,7 @@ CLAUDE_PROFILE = Profile(
 
 AIDER_PROFILE = Profile(
     name='aider',
-    skip_patterns=[
+    skip_patterns=COMMON_SKIP_PATTERNS + [
         (1, r'^Main model:'),
         (1, r'^Editor model:'),
         (1, r'^Weak model:'),
@@ -308,7 +318,7 @@ AIDER_PROFILE = Profile(
 
 PIPET_PROFILE = Profile(
     name='pipet',
-    skip_patterns=[
+    skip_patterns=COMMON_SKIP_PATTERNS + [
         (1, r'^Analyzing package'),
         (1, r'^Package:'),
         (1, r'^Version:'),
@@ -319,6 +329,7 @@ PIPET_PROFILE = Profile(
 
 PYTHON_PROFILE = Profile(
     name='python',
+    skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^>>>\s*',  # Python REPL prompt
         r'^\.\.\.\s*',  # Python continuation prompt
@@ -328,6 +339,7 @@ PYTHON_PROFILE = Profile(
 
 MYSQL_PROFILE = Profile(
     name='mysql',
+    skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^mysql>\s*',  # MySQL prompt
         r'^->\s*',  # MySQL continuation
@@ -337,6 +349,7 @@ MYSQL_PROFILE = Profile(
 
 PSQL_PROFILE = Profile(
     name='psql',
+    skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^\w+=#\s*',  # PostgreSQL prompt (database=#)
         r'^\w+=-#\s*',  # PostgreSQL continuation
@@ -349,7 +362,7 @@ DEFAULT_PROFILE = Profile(
     name='default',
     response_prefix='',
     raw_skip_patterns=[],
-    skip_patterns=[],
+    skip_patterns=COMMON_SKIP_PATTERNS,
     speak_patterns=[],
     prompt_patterns=[],
     skip_progress=[],

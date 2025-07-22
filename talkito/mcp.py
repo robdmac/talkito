@@ -98,9 +98,12 @@ _cors_enabled = False
 # Track if we're running for Claude (to mask certain tools)
 _running_for_claude = False
 
-def configure_mcp_server(cors_enabled=None, running_for_claude=None, log_file_path=None):
+# Track if auto-skip TTS is enabled
+_auto_skip_tts = False
+
+def configure_mcp_server(cors_enabled=None, running_for_claude=None, log_file_path=None, auto_skip_tts=None):
     """Configure MCP server settings through a public interface"""
-    global _cors_enabled, _running_for_claude, _log_file_path
+    global _cors_enabled, _running_for_claude, _log_file_path, _auto_skip_tts
     
     if cors_enabled is not None:
         _cors_enabled = cors_enabled
@@ -111,6 +114,9 @@ def configure_mcp_server(cors_enabled=None, running_for_claude=None, log_file_pa
     if log_file_path is not None:
         _log_file_path = log_file_path
         setup_logging(log_file_path)
+    
+    if auto_skip_tts is not None:
+        _auto_skip_tts = auto_skip_tts
 
 def add_cors_headers(headers):
     """Add CORS headers to response"""
@@ -277,7 +283,7 @@ def _ensure_initialization():
             engine = tts.detect_tts_engine()
             if engine == "none":
                 raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
-            tts.start_tts_worker(engine, auto_skip_tts=False)
+            tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
         else:
             # Configure and use the selected provider
             tts_config = {'provider': best_provider}
@@ -287,9 +293,9 @@ def _ensure_initialization():
                 engine = tts.detect_tts_engine()
                 if engine == "none":
                     raise RuntimeError("No TTS engine found")
-                tts.start_tts_worker(engine, auto_skip_tts=False)
+                tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
             else:
-                tts.start_tts_worker(best_provider, auto_skip_tts=False)
+                tts.start_tts_worker(best_provider, auto_skip_tts=_auto_skip_tts)
         
         shared_state.set_tts_initialized(True, provider=best_provider)
         log_message("INFO", f"TTS initialized with provider: {tts.tts_provider}")
@@ -868,7 +874,7 @@ async def _change_tts_internal(provider: str = "system", voice: str = None, regi
             tts.shutdown_tts()
 
         engine = provider if provider != 'system' else tts.detect_tts_engine()
-        tts.start_tts_worker(engine, auto_skip_tts=False)
+        tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
 
         config_parts = [f"provider={provider}"]
         if voice: config_parts.append(f"voice={voice}")
