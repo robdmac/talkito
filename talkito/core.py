@@ -2744,6 +2744,21 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
         last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
         process_remaining_buffer(buffer, last_idx)
     
+    # Flush any pending speech text before replay completes
+    send_pending_text()
+    
+    # Give a moment for final items to be queued
+    await asyncio.sleep(0.5)
+    
+    # Force flush again in case there were any stragglers
+    send_pending_text()
+    
+    # In test mode, give extra time for late items to be processed
+    if disable_tts:
+        await asyncio.sleep(3.0)
+        # One final flush
+        send_pending_text()
+    
     print(f"Replay completed. Total lines in buffer: {output_buffer.get_line_count()}")
     
     # Write recorded data to file if in record mode
@@ -2765,6 +2780,44 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
     
     if capture_tts:
         # Wait for all TTS to be processed and captured
+        # In test mode, give extra time for items to be queued and processed
+        if disable_tts:
+            # Wait a bit for any final items to be queued
+            await asyncio.sleep(3.0)
+            
+            # Force flush any pending text
+            send_pending_text()
+            
+            # Wait for queue to be processed
+            max_wait = 30  # 30 seconds max
+            start_time = time.time()
+            last_count = 0
+            stable_count = 0
+            last_queue_check = 0
+            
+            while time.time() - start_time < max_wait:
+                current_count = len(tts.speech_history)
+                queue_size = tts.tts_queue.qsize()
+                
+                # Also check if worker thread is still alive
+                if not tts.tts_worker_thread or not tts.tts_worker_thread.is_alive():
+                    log_message("WARNING", "TTS worker thread is not running!")
+                    break
+                
+                if current_count == last_count and queue_size == 0:
+                    stable_count += 1
+                    if stable_count >= 20:  # Stable for 2 seconds
+                        break
+                else:
+                    stable_count = 0
+                    last_count = current_count
+                    last_queue_check = queue_size
+                
+                if queue_size > 0 or last_queue_check > 0:
+                    log_message("DEBUG", f"Waiting for {queue_size} items in queue (was {last_queue_check}), have {current_count} in history")
+                
+                await asyncio.sleep(0.1)
+        
         tts.wait_for_tts_to_finish(timeout=300)  # Wait up to 5 minutes
         tts.shutdown_tts()
         return [(0.0, item.text, item.line_number) for item in tts.speech_history]
