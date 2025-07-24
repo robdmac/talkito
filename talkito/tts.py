@@ -32,6 +32,7 @@ import os
 import argparse
 import tempfile
 import sys
+import random
 from collections import deque
 from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
@@ -71,6 +72,7 @@ CACHE_SIZE = 1000  # Cache size for similarity checking
 CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
+SKIP_INTERJECTIONS = ["oh", "hmm", "ah", "uh", "um", "well", "so", "right", "okay"]  # Interjections to add when auto-skipping
 
 # Global configuration
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
@@ -1293,15 +1295,26 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
     # If filtered text is longer than 20 characters and auto-skip is enabled, clear the queue to jump to this message
     if auto_skip_tts_enabled and len(speakable_text) > 20:
         log_message("INFO", f"Long text detected ({len(speakable_text)} chars), clearing queue to jump to latest")
+        
+        # Check if something is currently playing
+        is_currently_playing = playback_control.current_process is not None
+        
         # Clear the queue
         while not tts_queue.empty():
             try:
                 tts_queue.get_nowait()
             except:
                 break
+        
         # Only skip current item if something is actually playing
-        if playback_control.current_process is not None:
+        if is_currently_playing:
             playback_control.skip_current_item()
+            
+            # Add an interjection to make the transition smoother
+            interjection = random.choice(SKIP_INTERJECTIONS)
+            # Prepend the interjection to the text for TTS only
+            speakable_text = f"{interjection}, {speakable_text}"
+            log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
 
     # Debounce rapidly changing text
     current_time = time.time()
