@@ -1187,7 +1187,7 @@ def speak_with_default(text, engine):
 
 def tts_worker(engine: str):
     """TTS worker thread - reads from queue and speaks"""
-    global current_speech_item, highest_spoken_line_number, last_speech_end_time
+    global current_speech_item, last_speech_end_time
     log_message("INFO", f"Started TTS worker with engine: {engine}")
 
     while not shutdown_event.is_set():
@@ -1218,14 +1218,6 @@ def tts_worker(engine: str):
                 speech_item = SpeechItem(text=item, original_text=item)
             else:
                 speech_item = item
-                
-            # Check if this line number is older than what we've already spoken
-            with _state_lock:
-                if speech_item.line_number is not None and speech_item.line_number <= highest_spoken_line_number:
-                    log_message("INFO", f"Skipping line {speech_item.line_number} (already spoken up to line {highest_spoken_line_number}): '{speech_item.text[:50]}...'")
-                    continue
-                
-                current_speech_item = speech_item
 
             # Tell ASR to ignore input while we're speaking to prevent feedback
             try:
@@ -1243,22 +1235,12 @@ def tts_worker(engine: str):
                 log_message("INFO", f"Speaking via {engine}: '{speech_item.text}'")
 
             speak_text(speech_item.text, engine)
-            
-            # Update highest spoken line number if applicable
-            with _state_lock:
-                if speech_item.line_number is not None and speech_item.line_number > highest_spoken_line_number:
-                    highest_spoken_line_number = speech_item.line_number
-                    log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
-            
+
             # Check if we should skip current or if shutdown was requested
             if playback_control.skip_current or shutdown_event.is_set():
                 playback_control.reset_skip_flags()
                 if shutdown_event.is_set():
                     break
-                
-            # Add to history
-            with _state_lock:
-                speech_history.append(speech_item)
             
             # Clear current item and track end time
             with _state_lock:
@@ -1284,7 +1266,7 @@ def tts_worker(engine: str):
 
 def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output") -> str:
     """Queue text for speaking with debouncing"""
-    global last_queued_text, last_queue_time
+    global highest_spoken_line_number, last_queued_text, last_queue_time
 
     # Check shared state if available
     if SHARED_STATE_AVAILABLE:
@@ -1336,26 +1318,34 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         log_message("INFO", f"Recently spoken: '{speakable_text}'")
         return ""
 
-    # Add to cache and queue
-    with _cache_lock:
-        spoken_cache.append((speakable_text, current_time))
-    
     with _state_lock:
         last_queued_text = speakable_text
         last_queue_time = current_time
 
-    # Create speech item
-    speech_item = SpeechItem(
-        text=speakable_text,
-        original_text=text,
-        line_number=line_number,
-        source=source
-    )
+        if line_number is not None and line_number <= highest_spoken_line_number:
+            log_message("INFO",
+                        f"Skipping line {line_number} (already spoken up to line {highest_spoken_line_number}): '{speakable_text[:50]}...'")
+            return ""
 
-    try:
-        tts_queue.put_nowait(speech_item)
-    except queue.Full:
-        log_message("WARNING", "TTS queue full, skipping text")
+        if line_number is not None and line_number > highest_spoken_line_number:
+            highest_spoken_line_number = line_number
+            log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
+
+        spoken_cache.append((speakable_text, current_time))
+
+        # Create speech item
+        speech_item = SpeechItem(
+            text=speakable_text,
+            original_text=text,
+            line_number=line_number,
+            source=source
+        )
+
+        try:
+            tts_queue.put_nowait(speech_item)
+            speech_history.append(speech_item)
+        except queue.Full:
+            log_message("WARNING", "TTS queue full, skipping text")
 
     return written_text
 
