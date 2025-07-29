@@ -438,6 +438,7 @@ def send_pending_text():
             speakable_text = tts.queue_for_speech(
                 terminal.pending_speech_text, 
                 terminal.pending_text_line_number,
+                source="output",
                 exception_match=exception_match
             )
             if speakable_text:
