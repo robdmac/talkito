@@ -105,8 +105,8 @@ def parse_arguments():
     
     # Basic options
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    parser.add_argument('--auto-skip-tts', action='store_true', 
-                        help='Automatically skip to newer content when TTS is behind')
+    parser.add_argument('--dont-auto-skip-tts', action='store_true', 
+                        help='Disable automatic skipping to newer content when TTS is behind')
     parser.add_argument('--disable-tts', action='store_true',
                         help='Disable TTS output completely')
     parser.add_argument('--profile', type=str, 
@@ -236,7 +236,7 @@ def parse_arguments():
             '--log-file', '--tts-provider', '--asr-provider', '--tts-voice', '--tts-region', '--tts-language',
             '--tts-rate', '--tts-pitch', '--capture-tts-output', '--asr-mode', '--asr-language', '--asr-model',
             '--sms-recipients', '--whatsapp-recipients', '--slack-channel', '--webhook-port', '--record', '--replay',
-            '--no-output', '--port', '--disable-mcp', '--auto-skip-tts', '--disable-tts', '--profile', '--verbosity',
+            '--no-output', '--port', '--disable-mcp', '--dont-auto-skip-tts', '--disable-tts', '--profile', '--verbosity',
             '-v', '--verbose', '--mcp-server', '--mcp-sse-server', '--setup-slack', '--setup-whatsapp'
         }
         
@@ -384,7 +384,7 @@ async def run_talkito_command(args) -> int:
         'verbosity': args.verbose,
         'asr_mode': args.asr_mode,
         'record_file': args.record,
-        'auto_skip_tts': args.auto_skip_tts,  # Pass auto-skip-tts flag
+        'auto_skip_tts': not args.dont_auto_skip_tts,  # Auto-skip is on by default, disabled with --dont-auto-skip-tts
     }
     
     # Add log file if specified
@@ -436,7 +436,7 @@ async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
     # Run the replay using the original function signature
     result = await replay_recorded_session(
         args.replay,
-        auto_skip_tts=args.auto_skip_tts,
+        auto_skip_tts=not args.dont_auto_skip_tts,
         tts_config=tts_config,
         record_file=args.record,
         capture_tts=args.capture_tts_output is not None,
