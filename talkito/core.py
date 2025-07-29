@@ -210,8 +210,10 @@ class TerminalState:
     screen_content_cache: Deque[str] = field(default_factory=lambda: deque(maxlen=SCREEN_CONTENT_CACHE_SIZE))
     previous_line_was_skipped: bool = False
     previous_line_was_queued: bool = False
+    previous_line_was_queued_space_seperated: bool = False
     pending_speech_text: str = ""
     pending_text_line_number: int = 0
+    pending_text_exception_match: bool = False
     last_line_number: int = -1
 
 @dataclass 
@@ -431,20 +433,35 @@ def send_pending_text():
         # Check if TTS is enabled before queueing
         shared_state = get_shared_state()
         if shared_state.tts_enabled:
-            speakable_text = tts.queue_for_speech(terminal.pending_speech_text, terminal.pending_text_line_number)
+            # Pass the exception match flag from terminal state
+            exception_match = getattr(terminal, 'pending_text_exception_match', False)
+            speakable_text = tts.queue_for_speech(
+                terminal.pending_speech_text, 
+                terminal.pending_text_line_number,
+                source="output",
+                exception_match=exception_match
+            )
             if speakable_text:
                 log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
                 terminal.pending_speech_text = ""
+                terminal.pending_text_exception_match = False  # Reset flag
                 send_to_comms(speakable_text)
         else:
             log_message("DEBUG", "TTS disabled, not sending pending text to speech")
             terminal.pending_speech_text = ""
+            terminal.pending_text_exception_match = False  # Reset flag
             # Still send to comms even if TTS is disabled
             send_to_comms(terminal.pending_speech_text)
 
-def queue_output(text: str, line_number: Optional[int] = None):
-    """Queue text for both TTS and communication channels"""
-    log_message("DEBUG", f"queue_output [{text}] {line_number}")
+def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
+    """Queue text for both TTS and communication channels
+    
+    Args:
+        text: The text to queue
+        line_number: Optional line number for tracking
+        exception_match: If True, this text matches a profile exception pattern
+    """
+    log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
     if line_number < terminal.last_line_number:
         log_message("DEBUG", f"queue_output skipping previously seen line number")
     elif text and text.strip():
@@ -455,6 +472,9 @@ def queue_output(text: str, line_number: Optional[int] = None):
             # Still send to comms even if TTS is disabled
             send_to_comms(text)
             return
+            
+        # Store exception match flag for later use
+        terminal.pending_text_exception_match = exception_match
             
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
         append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
@@ -818,7 +838,8 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         log_message("INFO", f"Detected question line: '{line[:MAX_LINE_PREVIEW]}...'")
         asr_state.question_mode = True
         cleaned_line = clean_text(line)
-        queue_output(strip_profile_symbols(cleaned_line), line_number)
+        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
+        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
         terminal.previous_line_was_skipped = True
         return None, buffer, line, False
 
@@ -876,7 +897,8 @@ def process_line(line: str, buffer: List[str], prev_line: str,
             return None, buffer, line, False
         
         log_message("INFO", f"Queueing for speech response line: '{cleaned_line}'")
-        queue_output(strip_profile_symbols(cleaned_line), line_number)
+        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
+        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
         return None, buffer, line, False
 
     # Move prompt detection here, before we process the line
@@ -893,7 +915,8 @@ def process_line(line: str, buffer: List[str], prev_line: str,
             terminal.previous_line_was_skipped = True
             send_pending_text()
             return None, buffer, line, False
-        queue_output(strip_profile_symbols(cleaned_line), line_number)
+        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
+        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
         return None, buffer, line, False
 
     if skip_duplicates and cleaned_line:
@@ -935,7 +958,8 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
         if text_to_speak:
             log_message("INFO", f"Queueing buffered text before sentence end")
-            queue_output(strip_profile_symbols(text_to_speak), line_number)
+            exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
+            queue_output(strip_profile_symbols(text_to_speak), line_number, exception_match)
             return cleaned_line, [], line, False
         return cleaned_line, [], line, False
     
@@ -985,7 +1009,8 @@ def clear_terminal_state(output_buffer: LineBuffer, cursor_row: int = 1) -> int:
                 # Queue the line for speech before we lose it
                 cleaned = clean_text(line)
                 if cleaned and not active_profile.should_skip(cleaned, verbosity_level):
-                    queue_output(strip_profile_symbols(cleaned), idx)
+                    exception_match = active_profile.matches_exception_pattern(cleaned, verbosity_level)
+                    queue_output(strip_profile_symbols(cleaned), idx, exception_match)
     
     output_buffer.clear()
     terminal.line_screen_positions.clear()
@@ -2278,7 +2303,8 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                         line, buffer, prev_line, False, line_idx, asr_mode
                                     )
                                     if text_to_speak:
-                                        queue_output(strip_profile_symbols(text_to_speak), line_idx)
+                                        exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
+                                        queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
                     except:
                         pass
                 else:
@@ -2297,7 +2323,8 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             if action in ['added', 'modified']:
                 text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
                 if text_to_speak:
-                    queue_output(strip_profile_symbols(text_to_speak), line_idx)
+                    exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
+                    queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
 
         if buffer:
             # Use the last line index for any remaining buffer content
@@ -2393,7 +2420,8 @@ def process_remaining_buffer(buffer: List[str], line_idx: int) -> None:
         filtered_buffer = [line for line in buffer if line and line.strip()]
         if filtered_buffer:
             final_text = '. '.join(filtered_buffer)
-            queue_output(strip_profile_symbols(final_text), line_idx)
+            exception_match = active_profile and active_profile.matches_exception_pattern(final_text, verbosity_level)
+            queue_output(strip_profile_symbols(final_text), line_idx, exception_match)
 
 
 def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
@@ -2463,7 +2491,8 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             check_and_enable_auto_listen(asr_mode)
         
         if text_to_speak:
-            queue_output(strip_profile_symbols(text_to_speak), line_idx)
+            exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
+            queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
     
     return line_buffer, text_buffer, prev_line, cursor_row, detected_prompt
 
@@ -2737,7 +2766,8 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
                 line, buffer, prev_line, skip_duplicate_mode, line_idx, "off"
             )
             if text_to_speak:
-                queue_output(strip_profile_symbols(text_to_speak), line_idx)
+                exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
+                queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
     
     # Process any remaining buffer
     if buffer:
