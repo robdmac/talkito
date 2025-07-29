@@ -32,6 +32,8 @@ import os
 import argparse
 import tempfile
 import sys
+import random
+import signal
 from collections import deque
 from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
@@ -71,6 +73,7 @@ CACHE_SIZE = 1000  # Cache size for similarity checking
 CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
+SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to add when auto-skipping
 
 # Global configuration
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
@@ -394,6 +397,12 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     accessible["elevenlabs"] = {
         "available": bool(os.environ.get("ELEVENLABS_API_KEY")),
         "note": "Requires ELEVENLABS_API_KEY environment variable"
+    }
+    
+    # Deepgram
+    accessible["deepgram"] = {
+        "available": bool(os.environ.get("DEEPGRAM_API_KEY")),
+        "note": "Requires DEEPGRAM_API_KEY environment variable"
     }
     
     return accessible
@@ -870,11 +879,12 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
         encoding="mp3"
     )
     
-    # Create a temporary file to save the audio
-    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
-        tmp_filename = tmp_file.name
-    
+    # Initialize tmp_filename before try block to ensure it's always defined
+    tmp_filename = None
     try:
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+            tmp_filename = tmp_file.name
+        
         # Use the save method as shown in the reference
         response = deepgram.speak.rest.v("1").save(tmp_filename, {"text": text}, options)
         
@@ -887,8 +897,8 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
         log_message("ERROR", f"Deepgram TTS error: {e}")
         return None
     finally:
-        # Clean up temp file
-        if os.path.exists(tmp_filename):
+        # Clean up temp file - tmp_filename is guaranteed to be defined
+        if tmp_filename and os.path.exists(tmp_filename):
             os.unlink(tmp_filename)
 
 
@@ -1146,8 +1156,9 @@ def speak_with_default(text, engine):
             kwargs["stdin"] = subprocess.PIPE
         
         # Store process in playback control
-        # On macOS, create a new process group so we can kill the entire group
+        # On macOS, create a new session and process group so we can kill the entire group
         if sys.platform == 'darwin':
+            # Use os.setsid() to create a new session (and process group)
             kwargs['preexec_fn'] = os.setsid
         
         process = subprocess.Popen(cmd, **kwargs)
@@ -1228,6 +1239,10 @@ def tts_worker(engine: str):
             except Exception as e:
                 log_message("DEBUG", f"Could not set ASR ignore flag: {e}")
 
+            # Set current speech item with thread safety
+            with _state_lock:
+                current_speech_item = speech_item
+            
             # Include line number in log if available
             if speech_item.line_number is not None:
                 log_message("INFO", f"Speaking via {engine} (line {speech_item.line_number}): '{speech_item.text}'")
@@ -1264,7 +1279,7 @@ def tts_worker(engine: str):
             log_message("ERROR", f"TTS worker error: {e}")
 
 
-def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output") -> str:
+def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False) -> str:
     """Queue text for speaking with debouncing"""
     global highest_spoken_line_number, last_queued_text, last_queue_time
 
@@ -1276,7 +1291,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             return ""
 
     # Log the original text before any filtering
-    log_message("INFO", f"queue_for_speech received: '{text}'")
+    log_message("INFO", f"queue_for_speech received: '{text}' (exception_match={exception_match})")
 
     speakable_text, written_text = extract_speakable_text(text)
 
@@ -1290,33 +1305,50 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
     # Clean up any awkward punctuation sequences
     speakable_text = clean_punctuation_sequences(speakable_text)
 
+    # Get current time for various time-based checks
+    current_time = time.time()
+    
+    # Skip similarity checks if this text matches an exception pattern
+    if not exception_match:
+        # Debounce rapidly changing text
+        with _state_lock:
+            if (last_queued_text and
+                    SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
+                    current_time - last_queue_time < DEBOUNCE_TIME):
+                log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
+                last_queued_text = speakable_text
+                last_queue_time = current_time
+                return ""
+
+        if is_similar_to_recent(speakable_text):
+            log_message("INFO", f"Recently spoken: '{speakable_text}'")
+            return ""
+    else:
+        log_message("INFO", f"Bypassing similarity checks for exception pattern match: '{speakable_text}'")
+
     # If filtered text is longer than 20 characters and auto-skip is enabled, clear the queue to jump to this message
     if auto_skip_tts_enabled and len(speakable_text) > 20:
         log_message("INFO", f"Long text detected ({len(speakable_text)} chars), clearing queue to jump to latest")
+
+        # Check if something is currently playing
+        is_currently_playing = playback_control.current_process is not None
+
         # Clear the queue
         while not tts_queue.empty():
             try:
                 tts_queue.get_nowait()
             except:
                 break
+
         # Only skip current item if something is actually playing
-        if playback_control.current_process is not None:
+        if is_currently_playing:
             playback_control.skip_current_item()
 
-    # Debounce rapidly changing text
-    current_time = time.time()
-    with _state_lock:
-        if (last_queued_text and
-                SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
-                current_time - last_queue_time < DEBOUNCE_TIME):
-            log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
-            last_queued_text = speakable_text
-            last_queue_time = current_time
-            return ""
-
-    if is_similar_to_recent(speakable_text):
-        log_message("INFO", f"Recently spoken: '{speakable_text}'")
-        return ""
+            # Add an interjection to make the transition smoother
+            interjection = random.choice(SKIP_INTERJECTIONS)
+            # Prepend the interjection to the text for TTS only
+            speakable_text = f"{interjection}, {speakable_text}"
+            log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
 
     with _state_lock:
         last_queued_text = speakable_text
@@ -1331,8 +1363,11 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             highest_spoken_line_number = line_number
             log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
 
+    # Use cache lock for cache operations
+    with _cache_lock:
         spoken_cache.append((speakable_text, current_time))
 
+    with _state_lock:
         # Create speech item
         speech_item = SpeechItem(
             text=speakable_text,
@@ -1343,6 +1378,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
 
         try:
             tts_queue.put_nowait(speech_item)
+            # Thread-safe append to history
             speech_history.append(speech_item)
         except queue.Full:
             log_message("WARNING", "TTS queue full, skipping text")
@@ -1470,16 +1506,39 @@ def stop_tts_immediately():
                 log_message("INFO", f"Attempting to kill TTS process PID: {pid}")
                 if sys.platform == 'darwin':  # macOS
                     try:
-                        # Kill the process group to ensure audio stops
-                        import signal
-                        # When using setsid, the pgid is the same as pid
-                        os.killpg(pid, signal.SIGKILL)
-                        log_message("INFO", f"Successfully killed process group {pid}")
-                    except Exception as e:
-                        log_message("ERROR", f"Failed to kill process group: {e}")
-                        # Fallback to regular kill
-                        playback_control.current_process.kill()
-                        log_message("INFO", "Used fallback kill method")
+                        # Get process group ID first before any termination attempts
+                        # to avoid race condition where process dies between operations
+                        pgid = None
+                        try:
+                            pgid = os.getpgid(pid)
+                        except ProcessLookupError:
+                            log_message("INFO", "Process already terminated")
+                            playback_control.current_process = None
+                        except Exception as e:
+                            log_message("WARNING", f"Could not get process group: {e}")
+                        
+                        # Now try to kill the process group if we got the pgid
+                        if pgid is not None:
+                            try:
+                                os.killpg(pgid, signal.SIGKILL)
+                                log_message("INFO", f"Successfully killed process group {pgid}")
+                            except ProcessLookupError:
+                                log_message("INFO", "Process group already terminated")
+                            except Exception as e:
+                                log_message("ERROR", f"Failed to kill process group: {e}")
+                                # Fallback to regular kill
+                                try:
+                                    playback_control.current_process.kill()
+                                    log_message("INFO", "Used fallback kill method")
+                                except:
+                                    pass
+                        else:
+                            # No pgid, try regular kill
+                            try:
+                                playback_control.current_process.kill()
+                                log_message("INFO", "Killed process directly (no pgid)")
+                            except:
+                                pass
                 else:
                     # For other platforms, use terminate then kill
                     playback_control.current_process.terminate()
@@ -1526,14 +1585,15 @@ def skip_all():
 
 def navigate_to_previous():
     """Navigate to previous item in history"""
-    if len(speech_history) > 1:
-        # Skip current and get previous
-        playback_control.skip_current_item()
-        prev_item = speech_history[-2]
-        # Re-queue the previous item
-        tts_queue.put_nowait(prev_item)
-        log_message("INFO", f"Navigating to previous item: {prev_item.text[:50]}...")
-        return True
+    with _state_lock:
+        if len(speech_history) > 1:
+            # Skip current and get previous
+            playback_control.skip_current_item()
+            prev_item = speech_history[-2]
+            # Re-queue the previous item
+            tts_queue.put_nowait(prev_item)
+            log_message("INFO", f"Navigating to previous item: {prev_item.text[:50]}...")
+            return True
     return False
 
 
@@ -1551,7 +1611,8 @@ def get_current_speech_item() -> Optional[SpeechItem]:
 
 def get_speech_history() -> List[SpeechItem]:
     """Get the speech history"""
-    return speech_history.copy()
+    with _state_lock:
+        return speech_history.copy()
 
 
 def get_queue_size() -> int:
@@ -1670,6 +1731,11 @@ def configure_tts_provider(args):
         if args.voice:
             elevenlabs_voice_id = args.voice
         log_message("INFO", f"Using ElevenLabs TTS with voice ID: {elevenlabs_voice_id}")
+    
+    elif tts_provider == 'deepgram':
+        if args.voice:
+            deepgram_voice_model = args.voice
+        log_message("INFO", f"Using Deepgram TTS with model: {deepgram_voice_model}")
     
     return True
 

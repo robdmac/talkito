@@ -146,6 +146,13 @@ class Profile:
         
         return False
     
+    def matches_exception_pattern(self, line: str, verbosity: int = 0) -> bool:
+        """Check if line matches an exception pattern (should be spoken even if it matches skip patterns)"""
+        for min_verbosity, pattern in self._compiled_exceptions:
+            if pattern.search(line) and verbosity >= min_verbosity:
+                return True
+        return False
+    
     def get_skip_reason(self, line: str, verbosity: int = 0) -> Optional[str]:
         """Get the reason why a line would be skipped, or None if it wouldn't be skipped"""
         # Check exception patterns first - these override all skip rules
@@ -230,7 +237,7 @@ COMMON_SKIP_PATTERNS = [
 CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
-    continuation_prefix=r'^\s+[\w()\'"]',
+    continuation_prefix=r'^\s+[-\w()\'"]',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
@@ -270,7 +277,7 @@ CLAUDE_PROFILE = Profile(
         (3, r'^\s{2,}\d+\s{2,}[a-zA-Z_#]'),   # Line numbers + code/comments
         (3, r'/usr/bin/'),                    # Skip shebang path prefix
         (3, r'^\s{2,}import\s+'),             # Skip indented import statements
-        # (3, r'^\s{2,}[a-zA-Z_]+'),            # Skip any line starting with 2+ spaces followed by code
+        # (3, r'^\s{2,}[a-zA-Z_]+'),          # Skip any line starting with 2+ spaces followed by code
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'     '),                        # Indent usually means code
         (3, r'  - '),                         # Indent with dash usually means code
@@ -280,12 +287,13 @@ CLAUDE_PROFILE = Profile(
         (4, r'Error File content'),           # Skip file size error messages
         (4, r'^\s*>\s*'),                     # Claude previous input
         (4, r'^[|│]\s*>\s*'),                 # Claude previous input
-        (4, r'(╭|╮|╯|╰)'),                   # Box drawing characters (all corners)
+        (4, r'(╭|╮|╯|╰)'),                    # Box drawing characters (all corners)
         (4, r'\? for shortcuts'),
         (4, r'\(node:'),
         (4, r'^\['),
         (4, r'Press Ctrl-C'),
         (4, r'⏵⏵ auto-accept edits'),         # Skip auto-accept edits status line
+        (4, r'==='),                          # auto compact summary
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],

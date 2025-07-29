@@ -80,8 +80,8 @@ When you run `talkito claude`, voice mode is enabled by default:
 #### Advanced Options
 
 ```bash
-# Auto-skip to newer content when text is long
-talkito --auto-skip-tts claude
+# Disable auto-skip to newer content (auto-skip is on by default)
+talkito --dont-auto-skip-tts claude
 
 # Use different TTS providers
 talkito --tts-provider openai --tts-voice nova echo "Hello with OpenAI"
