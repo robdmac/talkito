@@ -1156,10 +1156,10 @@ def speak_with_default(text, engine):
             kwargs["stdin"] = subprocess.PIPE
         
         # Store process in playback control
-        # On macOS, create a new process group so we can kill the entire group
+        # On macOS, create a new session and process group so we can kill the entire group
         if sys.platform == 'darwin':
-            # Use os.setpgrp() to create a new process group, not a new session
-            kwargs['preexec_fn'] = os.setpgrp
+            # Use os.setsid() to create a new session (and process group)
+            kwargs['preexec_fn'] = os.setsid
         
         process = subprocess.Popen(cmd, **kwargs)
         log_message("DEBUG", f"Started {engine} process with PID: {process.pid}")
@@ -1280,14 +1280,7 @@ def tts_worker(engine: str):
 
 
 def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False) -> str:
-    """Queue text for speaking with debouncing
-    
-    Args:
-        text: The text to speak
-        line_number: Optional line number for tracking
-        source: Source of the text ("output", "error", etc.)
-        exception_match: If True, bypasses similarity checks (text matches profile exception pattern)
-    """
+    """Queue text for speaking with debouncing"""
     global highest_spoken_line_number, last_queued_text, last_queue_time
 
     # Check shared state if available
