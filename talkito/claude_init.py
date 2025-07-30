@@ -306,7 +306,7 @@ async def run_claude_wrapper(args) -> int:
         'verbosity': args.verbose,
         'asr_mode': args.asr_mode,
         'record_file': args.record,
-        'auto_skip_tts': args.auto_skip_tts,  # Pass auto-skip-tts flag
+        'auto_skip_tts': not args.dont_auto_skip_tts,  # Auto-skip is on by default, disabled with --dont-auto-skip-tts
     }
 
     # Add other configurations...
@@ -523,7 +523,7 @@ async def run_claude_hybrid(args) -> int:
             if args.log_file:
                 config['log_file_path'] = args.log_file
                 
-            if args.auto_skip_tts:
+            if not args.dont_auto_skip_tts:
                 config['auto_skip_tts'] = True
             
             # Apply configuration
