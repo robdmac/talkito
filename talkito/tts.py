@@ -1308,8 +1308,15 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
     # Get current time for various time-based checks
     current_time = time.time()
     
-    # Skip similarity checks if this text matches an exception pattern
-    if not exception_match:
+    # Always check for exact duplicates of the last spoken text
+    with _state_lock:
+        if last_queued_text and speakable_text == last_queued_text:
+            log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}'")
+            return ""
+    
+    # Skip additional similarity checks if this text matches the AI prompting the user
+    # TODO improve this
+    if "Do you" not in speakable_text:
         # Debounce rapidly changing text
         with _state_lock:
             if (last_queued_text and
@@ -1505,40 +1512,39 @@ def stop_tts_immediately():
                 pid = playback_control.current_process.pid
                 log_message("INFO", f"Attempting to kill TTS process PID: {pid}")
                 if sys.platform == 'darwin':  # macOS
+                    # Get process group ID first before any termination attempts
+                    # to avoid race condition where process dies between operations
+                    pgid = None
                     try:
-                        # Get process group ID first before any termination attempts
-                        # to avoid race condition where process dies between operations
-                        pgid = None
+                        pgid = os.getpgid(pid)
+                    except ProcessLookupError:
+                        log_message("INFO", "Process already terminated")
+                        playback_control.current_process = None
+                    except Exception as e:
+                        log_message("WARNING", f"Could not get process group: {e}")
+                    
+                    # Now try to kill the process group if we got the pgid
+                    if pgid is not None:
                         try:
-                            pgid = os.getpgid(pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                            log_message("INFO", f"Successfully killed process group {pgid}")
                         except ProcessLookupError:
-                            log_message("INFO", "Process already terminated")
-                            playback_control.current_process = None
+                            log_message("INFO", "Process group already terminated")
                         except Exception as e:
-                            log_message("WARNING", f"Could not get process group: {e}")
-                        
-                        # Now try to kill the process group if we got the pgid
-                        if pgid is not None:
-                            try:
-                                os.killpg(pgid, signal.SIGKILL)
-                                log_message("INFO", f"Successfully killed process group {pgid}")
-                            except ProcessLookupError:
-                                log_message("INFO", "Process group already terminated")
-                            except Exception as e:
-                                log_message("ERROR", f"Failed to kill process group: {e}")
-                                # Fallback to regular kill
-                                try:
-                                    playback_control.current_process.kill()
-                                    log_message("INFO", "Used fallback kill method")
-                                except:
-                                    pass
-                        else:
-                            # No pgid, try regular kill
+                            log_message("ERROR", f"Failed to kill process group: {e}")
+                            # Fallback to regular kill
                             try:
                                 playback_control.current_process.kill()
-                                log_message("INFO", "Killed process directly (no pgid)")
+                                log_message("INFO", "Used fallback kill method")
                             except:
                                 pass
+                    else:
+                        # No pgid, try regular kill
+                        try:
+                            playback_control.current_process.kill()
+                            log_message("INFO", "Killed process directly (no pgid)")
+                        except:
+                            pass
                 else:
                     # For other platforms, use terminate then kill
                     playback_control.current_process.terminate()
@@ -1546,8 +1552,8 @@ def stop_tts_immediately():
                         playback_control.current_process.wait(timeout=0.1)
                     except subprocess.TimeoutExpired:
                         playback_control.current_process.kill()
-            except:
-                pass
+            except Exception as e:
+                log_message("ERROR", f"Error stopping TTS process: {e}")
             finally:
                 playback_control.current_process = None
 
