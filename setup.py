@@ -46,7 +46,7 @@ extras_require = {
     ],
     # Cloud TTS providers
     "openai": ["openai>=1.0.0"],
-    "aws": ["boto3>=1.26.0"],
+    "aws": ["boto3>=1.26.0", "amazon-transcribe>=0.6.0"],
     "azure": ["azure-cognitiveservices-speech>=1.24.0"],
     "gcloud": ["google-cloud-texttospeech>=2.14.0", "google-cloud-speech>=2.20.0"],
     "elevenlabs": ["elevenlabs>=0.2.0"],
@@ -67,6 +67,7 @@ extras_require = {
         "pyaudio>=0.2.11",
         "openai>=1.0.0",
         "boto3>=1.26.0",
+        "amazon-transcribe>=0.6.0",
         "azure-cognitiveservices-speech>=1.24.0",
         "google-cloud-texttospeech>=2.14.0",
         "google-cloud-speech>=2.20.0",
