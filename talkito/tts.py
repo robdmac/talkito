@@ -92,7 +92,7 @@ deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')
 
 
 def get_tts_config():
-    """Get TTS configuration from shared state if available, otherwise use module globals"""
+    """Get TTS configuration from shared state or module globals."""
     if SHARED_STATE_AVAILABLE:
         try:
             state = get_shared_state()
@@ -197,11 +197,12 @@ TTS_PROVIDERS = {
 
 @dataclass
 class SpeechItem:
-    """Represents an item in the speech queue with metadata"""
+    """Item in speech queue with text, timestamp, and metadata."""
     text: str
     original_text: str
     line_number: Optional[int] = None
     timestamp: Optional[datetime] = None
+    start_time: Optional[float] = None  # Time when speech actually starts playing
     source: str = "output"  # "output", "error", etc.
     
     def __post_init__(self):
@@ -210,7 +211,7 @@ class SpeechItem:
 
 
 class PlaybackControl:
-    """Controls for TTS playback"""
+    """Controls TTS playback state and process management."""
     def __init__(self):
         self.current_index = 0
         self.is_paused = False
@@ -220,7 +221,7 @@ class PlaybackControl:
         self.lock = threading.Lock()
         
     def pause(self):
-        """Pause current playback"""
+        """Pause current TTS playback."""
         with self.lock:
             self.is_paused = True
             if self.current_process:
@@ -230,12 +231,12 @@ class PlaybackControl:
                     pass
                     
     def resume(self):
-        """Resume playback"""
+        """Resume paused TTS playback."""
         with self.lock:
             self.is_paused = False
             
     def skip_current_item(self):
-        """Skip the currently playing item"""
+        """Skip the currently playing TTS item."""
         with self.lock:
             self.skip_current = True
             if self.current_process:
@@ -245,7 +246,7 @@ class PlaybackControl:
                     pass
                     
     def skip_all_items(self):
-        """Skip all remaining items in queue"""
+        """Skip all remaining items in TTS queue."""
         with self.lock:
             self.skip_all = True
             if self.current_process:
@@ -255,7 +256,7 @@ class PlaybackControl:
                     pass
                     
     def reset_skip_flags(self):
-        """Reset skip flags"""
+        """Reset all skip flags to false."""
         with self.lock:
             self.skip_current = False
             self.skip_all = False
@@ -330,12 +331,12 @@ _cache_lock = threading.Lock()  # Separate lock for cache operations
 
 # Wrapper for module-specific logging
 def log_message(level: str, message: str):
-    """Log a message using centralized logging"""
+    """Log message with module name using centralized logger."""
     _base_log_message(level, message, __name__)
 
 
 def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
-    """Check which TTS providers are accessible based on API keys and environment"""
+    """Check TTS provider accessibility based on API keys and environment."""
     accessible = {}
     
     # System TTS
@@ -409,7 +410,7 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
 
 
 def detect_tts_engine() -> str:
-    """Detect available TTS engine on the system"""
+    """Detect system TTS engine (say, espeak, festival, flite)."""
     engines = [
         ("say", "say"),        # macOS
         ("espeak", "espeak"),  # Linux
@@ -424,13 +425,13 @@ def detect_tts_engine() -> str:
 
 
 def _create_temp_audio_file(suffix: str = ".mp3") -> str:
-    """Create a temporary audio file and return its path"""
+    """Create temporary audio file with given suffix."""
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
         return tmp_file.name
 
 
 def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
-    """Play an audio file using available system players"""
+    """Play audio file using system player (afplay, mpg123, play)."""
     process = None
     
     # Detect and create player process
@@ -476,25 +477,25 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
 
 
 def _cleanup_temp_file(file_path: str):
-    """Safely remove a temporary file"""
+    """Remove temporary file if it exists."""
     if os.path.exists(file_path):
         os.unlink(file_path)
 
 
 def _handle_import_error(library_name: str, install_command: str) -> bool:
-    """Handle import errors for TTS provider libraries"""
+    """Log import error and return False."""
     log_message("ERROR", f"{library_name} library not installed. Run: {install_command}")
     return False
 
 
 def _handle_provider_error(provider_name: str, error: Exception) -> bool:
-    """Handle general provider errors"""
+    """Log provider error and return False."""
     log_message("ERROR", f"{provider_name} TTS failed: {error}")
     return False
 
 
 def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True) -> bool:
-    """Common pattern for synthesizing and playing audio from any provider"""
+    """Synthesize audio via provider function and play it."""
     try:
         # Get audio data from the provider
         audio_data = synthesize_func(text)
@@ -519,7 +520,7 @@ def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = 
 
 
 def validate_provider_config(provider: str) -> bool:
-    """Unified configuration validation for any provider"""
+    """Validate provider configuration and API keys."""
     provider_info = TTS_PROVIDERS.get(provider)
     if not provider_info:
         return True  # System provider, no validation needed
@@ -550,56 +551,29 @@ def validate_provider_config(provider: str) -> bool:
 
 
 class TTSProvider(ABC):
-    """Base class for all TTS providers"""
+    """Base class for all TTS providers."""
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """Initialize provider with optional configuration"""
+        """Initialize provider with optional configuration dict."""
         self.config = config or {}
         self.provider_name = self.__class__.__name__.replace('Provider', '')
     
     @abstractmethod
     def synthesize(self, text: str) -> Optional[bytes]:
-        """Synthesize speech from text and return audio data as bytes
-        
-        Args:
-            text: The text to synthesize
-            
-        Returns:
-            Audio data as bytes, or None if synthesis failed
-        """
+        """Synthesize speech from text, return audio bytes or None."""
         pass
     
     @abstractmethod
     def validate_config(self) -> Tuple[bool, Optional[str]]:
-        """Validate provider configuration
-        
-        Returns:
-            Tuple of (is_valid, error_message)
-        """
+        """Validate provider config, return (is_valid, error_message)."""
         pass
     
     def speak(self, text: str, use_process_control: bool = True) -> bool:
-        """Synthesize and play audio using the common pattern
-        
-        Args:
-            text: The text to speak
-            use_process_control: Whether to allow playback interruption
-            
-        Returns:
-            True if completed successfully, False otherwise
-        """
+        """Synthesize and play audio, return True if successful."""
         return synthesize_and_play(self.synthesize, text, use_process_control)
     
     def get_config_value(self, key: str, default: Any = None) -> Any:
-        """Get configuration value with fallback to environment variable
-        
-        Args:
-            key: Configuration key
-            default: Default value if not found
-            
-        Returns:
-            Configuration value
-        """
+        """Get config value from instance, shared state, or default."""
         # First check instance config
         if key in self.config:
             return self.config[key]
@@ -615,7 +589,7 @@ class TTSProvider(ABC):
 
 
 def _synthesize_openai(text: str) -> Optional[bytes]:
-    """Synthesize speech using OpenAI TTS API"""
+    """Synthesize speech using OpenAI TTS API."""
     import openai
     import io
     
@@ -639,7 +613,7 @@ def _synthesize_openai(text: str) -> Optional[bytes]:
 
 
 def speak_with_openai(text: str) -> bool:
-    """Speak text using OpenAI TTS API"""
+    """Speak text using OpenAI TTS API."""
     try:
         import openai
         # Check for API key is now done by validate_provider_config
@@ -656,7 +630,7 @@ def speak_with_openai(text: str) -> bool:
 
 
 def _synthesize_polly(text: str) -> Optional[bytes]:
-    """Synthesize speech using AWS Polly TTS API"""
+    """Synthesize speech using AWS Polly TTS API."""
     import boto3
     
     # Get configuration from shared state
@@ -680,7 +654,7 @@ def _synthesize_polly(text: str) -> Optional[bytes]:
 
 
 def speak_with_polly(text: str) -> bool:
-    """Speak text using AWS Polly TTS API"""
+    """Speak text using AWS Polly TTS API."""
     try:
         import boto3
         return synthesize_and_play(_synthesize_polly, text, use_process_control=True)
@@ -691,7 +665,7 @@ def speak_with_polly(text: str) -> bool:
 
 
 def _synthesize_azure(text: str) -> Optional[bytes]:
-    """Synthesize speech using Microsoft Azure TTS API"""
+    """Synthesize speech using Microsoft Azure TTS API."""
     import azure.cognitiveservices.speech as speechsdk
     
     # Get configuration from shared state
@@ -733,7 +707,7 @@ def _synthesize_azure(text: str) -> Optional[bytes]:
 
 
 def speak_with_azure(text: str) -> bool:
-    """Speak text using Microsoft Azure TTS API"""
+    """Speak text using Microsoft Azure TTS API."""
     try:
         import azure.cognitiveservices.speech as speechsdk
         return synthesize_and_play(_synthesize_azure, text, use_process_control=True)
@@ -744,7 +718,7 @@ def speak_with_azure(text: str) -> bool:
 
 
 def _synthesize_gcloud(text: str) -> Optional[bytes]:
-    """Synthesize speech using Google Cloud Text-to-Speech API"""
+    """Synthesize speech using Google Cloud Text-to-Speech API."""
     from google.cloud import texttospeech
     
     # Get configuration from shared state
@@ -789,7 +763,7 @@ def _synthesize_gcloud(text: str) -> Optional[bytes]:
 
 
 def speak_with_gcloud(text: str) -> bool:
-    """Speak text using Google Cloud Text-to-Speech API"""
+    """Speak text using Google Cloud Text-to-Speech API."""
     try:
         from google.cloud import texttospeech
         return synthesize_and_play(_synthesize_gcloud, text, use_process_control=True)
@@ -800,7 +774,7 @@ def speak_with_gcloud(text: str) -> bool:
 
 
 def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
-    """Synthesize speech using ElevenLabs TTS API"""
+    """Synthesize speech using ElevenLabs TTS API."""
     import requests
     
     # Get configuration from shared state
@@ -840,7 +814,7 @@ def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
 
 
 def speak_with_elevenlabs(text: str) -> bool:
-    """Speak text using ElevenLabs TTS API"""
+    """Speak text using ElevenLabs TTS API."""
     try:
         import requests
         
@@ -858,7 +832,7 @@ def speak_with_elevenlabs(text: str) -> bool:
 
 
 def _synthesize_deepgram(text: str) -> Optional[bytes]:
-    """Synthesize speech using Deepgram TTS API"""
+    """Synthesize speech using Deepgram TTS API."""
     from deepgram import DeepgramClient, SpeakOptions
     import tempfile
     import os
@@ -903,7 +877,7 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
 
 
 def speak_with_deepgram(text: str) -> bool:
-    """Speak text using Deepgram TTS API"""
+    """Speak text using Deepgram TTS API."""
     try:
         from deepgram import DeepgramClient
         
@@ -933,7 +907,7 @@ TTS_PROVIDERS['polly'] = TTS_PROVIDERS['aws']
 
 
 def context_aware_symbol_replacement(text: str) -> str:
-    """Replace symbols based on their context"""
+    """Replace mathematical and special symbols based on context."""
     # Extract just the filename from file paths before processing
     # Match common file path patterns and replace with just the filename
     def extract_filename(match):
@@ -1007,7 +981,7 @@ def context_aware_symbol_replacement(text: str) -> str:
 
 
 def add_sentence_ending(text: str) -> str:
-    """Add a period to text if it doesn't already end with punctuation"""
+    """Add period if text doesn't end with punctuation."""
     if not text:
         return text
     
@@ -1019,7 +993,7 @@ def add_sentence_ending(text: str) -> str:
 
 
 def clean_punctuation_sequences(text: str) -> str:
-    """Clean up awkward punctuation sequences like '?.' or '!.'"""
+    """Clean awkward punctuation sequences like '?.' or '!'."""
     # Replace punctuation followed by period+space with just the punctuation+space
     text = re.sub(r'([!?:;])\.\s', r'\1 ', text)
     # Replace punctuation followed by period at end with just the punctuation
@@ -1031,7 +1005,7 @@ def clean_punctuation_sequences(text: str) -> str:
 
 
 def extract_speakable_text(text: str) -> (str, str):
-    """Extract only speakable text and convert mathematical symbols"""
+    """Extract speakable text and convert mathematical symbols."""
     # Convert function names: underscores to spaces, drop ()
     text = re.sub(r'(\w+)_(\w+)(?:_(\w+))*\(\)', lambda m: ' '.join(m.group(0).replace('_', ' ').replace('()', '').split()), text)
     text = re.sub(r'(\w+)_(\w+)(?:_(\w+))*', lambda m: ' '.join(m.group(0).split('_')), text)
@@ -1101,7 +1075,7 @@ def extract_speakable_text(text: str) -> (str, str):
 
 
 def is_similar_to_recent(text: str) -> bool:
-    """Check if text is similar to recently spoken text using fuzzy matching"""
+    """Check if text is similar to recently spoken text."""
     current_time = time.time()
 
     with _cache_lock:
@@ -1124,7 +1098,7 @@ def is_similar_to_recent(text: str) -> bool:
 
 
 def speak_text(text: str, engine: str) -> bool:
-    """Speak text using appropriate engine. Returns True if completed, False if interrupted."""
+    """Speak text using appropriate engine, return completion status."""
     if disable_tts:
         return True
 
@@ -1197,7 +1171,7 @@ def speak_with_default(text, engine):
 
 
 def tts_worker(engine: str):
-    """TTS worker thread - reads from queue and speaks"""
+    """Worker thread that reads from queue and speaks text."""
     global current_speech_item, last_speech_end_time
     log_message("INFO", f"Started TTS worker with engine: {engine}")
 
@@ -1239,8 +1213,9 @@ def tts_worker(engine: str):
             except Exception as e:
                 log_message("DEBUG", f"Could not set ASR ignore flag: {e}")
 
-            # Set current speech item with thread safety
+            # Set current speech item with thread safety and record start time
             with _state_lock:
+                speech_item.start_time = time.time()
                 current_speech_item = speech_item
             
             # Include line number in log if available
@@ -1280,7 +1255,7 @@ def tts_worker(engine: str):
 
 
 def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False) -> str:
-    """Queue text for speaking with debouncing"""
+    """Queue text for TTS with debouncing and filtering."""
     global highest_spoken_line_number, last_queued_text, last_queue_time
 
     # Check shared state if available
@@ -1337,8 +1312,14 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
     if auto_skip_tts_enabled and len(speakable_text) > 20:
         log_message("INFO", f"Long text detected ({len(speakable_text)} chars), clearing queue to jump to latest")
 
-        # Check if something is currently playing
+        # Check if something is currently playing and how long it's been playing
         is_currently_playing = playback_control.current_process is not None
+        playing_long_enough = False
+        
+        if is_currently_playing and current_speech_item and current_speech_item.start_time:
+            time_playing = time.time() - current_speech_item.start_time
+            playing_long_enough = time_playing >= 1.0  # Minimum 1 second
+            log_message("DEBUG", f"Current item has been playing for {time_playing:.2f} seconds")
 
         # Clear the queue
         while not tts_queue.empty():
@@ -1351,11 +1332,14 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         if is_currently_playing:
             playback_control.skip_current_item()
 
-            # Add an interjection to make the transition smoother
-            interjection = random.choice(SKIP_INTERJECTIONS)
-            # Prepend the interjection to the text for TTS only
-            speakable_text = f"{interjection}, {speakable_text}"
-            log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
+            # Add an interjection only if the current item has been playing long enough
+            if playing_long_enough:
+                interjection = random.choice(SKIP_INTERJECTIONS)
+                # Prepend the interjection to the text for TTS only
+                speakable_text = f"{interjection}, {speakable_text}"
+                log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
+            else:
+                log_message("DEBUG", "Skipping interjection - current item hasn't played long enough")
 
     with _state_lock:
         last_queued_text = speakable_text
@@ -1394,7 +1378,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
 
 
 def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thread:
-    """Start the TTS worker thread"""
+    """Start TTS worker thread with given engine."""
     global tts_worker_thread, auto_skip_tts_enabled
     auto_skip_tts_enabled = auto_skip_tts
     log_message("INFO", f"TTS worker started with auto_skip_tts={auto_skip_tts}")
@@ -1406,11 +1390,12 @@ def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thre
 
 
 def reset_tts_cache():
-    """Reset TTS caches - useful for testing"""
+    """Reset all TTS caches and queue."""
     global last_queued_text, last_queue_time, highest_spoken_line_number
     
     with _cache_lock:
         spoken_cache.clear()
+        speech_history.clear()
     
     with _state_lock:
         last_queued_text = ""
@@ -1428,7 +1413,7 @@ def reset_tts_cache():
 
 
 def clear_speech_queue():
-    """Clear all pending items from the TTS queue"""
+    """Clear all pending items from TTS queue."""
     items_cleared = 0
     while not tts_queue.empty():
         try:
@@ -1442,7 +1427,7 @@ def clear_speech_queue():
 
 
 def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
-    """Wait for all queued TTS to finish playing. Returns True if finished, False if timed out."""
+    """Wait for TTS queue to finish, return True if completed."""
     start_time = time.time()
     
     # Wait for queue to empty
@@ -1468,7 +1453,7 @@ def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
 
 
 def shutdown_tts():
-    """Shutdown the TTS system gracefully"""
+    """Shutdown TTS system gracefully."""
     global tts_worker_thread
     
     # Signal shutdown
@@ -1489,7 +1474,7 @@ def shutdown_tts():
 
 
 def stop_tts_immediately():
-    """Immediately stop all TTS playback and shutdown - for Ctrl-C handling"""
+    """Stop all TTS immediately for interrupt handling."""
     log_message("INFO", "stop_tts_immediately called - killing all audio")
     # Signal shutdown first to stop the worker thread
     shutdown_event.set()
@@ -1560,25 +1545,25 @@ def stop_tts_immediately():
 
 # Playback control functions
 def pause_playback():
-    """Pause TTS playback"""
+    """Pause TTS playback."""
     playback_control.pause()
     log_message("INFO", "Playback paused")
 
 
 def resume_playback():
-    """Resume TTS playback"""
+    """Resume TTS playback."""
     playback_control.resume()
     log_message("INFO", "Playback resumed")
 
 
 def skip_current():
-    """Skip the currently playing item"""
+    """Skip currently playing TTS item."""
     playback_control.skip_current_item()
     log_message("INFO", "Skipping current item")
 
 
 def skip_all():
-    """Skip all remaining items in the queue"""
+    """Skip all remaining items in queue."""
     playback_control.skip_all_items()
     # Clear the queue
     while not tts_queue.empty():
@@ -1590,7 +1575,7 @@ def skip_all():
 
 
 def navigate_to_previous():
-    """Navigate to previous item in history"""
+    """Navigate to previous item in speech history."""
     with _state_lock:
         if len(speech_history) > 1:
             # Skip current and get previous
@@ -1604,35 +1589,35 @@ def navigate_to_previous():
 
 
 def navigate_to_next():
-    """Skip to next item in queue"""
+    """Skip to next item in TTS queue."""
     playback_control.skip_current_item()
     log_message("INFO", "Navigating to next item")
     return True
 
 
 def get_current_speech_item() -> Optional[SpeechItem]:
-    """Get the currently speaking item"""
+    """Get currently speaking SpeechItem."""
     return current_speech_item
 
 
 def get_speech_history() -> List[SpeechItem]:
-    """Get the speech history"""
+    """Get copy of speech history list."""
     with _state_lock:
         return speech_history.copy()
 
 
 def get_queue_size() -> int:
-    """Get the current size of the speech queue"""
+    """Get current TTS queue size."""
     return tts_queue.qsize()
 
 
 def is_paused() -> bool:
-    """Check if playback is paused"""
+    """Check if TTS playback is paused."""
     return playback_control.is_paused
 
 
 def is_speaking() -> bool:
-    """Check if TTS is currently speaking or recently finished"""
+    """Check if TTS is speaking or recently finished."""
     # Check if actively speaking
     if current_speech_item is not None:
         return True
@@ -1643,12 +1628,12 @@ def is_speaking() -> bool:
 
 
 def get_highest_spoken_line_number() -> int:
-    """Get the highest line number that has been spoken"""
+    """Get highest line number spoken so far."""
     return highest_spoken_line_number
 
 
 def parse_arguments():
-    """Parse command-line arguments for TTS provider selection"""
+    """Parse TTS provider command-line arguments."""
     parser = argparse.ArgumentParser(description='Text-to-Speech with multiple provider support')
     parser.add_argument('--tts-provider', type=str, default=None,
                        choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
@@ -1666,7 +1651,7 @@ def parse_arguments():
 
 
 def configure_tts_provider(args):
-    """Configure TTS provider based on command-line arguments"""
+    """Configure TTS provider from command-line args."""
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id
     
     # Auto-select provider if not specified
@@ -1747,14 +1732,7 @@ def configure_tts_provider(args):
 
 
 def select_best_tts_provider() -> str:
-    """Select the best available TTS provider based on accessibility and preferences.
-    
-    Order of preference:
-    1. Provider from shared state (if accessible)
-    2. TALKITO_PREFERRED_TTS_PROVIDER from environment (if accessible)
-    3. First accessible non-system provider (alphabetically)
-    4. System provider as fallback
-    """
+    """Select best available TTS provider by preference order."""
     # Check shared state first
     state_provider = None
     if SHARED_STATE_AVAILABLE:
@@ -1795,7 +1773,7 @@ def select_best_tts_provider() -> str:
 
 
 def configure_tts_from_dict(config: dict) -> bool:
-    """Configure TTS provider from a configuration dictionary (for use by talkito.py)"""
+    """Configure TTS provider from config dictionary."""
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model
     
     provider = config.get('provider', 'system')
