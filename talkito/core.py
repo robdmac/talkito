@@ -2623,7 +2623,7 @@ def signal_handler(signum, frame=None):
 async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, tts_config: dict = None, record_file: str = None, capture_tts: bool = False, disable_tts: bool = False, show_output: bool = True, command_name: str = None, verbosity: int = 0, log_file: str = None) -> Union[int, List[Tuple[float, str, int]]]:
     """Replay a recorded session file through the TTS pipeline for debugging"""
     global active_profile, terminal, asr_state, verbosity_level
-    
+
     # Initialize terminal state if not already done
     if terminal is None:
         terminal = TerminalState()
@@ -2774,7 +2774,7 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
         last_idx = output_buffer.next_index - 1 if output_buffer.next_index > 0 else 0
         process_remaining_buffer(buffer, last_idx)
     
-    print(f"Replay completed. Total lines in buffer: {output_buffer.get_line_count()}")
+    log_message("DEBUG", f"Replay completed. Total lines in buffer: {output_buffer.get_line_count()}")
     
     # Write recorded data to file if in record mode
     if is_record_mode and recorded_data:
@@ -2796,7 +2796,7 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
     if capture_tts:
         # Wait for all TTS to be processed and captured
         tts.wait_for_tts_to_finish(timeout=300)  # Wait up to 5 minutes
-        tts.shutdown_tts()
+        # Don't shutdown TTS when capturing - we might want to run multiple captures
         return [(0.0, item.text, item.line_number) for item in tts.speech_history]
     else:
         # Wait for all TTS to finish playing
