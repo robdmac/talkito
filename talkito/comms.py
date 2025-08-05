@@ -28,6 +28,7 @@ import signal
 import subprocess
 import sys
 import traceback
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable, Tuple, Deque
@@ -509,8 +510,6 @@ class CommunicationManager:
         self.providers: List[CommsProvider] = []
         self.input_queue: Queue[Message] = Queue()
         self.output_queue: Queue[Message] = Queue()
-        self.webhook_server = None
-        self.webhook_server_thread = None
         self.tunnel_process = None
         self.webhook_url = None
         self.active = False
@@ -639,13 +638,13 @@ class CommunicationManager:
         for provider in self.providers:
             provider.stop()
         
-        if self.webhook_server:
-            # Shutdown the HTTP server
-            try:
-                self.webhook_server.shutdown()
-                log_message("INFO", "Webhook server stopped")
-            except:
-                pass
+        # Unregister webhook endpoints from API server
+        from .api import get_api_server
+        api_server = get_api_server()
+        if api_server.running:
+            api_server.unregister_endpoint('/sms')
+            api_server.unregister_endpoint('/whatsapp')
+            log_message("INFO", "Webhook endpoints unregistered")
         
         if self.tunnel_process:
             try:
@@ -804,77 +803,73 @@ class CommunicationManager:
                 log_message("ERROR", f"Error in output worker: {e}")
     
     def _start_webhook_server(self):
-        """Start HTTP webhook server for Twilio"""
-        # Create custom request handler with access to self
+        """Register webhook endpoints with the API server"""
+        from .api import get_api_server
+        
+        # Get the API server instance
+        api_server = get_api_server()
+        
+        if not api_server.running:
+            log_message("ERROR", "API server is not running. Cannot register webhook endpoints.")
+            return
+        
+        # Create handler functions for each endpoint
         parent_self = self
         
-        class WebhookHandler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                # Override to suppress HTTP server's default logging
-                pass
+        def handle_sms_webhook(data: dict) -> dict:
+            """Handle SMS webhook requests"""
+            from_number = data.get('From', '')
+            body = data.get('Body', '')
+            message_sid = data.get('MessageSid', '')  # Twilio's unique message ID
             
-            def do_POST(self):
-                """Handle POST requests for webhooks."""
-                log_message("INFO", f"[WEBHOOK] Received POST request to {self.path}")
-                
-                # Parse the path
-                parsed_path = urlparse(self.path)
-                channel = parsed_path.path.strip('/')
-                
-                if channel not in ['sms', 'whatsapp']:
-                    log_message("WARNING", f"[WEBHOOK] Invalid channel: {channel}")
-                    self.send_error(404, "Not Found")
-                    return
-                
-                # Read the POST data
-                content_length = int(self.headers.get('Content-Length', 0))
-                post_data = self.rfile.read(content_length).decode('utf-8')
-                
-                # Parse the form data
-                params = parse_qs(post_data)
-                from_number = params.get('From', [''])[0]
-                body = params.get('Body', [''])[0]
-                message_sid = params.get('MessageSid', [''])[0]  # Twilio's unique message ID
-                
-                log_message("INFO", f"[WEBHOOK] Parsed {channel} message from {from_number}: {body}")
-                
-                # Create and handle the message
-                message = Message(
-                    content=body,
-                    sender=from_number,
-                    channel=channel,
-                    message_id=message_sid if message_sid else f"{channel}_{from_number}_{int(time.time()*1000)}"
-                )
-                parent_self._handle_input_message(message)
-                
-                # Send response
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'')
+            log_message("INFO", f"[WEBHOOK] Parsed SMS message from {from_number}: {body}")
             
-            def do_GET(self):
-                """Handle GET requests (for testing)."""
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'Webhook server is running')
+            # Create and handle the message
+            message = Message(
+                content=body,
+                sender=from_number,
+                channel="sms",
+                message_id=message_sid if message_sid else f"sms_{from_number}_{int(time.time()*1000)}"
+            )
+            parent_self._handle_input_message(message)
+            
+            return {
+                'status_code': 200,
+                'headers': {'Content-Type': 'text/plain'},
+                'body': ''
+            }
         
-        # Create and start the server in a separate thread
-        from threading import Thread
+        def handle_whatsapp_webhook(data: dict) -> dict:
+            """Handle WhatsApp webhook requests"""
+            from_number = data.get('From', '')
+            body = data.get('Body', '')
+            message_sid = data.get('MessageSid', '')  # Twilio's unique message ID
+            
+            log_message("INFO", f"[WEBHOOK] Parsed WhatsApp message from {from_number}: {body}")
+            
+            # Create and handle the message
+            message = Message(
+                content=body,
+                sender=from_number,
+                channel="whatsapp",
+                message_id=message_sid if message_sid else f"whatsapp_{from_number}_{int(time.time()*1000)}"
+            )
+            parent_self._handle_input_message(message)
+            
+            return {
+                'status_code': 200,
+                'headers': {'Content-Type': 'text/plain'},
+                'body': ''
+            }
         
-        def run_server():
-            try:
-                server = HTTPServer((self.config.webhook_host, self.config.webhook_port), WebhookHandler)
-                self.webhook_server = server
-                log_message("INFO", f"HTTP webhook server started on {self.config.webhook_host}:{self.config.webhook_port}")
-                server.serve_forever()
-            except Exception as e:
-                log_message("ERROR", f"Failed to start webhook server: {e}")
+        # Register the endpoints
+        api_server.register_endpoint('/sms', handle_sms_webhook)
+        api_server.register_endpoint('/whatsapp', handle_whatsapp_webhook)
         
-        server_thread = Thread(target=run_server, daemon=True)
-        server_thread.start()
-        self.webhook_server_thread = server_thread
+        log_message("INFO", f"Webhook endpoints registered with API server on port {api_server.config.port}")
+        
+        # Update webhook port to match API server
+        self.config.webhook_port = api_server.config.port
         
         # Set up zrok if configured
         if self.config.webhook_use_tunnel:

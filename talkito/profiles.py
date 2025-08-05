@@ -246,7 +246,6 @@ CLAUDE_PROFILE = Profile(
     exception_patterns=[
         (0, r'│\s*✻ Welcome'),                # ✻ Welcome to Claude Code
         (1, r'\s*✻'),                         # Interim thinking
-        (0, r'│ Do'),
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)

@@ -335,7 +335,26 @@ def print_configuration_status(args):
 
     # Force state initialization by importing and accessing it
     from .state import get_shared_state
-    _ = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    
+    # Build comms config to check what's configured
+    comms_config = build_comms_config(args)
+    
+    # Update shared state with configured providers from args/env
+    if comms_config:
+        # Check if providers are configured
+        has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
+        has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
+        
+        # Update shared state
+        shared_state.communication.whatsapp_enabled = has_whatsapp
+        shared_state.communication.slack_enabled = has_slack
+        
+        # Also update recipients/channels
+        if has_whatsapp and comms_config.whatsapp_recipients:
+            shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
+        if has_slack and comms_config.slack_channel:
+            shared_state.communication.slack_channel = comms_config.slack_channel
     
     # Get the status summary using the shared function
     # Pass the configured providers from args if available
