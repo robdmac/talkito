@@ -2969,6 +2969,27 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
 
         comm_manager = comms.setup_communication(providers=providers, config=config)
         core.comm_manager = comm_manager
+        
+        # Update shared state with configured providers
+        if comm_manager:
+            shared_state = get_shared_state()
+            # Check which providers are actually configured
+            has_whatsapp = any(isinstance(p, comms.TwilioWhatsAppProvider) for p in comm_manager.providers)
+            has_slack = any(isinstance(p, comms.SlackProvider) for p in comm_manager.providers)
+            
+            # Update communication config in shared state
+            shared_state.communication.whatsapp_enabled = has_whatsapp
+            shared_state.communication.slack_enabled = has_slack
+            
+            # Also update recipients/channels if available from config
+            if has_whatsapp and config and hasattr(config, 'whatsapp_recipients') and config.whatsapp_recipients:
+                shared_state.communication.whatsapp_to_number = config.whatsapp_recipients[0]
+            if has_slack and config and hasattr(config, 'slack_channel') and config.slack_channel:
+                shared_state.communication.slack_channel = config.slack_channel
+            
+            # Save the state
+            from .state import save_shared_state
+            save_shared_state()
 
     try:
         # Run the command

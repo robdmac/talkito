@@ -3078,7 +3078,6 @@ def main():
                         help='The command that is using this MCP server (e.g., claude)')
     args = parser.parse_args()
     
-    
     # Set up logging if log file specified
     global _log_file_path, _cors_enabled, _running_for_claude
     
