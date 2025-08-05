@@ -305,7 +305,7 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
             if transport == "sse":
                 mcp_url = address+str(port)+"/sse"
                 result = subprocess.run(
-                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport, '--', '--log-file', 'mcplogs.txt'],
+                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport],
                     capture_output=True,
                     text=True
                 )

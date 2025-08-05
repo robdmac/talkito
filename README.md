@@ -2,9 +2,19 @@
 
 TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be used as a command-line tool, a web extension, and as a Python library.
 
-## Quick Start Guide using Claude
+## 🚀 Quick Install
 
-### From Source
+### One-liner (macOS/Linux)
+```bash
+curl -sSL https://raw.githubusercontent.com/robdmac/talkito/main/install.sh | bash
+```
+
+Then just run:
+```bash
+talkito claude
+```
+
+## Install from Source
 
 ```bash
 # Clone the repository
