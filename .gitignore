@@ -258,3 +258,6 @@ $RECYCLE.BIN/
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# PyPI configuration
+.pypirc

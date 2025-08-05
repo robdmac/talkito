@@ -1289,9 +1289,14 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}'")
             return ""
     
-    # Skip additional similarity checks if this text matches the AI prompting the user
-    # TODO improve this
-    if "Do you" not in speakable_text:
+    # Check if we're in tool use mode (between PreToolUse and PostToolUse hooks)
+    in_tool_use = False
+    if SHARED_STATE_AVAILABLE:
+        shared_state = get_shared_state()
+        in_tool_use = shared_state.get_in_tool_use()
+    
+    # Skip similarity checks if we're in tool use mode (prompting the user)
+    if not in_tool_use:
         # Debounce rapidly changing text
         with _state_lock:
             if (last_queued_text and
