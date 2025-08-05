@@ -118,6 +118,57 @@ def update_claude_settings():
     return True
 
 
+def update_claude_hooks(webhook_port=8080):
+    """Update Claude hooks to use webhook server with the correct port"""
+    settings_file = Path(".claude") / "settings.local.json"
+    
+    # Load existing settings
+    settings = {}
+    if settings_file.exists():
+        try:
+            with open(settings_file, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    settings = json.loads(content)
+        except Exception as e:
+            print(f"Warning: Could not load existing settings.json: {e}")
+            return False
+    
+    # Define hook types
+    hook_types = [
+        "SessionStart", "PreToolUse", "PostToolUse", "Notification",
+        "UserPromptSubmit", "Stop", "SubagentStop", "PreCompact"
+    ]
+    
+    # Create hooks structure if it doesn't exist
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+    
+    # Update each hook to use curl command with the correct port
+    for hook_type in hook_types:
+        curl_cmd = f'curl -s -X POST http://127.0.0.1:{webhook_port}/hook -H \'Content-Type: application/json\' -d \'{{\"hook_type\": \"{hook_type}\", \"timestamp\": \"\'$(date -u +%Y-%m-%dT%H:%M:%SZ)\'\"}}\' > /dev/null 2>&1 || true'
+        
+        settings["hooks"][hook_type] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": curl_cmd
+                    }
+                ]
+            }
+        ]
+    
+    # Save updated settings
+    try:
+        with open(settings_file, 'w') as f:
+            json.dump(settings, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error updating hooks: {e}")
+        return False
+
+
 def create_talkito_md():
     """Create TALKITO.md in current directory"""
     talkito_md_path = Path("TALKITO.md")
@@ -254,7 +305,7 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
             if transport == "sse":
                 mcp_url = address+str(port)+"/sse"
                 result = subprocess.run(
-                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport,],
+                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport],
                     capture_output=True,
                     text=True
                 )
@@ -342,121 +393,6 @@ async def run_claude_wrapper(args) -> int:
     return await run_with_talkito(cmd, **kwargs)
 
 
-async def run_claude_with_sse(args) -> int:
-    """Run Claude with SSE MCP server support with fallback mechanisms"""
-    import subprocess
-    import time
-
-    from .mcp import find_available_port
-    
-    # Use specified port or find an available one
-    if args.port:
-        port = args.port
-    else:
-        port = find_available_port(8000)
-    address = "http://127.0.0.1:"
-    sse_process = None
-    claude_process = None
-    
-    # Helper to kill processes
-    def kill_process(proc):
-        if proc and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-    
-    try:
-        # Step A: Run talkito --mcp-sse-server in background
-        print(f"Starting talkito MCP (SSE) server on port {port}...")
-        # Use the installed talkito command if available, otherwise use -m
-        import shutil
-        talkito_cmd = shutil.which('talkito')
-        if talkito_cmd:
-            sse_cmd = [talkito_cmd, "--mcp-sse-server", "--port", str(port)]
-        else:
-            # Fallback to module execution
-            sse_cmd = [sys.executable, "-m", "talkito", "--mcp-sse-server", "--port", str(port)]
-        
-        # Add log file if specified
-        if args.log_file:
-            sse_cmd.extend(["--log-file", args.log_file + ".sse"])
-        
-        # Add TTS/ASR provider arguments if specified
-        if args.tts_provider:
-            sse_cmd.extend(["--tts-provider", args.tts_provider])
-        if args.asr_provider:
-            sse_cmd.extend(["--asr-provider", args.asr_provider])
-        
-        # Pass the client command to indicate this is for Claude
-        if args.command:
-            sse_cmd.extend(["--client-command", args.command])
-
-        sse_process = subprocess.Popen(
-            sse_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True
-        )
-        
-        # Wait a bit for the server to start
-        time.sleep(2)
-        
-        # Check if server started successfully
-        if sse_process.poll() is not None:
-            # Read error output
-            stdout, stderr = sse_process.communicate()
-            error_msg = "SSE server failed to start"
-            if stderr:
-                error_msg += f"\nError: {stderr.decode('utf-8', errors='replace')}"
-            if stdout:
-                error_msg += f"\nOutput: {stdout.decode('utf-8', errors='replace')}"
-            raise Exception(error_msg)
-        
-        # Step C: Run init_claude with SSE configuration
-        if not init_claude(transport="sse", address=address, port=port):
-            raise Exception("Failed to configure Claude for SSE")
-        
-        # Step D: Show configuration status
-        print_configuration_status(args)
-        
-        # Step E: Run Claude
-        print("Starting Claude...")
-        claude_cmd = ["claude"] + args.arguments
-        claude_process = subprocess.run(claude_cmd)
-        
-        return claude_process.returncode
-        
-    except Exception as e:
-        print(f"SSE mode failed: {e}", file=sys.stderr)
-        
-        # Step E: Fallback to stdio mode
-        print("Falling back to stdio mode...")
-        kill_process(sse_process)
-        
-        try:
-            if not init_claude(transport="stdio"):
-                raise Exception("Failed to configure Claude for stdio")
-            
-            # Try Claude again with stdio
-            claude_cmd = ["claude"] + args.arguments
-            claude_process = subprocess.run(claude_cmd)
-            return claude_process.returncode
-            
-        except Exception as e2:
-            print(f"Stdio mode failed: {e2}", file=sys.stderr)
-            
-            # Step F: Fall back to traditional talkito wrapper
-            print("Falling back to traditional talkito wrapper...")
-            return await run_claude_wrapper(args)
-    
-    finally:
-        # Clean up any remaining processes
-        kill_process(sse_process)
-
-
 async def run_claude_hybrid(args) -> int:
     """Run Claude with in-process MCP server and wrapper functionality"""
     import threading
@@ -470,6 +406,9 @@ async def run_claude_hybrid(args) -> int:
     if not port:
         print("Error: Could not find an available port", file=sys.stderr)
         return 1
+    
+    # API port will be port + 1
+    api_port = port + 1
     
     # Set environment variables for provider preferences
     if args.tts_provider:
@@ -585,7 +524,7 @@ async def run_claude_hybrid(args) -> int:
             sys.stderr = stderr_capture
             
             try:
-                # Run the server (this blocks)
+                # Run the FastMCP server (this blocks)
                 app.run(
                     transport="sse",
                     host="127.0.0.1", 
@@ -598,9 +537,6 @@ async def run_claude_hybrid(args) -> int:
                 
                 # Get captured stderr content
                 stderr_content = stderr_capture.getvalue()
-                if stderr_content:
-                    print(f"MCP server stderr output:\n{stderr_content}", file=sys.stderr)
-                
                 print(f"MCP server error: {e}", file=sys.stderr)
                 import traceback
                 traceback.print_exc(file=sys.stderr)
@@ -617,6 +553,28 @@ async def run_claude_hybrid(args) -> int:
             traceback.print_exc(file=sys.stderr)
     
     try:
+        # Start the API server first (for webhooks and Claude hooks)
+        from .api import start_api_server
+        
+        # Determine webhook port - use args if provided, otherwise find available port
+        if hasattr(args, 'webhook_port') and args.webhook_port:
+            webhook_port = args.webhook_port
+        else:
+            # Find available port for API server (start from 8080)
+            webhook_port = find_available_port(8080)
+            if not webhook_port:
+                print("Error: Could not find an available port for API server", file=sys.stderr)
+                return 1
+        
+        # Start API server
+        api_server = start_api_server(port=webhook_port)
+
+        # Update Claude hooks to use the API server
+        update_claude_hooks(webhook_port)
+        
+        # Update args with the webhook port so comms can use it
+        args.webhook_port = webhook_port
+        
         # Start the MCP server thread
         server_thread = threading.Thread(target=run_mcp_server, daemon=True)
         server_thread.start()
@@ -654,7 +612,6 @@ async def run_claude_hybrid(args) -> int:
             setup_logging(args.log_file, mode='a')
 
         # Initialize Claude with SSE configuration
-        print(f"[Main] Configuring Claude to use MCP server at port {port}", file=sys.stderr)
         if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
             print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
         
@@ -795,7 +752,26 @@ def print_configuration_status(args):
 
     # Force state initialization by importing and accessing it
     from .state import get_shared_state
-    _ = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    
+    # Build comms config to check what's configured
+    comms_config = build_comms_config(args)
+    
+    # Update shared state with configured providers from args/env
+    if comms_config:
+        # Check if providers are configured
+        has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
+        has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
+        
+        # Update shared state
+        shared_state.communication.whatsapp_enabled = has_whatsapp
+        shared_state.communication.slack_enabled = has_slack
+        
+        # Also update recipients/channels
+        if has_whatsapp and comms_config.whatsapp_recipients:
+            shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
+        if has_slack and comms_config.slack_channel:
+            shared_state.communication.slack_channel = comms_config.slack_channel
     
     # Get the status summary using the shared function
     # Pass the configured providers from args if available

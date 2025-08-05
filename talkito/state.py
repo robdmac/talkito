@@ -60,6 +60,9 @@ class TalkitoState:
     # Active modes
     voice_mode_active: bool = False
     
+    # Hook tracking
+    in_tool_use: bool = False  # True between PreToolUse and PostToolUse hooks
+    
     # Callbacks for state changes
     _callbacks: Dict[str, List[Callable]] = field(default_factory=dict)
     
@@ -257,6 +260,16 @@ class TalkitoState:
         """Thread-safe getter for asr_provider"""
         with self._lock:
             return self.asr_provider
+    
+    def get_in_tool_use(self) -> bool:
+        """Thread-safe getter for in_tool_use"""
+        with self._lock:
+            return self.in_tool_use
+    
+    def set_in_tool_use(self, in_use: bool):
+        """Set in_tool_use state (thread-safe)"""
+        with self._lock:
+            self.in_tool_use = in_use
 
 
 class SharedStateManager:
@@ -503,12 +516,32 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         else:
             asr_emoji = "🟢" if status["asr"]["initialized"] and status["asr"]["enabled"] else "🔴"
         
-        # Communication status - check shared state instead of comm_manager
+        # Communication status - check both configuration and mode status
         comms = []
-        if shared_state.get_whatsapp_mode_active():
-            comms.append("🟢 WhatsApp")
-        if shared_state.get_slack_mode_active():
-            comms.append("🟢 Slack")
+        
+        # Check if providers are configured (regardless of mode)
+        if comms_manager:
+            has_whatsapp = status["whatsapp"]["configured"]
+            has_slack = status["slack"]["configured"]
+        else:
+            # Check from shared state if comm_manager not available
+            # For WhatsApp: need both recipient number AND enabled flag
+            has_whatsapp = shared_state.communication.whatsapp_enabled and shared_state.communication.whatsapp_to_number is not None
+            # For Slack: need both channel AND enabled flag
+            has_slack = shared_state.communication.slack_enabled and shared_state.communication.slack_channel is not None
+        
+        # Show status based on configuration and mode
+        if has_whatsapp:
+            if shared_state.get_whatsapp_mode_active():
+                comms.append("🟢 WhatsApp")
+            else:
+                comms.append("⚪ WhatsApp")  # Configured but mode not active
+        
+        if has_slack:
+            if shared_state.get_slack_mode_active():
+                comms.append("🟢 Slack")
+            else:
+                comms.append("⚪ Slack")  # Configured but mode not active
         
         return f"TalkiTo: {tts_emoji} TTS ({status['tts']['provider']}) | {asr_emoji} ASR ({status['asr']['provider'] or 'none'}) | Comms: {', '.join(comms) if comms else 'none'}"
         

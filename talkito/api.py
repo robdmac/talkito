@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+
+# Talkito - Universal TTS wrapper that works with any command
+# Copyright (C) 2025 Robert Macrae
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+"""Standalone HTTP API server for talkito - handles Claude hooks and communication webhooks."""
+
+import json
+import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from typing import Dict, Callable, Optional, Any
+from dataclasses import dataclass
+
+from .logs import log_message as _base_log_message
+
+
+def log_message(level: str, message: str, force_console: bool = False) -> None:
+    """Log a message with [API] prefix"""
+    _base_log_message(level, f"[API] {message}", __name__)
+    # Also print critical messages to console if requested
+    if force_console or level in ["ERROR", "CRITICAL"]:
+        print(f"[API] {message}")
+
+
+@dataclass
+class APIConfig:
+    """Configuration for API server"""
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+
+class APIServer:
+    """Standalone API server that can handle various endpoints"""
+    
+    def __init__(self, config: APIConfig):
+        self.config = config
+        self.server: Optional[HTTPServer] = None
+        self.server_thread: Optional[threading.Thread] = None
+        self.endpoints: Dict[str, Callable] = {}
+        self.running = False
+        
+    def register_endpoint(self, path: str, handler: Callable[[dict], dict]) -> None:
+        """Register a handler for a specific endpoint path
+        
+        Args:
+            path: The URL path (e.g., '/hook', '/sms')
+            handler: Function that takes request data dict and returns response dict
+        """
+        self.endpoints[path.strip('/')] = handler
+        log_message("INFO", f"Registered endpoint: /{path.strip('/')}")
+    
+    def unregister_endpoint(self, path: str) -> None:
+        """Unregister a handler for a specific endpoint path"""
+        path = path.strip('/')
+        if path in self.endpoints:
+            del self.endpoints[path]
+            log_message("INFO", f"Unregistered endpoint: /{path}")
+    
+    def start(self) -> bool:
+        """Start the API server"""
+        if self.running:
+            log_message("WARNING", "API server is already running")
+            return True
+        
+        # Create request handler class with access to endpoints
+        parent_self = self
+        
+        class APIHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                # Override to suppress HTTP server's default logging
+                pass
+            
+            def do_POST(self):
+                """Handle POST requests"""
+                # Parse the path
+                parsed_path = urlparse(self.path)
+                endpoint = parsed_path.path.strip('/')
+                
+                # Check if we have a handler for this endpoint
+                if endpoint not in parent_self.endpoints:
+                    self.send_error(404, "Not Found")
+                    return
+                
+                # Read the POST data
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length).decode('utf-8')
+                
+                # Parse data based on content type
+                content_type = self.headers.get('Content-Type', '')
+                
+                try:
+                    if 'application/json' in content_type:
+                        # JSON data
+                        request_data = json.loads(post_data) if post_data else {}
+                    elif 'application/x-www-form-urlencoded' in content_type:
+                        # Form data (used by Twilio)
+                        request_data = {k: v[0] if v else '' for k, v in parse_qs(post_data).items()}
+                    else:
+                        # Raw data
+                        request_data = {'raw_data': post_data}
+                    
+                    # Add headers to request data
+                    request_data['_headers'] = dict(self.headers)
+                    request_data['_path'] = self.path
+                    
+                    # Call the handler
+                    handler = parent_self.endpoints[endpoint]
+                    response = handler(request_data)
+                    
+                    # Send response
+                    status_code = response.get('status_code', 200)
+                    self.send_response(status_code)
+                    
+                    # Set headers
+                    headers = response.get('headers', {})
+                    for key, value in headers.items():
+                        self.send_header(key, value)
+                    
+                    # Default content type if not specified
+                    if 'Content-Type' not in headers:
+                        self.send_header('Content-Type', 'application/json')
+                    
+                    self.end_headers()
+                    
+                    # Send body
+                    body = response.get('body', '')
+                    if isinstance(body, dict):
+                        body = json.dumps(body)
+                    if isinstance(body, str):
+                        body = body.encode()
+                    self.wfile.write(body)
+                    
+                except Exception as e:
+                    log_message("ERROR", f"Error handling {endpoint}: {e}")
+                    self.send_error(500, "Internal Server Error")
+            
+            def do_GET(self):
+                """Handle GET requests (for testing)"""
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                
+                endpoints = list(parent_self.endpoints.keys())
+                response = {
+                    'status': 'running',
+                    'endpoints': endpoints,
+                    'server': 'talkito API server'
+                }
+                self.wfile.write(json.dumps(response).encode())
+        
+        # Create and start the server in a separate thread
+        def run_server():
+            try:
+                self.server = HTTPServer((self.config.host, self.config.port), APIHandler)
+                self.running = True
+                log_message("INFO", f"HTTP API server started on {self.config.host}:{self.config.port}")
+                self.server.serve_forever()
+            except Exception as e:
+                log_message("ERROR", f"Failed to start API server: {e}")
+                self.running = False
+        
+        self.server_thread = threading.Thread(target=run_server, daemon=True)
+        self.server_thread.start()
+        
+        # Wait a moment to ensure server starts
+        time.sleep(0.5)
+        
+        return self.running
+    
+    def stop(self):
+        """Stop the API server"""
+        if self.server:
+            log_message("INFO", "Stopping API server")
+            self.server.shutdown()
+            self.server = None
+        
+        if self.server_thread:
+            self.server_thread.join(timeout=5)
+            self.server_thread = None
+        
+        self.running = False
+
+
+# Default handlers for common endpoints
+def handle_claude_hook(data: dict) -> dict:
+    """Handler for Claude hooks"""
+    hook_type = data.get('hook_type', 'Unknown')
+    timestamp = data.get('timestamp', '')
+    
+    log_message("INFO", f"[CLAUDE HOOK] {hook_type} at {timestamp}")
+    
+    # Update state based on hook type
+    from .state import get_shared_state
+    state = get_shared_state()
+    
+    if hook_type == 'PreToolUse':
+        state.set_in_tool_use(True)
+        log_message("INFO", "Entering tool use mode - prompts will be spoken")
+    elif hook_type == 'PostToolUse':
+        state.set_in_tool_use(False)
+        log_message("INFO", "Exiting tool use mode")
+    
+    return {
+        'status_code': 200,
+        'headers': {'Content-Type': 'application/json'},
+        'body': {'status': 'ok'}
+    }
+
+
+# Singleton instance
+_api_server: Optional[APIServer] = None
+
+
+def get_api_server(config: Optional[APIConfig] = None) -> APIServer:
+    """Get or create the singleton API server instance"""
+    global _api_server
+    
+    if _api_server is None:
+        if config is None:
+            config = APIConfig()
+        _api_server = APIServer(config)
+        # Register default handlers
+        _api_server.register_endpoint('/hook', handle_claude_hook)
+    
+    return _api_server
+
+
+def start_api_server(port: int = 8080, host: str = "0.0.0.0") -> APIServer:
+    """Start the API server with the given configuration"""
+    config = APIConfig(host=host, port=port)
+    server = get_api_server(config)
+    
+    if not server.running:
+        server.start()
+    
+    return server
