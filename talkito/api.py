@@ -21,6 +21,7 @@
 import json
 import time
 import threading
+import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Dict, Callable, Optional, Any
@@ -71,10 +72,14 @@ class APIServer:
             del self.endpoints[path]
             log_message("INFO", f"Unregistered endpoint: /{path}")
     
+    def get_port(self) -> int:
+        """Get the port the server is running on"""
+        return self.config.port
+    
     def start(self) -> bool:
         """Start the API server"""
         if self.running:
-            log_message("WARNING", "API server is already running")
+            log_message("WARNING", f"API server is already running on port {self.config.port}")
             return True
         
         # Create request handler class with access to endpoints
@@ -226,6 +231,20 @@ def handle_claude_hook(data: dict) -> dict:
 _api_server: Optional[APIServer] = None
 
 
+def find_available_port_for_api(start_port: int = 8080, host: str = "0.0.0.0", max_attempts: int = 100) -> Optional[int]:
+    """Find an available port for the API server by testing actual binding"""
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            # Test binding to the actual host we'll use
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+                return port
+        except OSError:
+            continue
+    return None
+
+
 def get_api_server(config: Optional[APIConfig] = None) -> APIServer:
     """Get or create the singleton API server instance"""
     global _api_server
@@ -236,16 +255,64 @@ def get_api_server(config: Optional[APIConfig] = None) -> APIServer:
         _api_server = APIServer(config)
         # Register default handlers
         _api_server.register_endpoint('/hook', handle_claude_hook)
+    elif config is not None and _api_server.config.port != config.port:
+        # Port has changed, need to restart the server
+        log_message("INFO", f"Port changed from {_api_server.config.port} to {config.port}, restarting server")
+        if _api_server.running:
+            _api_server.stop()
+        _api_server = APIServer(config)
+        # Re-register default handlers
+        _api_server.register_endpoint('/hook', handle_claude_hook)
     
     return _api_server
 
 
-def start_api_server(port: int = 8080, host: str = "0.0.0.0") -> APIServer:
+def start_api_server(port: int = None, host: str = "0.0.0.0") -> APIServer:
     """Start the API server with the given configuration"""
+    global _api_server
+    
+    # If there's already a running server, return it unless port changed
+    if _api_server and _api_server.running:
+        if port is None or _api_server.config.port == port:
+            log_message("INFO", f"Using existing API server on port {_api_server.config.port}")
+            return _api_server
+        else:
+            # Stop the existing server if port changed
+            log_message("INFO", f"Stopping existing API server on port {_api_server.config.port}")
+            _api_server.stop()
+            _api_server = None
+    
+    # Find available port if not specified or if specified port is in use
+    if port is None:
+        port = find_available_port_for_api(8080, host)
+        if port is None:
+            log_message("ERROR", "Could not find an available port for API server")
+            return None
+        log_message("INFO", f"Found available port: {port}")
+    else:
+        # Test if the specified port is available
+        test_port = find_available_port_for_api(port, host, max_attempts=1)
+        if test_port is None:
+            log_message("WARNING", f"Port {port} is in use, finding alternative")
+            port = find_available_port_for_api(port + 1, host)
+            if port is None:
+                log_message("ERROR", "Could not find an available port for API server")
+                return None
+            log_message("INFO", f"Using alternative port: {port}")
+    
     config = APIConfig(host=host, port=port)
     server = get_api_server(config)
     
     if not server.running:
-        server.start()
+        if not server.start():
+            log_message("ERROR", f"Failed to start API server on port {port}")
+            # Try to find another port
+            port = find_available_port_for_api(port + 1, host)
+            if port:
+                log_message("INFO", f"Trying alternative port: {port}")
+                config = APIConfig(host=host, port=port)
+                _api_server = None  # Reset singleton
+                server = get_api_server(config)
+                server.start()
     
     return server

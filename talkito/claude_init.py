@@ -134,11 +134,8 @@ def update_claude_hooks(webhook_port=8080):
             print(f"Warning: Could not load existing settings.json: {e}")
             return False
     
-    # Define hook types
-    hook_types = [
-        "SessionStart", "PreToolUse", "PostToolUse", "Notification",
-        "UserPromptSubmit", "Stop", "SubagentStop", "PreCompact"
-    ]
+    # Define hook types needed for making sure we ask questions to the user
+    hook_types = ["PreToolUse", "PostToolUse"]
     
     # Create hooks structure if it doesn't exist
     if "hooks" not in settings:
@@ -568,9 +565,19 @@ async def run_claude_hybrid(args) -> int:
         
         # Start API server
         api_server = start_api_server(port=webhook_port)
+        
+        # Get the actual port the server is running on (might be different if original was in use)
+        if api_server:
+            actual_port = api_server.get_port()
+            if actual_port != webhook_port:
+                webhook_port = actual_port
+        else:
+            print("Warning: API server failed to start", file=sys.stderr)
+            webhook_port = None
 
         # Update Claude hooks to use the API server
-        update_claude_hooks(webhook_port)
+        if webhook_port:
+            update_claude_hooks(webhook_port)
         
         # Update args with the webhook port so comms can use it
         args.webhook_port = webhook_port
