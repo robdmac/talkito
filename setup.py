@@ -50,6 +50,7 @@ extras_require = {
     "azure": ["azure-cognitiveservices-speech>=1.24.0"],
     "gcloud": ["google-cloud-texttospeech>=2.14.0", "google-cloud-speech>=2.20.0"],
     "elevenlabs": ["elevenlabs>=0.2.0"],
+    "kokoro": ["kokoro>=0.9.4", "soundfile>=0.12.0", "numpy<2.0"],
     # ASR providers
     "assemblyai": ["assemblyai>=0.5.0"],
     "deepgram": ["deepgram-sdk>=2.0.0"],
@@ -72,6 +73,9 @@ extras_require = {
         "google-cloud-texttospeech>=2.14.0",
         "google-cloud-speech>=2.20.0",
         "elevenlabs>=0.2.0",
+        "kokoro>=0.9.4",
+        "soundfile>=0.12.0",
+        "numpy<2.0",
         "assemblyai>=0.5.0",
         "deepgram-sdk>=2.0.0",
         "twilio>=8.0.0",

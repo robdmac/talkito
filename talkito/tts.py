@@ -92,6 +92,9 @@ elevenlabs_model_id = os.environ.get('ELEVENLABS_MODEL_ID', 'eleven_monolingual_
 deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')  # Default Deepgram model
 kittentts_model = os.environ.get('KITTENTTS_MODEL', 'KittenML/kitten-tts-nano-0.1')  # Default KittenTTS model
 kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'expr-voice-3-f')  # Default KittenTTS voice
+kokoro_language = os.environ.get('KOKORO_LANGUAGE', 'a')  # Default Kokoro language (American English)
+kokoro_voice = os.environ.get('KOKORO_VOICE', 'af_heart')  # Default Kokoro voice
+kokoro_speed = os.environ.get('KOKORO_SPEED', '1.0')  # Default Kokoro speed
 
 
 def get_tts_config():
@@ -127,6 +130,10 @@ def get_tts_config():
             elif state.tts_provider == 'kittentts':
                 config['voice'] = state.tts_voice or kittentts_voice
                 config['model'] = state.tts_model or kittentts_model
+            elif state.tts_provider == 'kokoro':
+                config['voice'] = state.tts_voice or kokoro_voice
+                config['language'] = state.tts_language or kokoro_language
+                config['speed'] = float(state.tts_rate or kokoro_speed)
             
             return config
         except Exception:
@@ -206,6 +213,16 @@ TTS_PROVIDERS = {
         'display_name': 'KittenTTS',
         'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile',
         'config_keys': ['model', 'voice']
+    },
+    'kokoro': {
+        'func': None,  # Will be set to speak_with_kokoro after function definition
+        'env_var': None,  # Kokoro doesn't need an API key
+        'language_var': 'kokoro_language',
+        'voice_var': 'kokoro_voice',
+        'speed_var': 'kokoro_speed',
+        'display_name': 'KokoroTTS',
+        'install': 'pip install kokoro>=0.9.4 soundfile',
+        'config_keys': ['language', 'voice', 'speed']
     }
 }
 
@@ -425,8 +442,12 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     kittentts_available = False
     kittentts_note = "Ultra-lightweight TTS that runs without GPU (no API key required)"
     try:
-        from kittentts import KittenTTS
-        import soundfile as sf
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            from kittentts import KittenTTS
+            import soundfile as sf
         kittentts_available = True
     except ImportError:
         kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
@@ -434,6 +455,25 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     accessible["kittentts"] = {
         "available": kittentts_available,
         "note": kittentts_note
+    }
+    
+    # KokoroTTS - Check if dependencies are installed
+    kokoro_available = False
+    kokoro_note = "High-quality 82M parameter TTS model (no API key required)"
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            from kokoro import KPipeline
+            import soundfile as sf
+        kokoro_available = True
+    except ImportError:
+        kokoro_note = "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile)"
+    
+    accessible["kokoro"] = {
+        "available": kokoro_available,
+        "note": kokoro_note
     }
     
     return accessible
@@ -566,8 +606,12 @@ def validate_provider_config(provider: str) -> bool:
     if provider == 'kittentts':
         global _kittentts_warning_shown
         try:
-            from kittentts import KittenTTS
-            import soundfile as sf
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+                from kittentts import KittenTTS
+                import soundfile as sf
         except ImportError:
             # Only print the installation message once
             if not _kittentts_warning_shown:
@@ -577,6 +621,22 @@ def validate_provider_config(provider: str) -> bool:
                 print(f"  pip install soundfile")
                 _kittentts_warning_shown = True
             log_message("DEBUG", "KittenTTS dependencies not installed")
+            return False
+    
+    # Special case for KokoroTTS - check if package is installed
+    if provider == 'kokoro':
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+                from kokoro import KPipeline
+                import soundfile as sf
+        except ImportError:
+            print(f"Error: KokoroTTS dependencies not installed")
+            print(f"Please install with:")
+            print(f"  pip install kokoro>=0.9.4 soundfile")
+            log_message("DEBUG", "KokoroTTS dependencies not installed")
             return False
     
     # Special case for AWS Polly - check AWS credentials
@@ -944,8 +1004,12 @@ def speak_with_deepgram(text: str) -> bool:
 def _synthesize_kittentts(text: str) -> Optional[bytes]:
     """Synthesize speech using KittenTTS."""
     try:
-        from kittentts import KittenTTS
-        import soundfile as sf
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            from kittentts import KittenTTS
+            import soundfile as sf
         import tempfile
         import os
         
@@ -1009,6 +1073,89 @@ def speak_with_kittentts(text: str) -> bool:
         return _handle_provider_error("KittenTTS", e)
 
 
+def _synthesize_kokoro(text: str) -> Optional[bytes]:
+    """Synthesize speech using KokoroTTS."""
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            from kokoro import KPipeline
+            import soundfile as sf
+        import tempfile
+        import os
+        
+        # Get configuration from shared state
+        config = get_tts_config()
+        language = config.get('language') or kokoro_language
+        voice = config.get('voice') or kokoro_voice
+        speed = float(config.get('speed') or kokoro_speed)
+        
+        # Create Kokoro pipeline with explicit repo_id to suppress warning
+        pipeline = KPipeline(lang_code=language, repo_id='hexgrad/Kokoro-82M')
+        
+        # Generate audio with the specified voice and speed
+        # Kokoro returns a generator, we need to process all chunks
+        audio_chunks = []
+        for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
+            audio_chunks.append(audio)
+        
+        # Concatenate all audio chunks
+        import numpy as np
+        if audio_chunks:
+            full_audio = np.concatenate(audio_chunks)
+        else:
+            log_message("ERROR", "KokoroTTS generated no audio")
+            return None
+        
+        # Save to temporary WAV file first (Kokoro outputs at 24000 Hz)
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
+            sf.write(tmp_wav.name, full_audio, 24000)
+            tmp_wav_path = tmp_wav.name
+        
+        try:
+            # Convert WAV to MP3 using ffmpeg if available, otherwise use WAV directly
+            if shutil.which('ffmpeg'):
+                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_mp3:
+                    tmp_mp3_path = tmp_mp3.name
+                
+                # Convert to MP3
+                subprocess.run(
+                    ['ffmpeg', '-i', tmp_wav_path, '-acodec', 'mp3', '-ab', '128k', tmp_mp3_path, '-y'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True
+                )
+                
+                # Read MP3 data
+                with open(tmp_mp3_path, 'rb') as f:
+                    audio_data = f.read()
+                
+                # Clean up MP3 file
+                os.unlink(tmp_mp3_path)
+            else:
+                # If ffmpeg not available, use WAV directly
+                with open(tmp_wav_path, 'rb') as f:
+                    audio_data = f.read()
+            
+            return audio_data
+        finally:
+            # Always clean up WAV file
+            if os.path.exists(tmp_wav_path):
+                os.unlink(tmp_wav_path)
+    except Exception as e:
+        log_message("ERROR", f"KokoroTTS synthesis error: {e}")
+        return None
+
+
+def speak_with_kokoro(text: str) -> bool:
+    """Speak text using KokoroTTS."""
+    try:
+        return synthesize_and_play(_synthesize_kokoro, text, use_process_control=True)
+    except Exception as e:
+        return _handle_provider_error("KokoroTTS", e)
+
+
 # Initialize provider functions in the registry
 TTS_PROVIDERS['openai']['func'] = speak_with_openai
 TTS_PROVIDERS['aws']['func'] = speak_with_polly
@@ -1017,6 +1164,7 @@ TTS_PROVIDERS['gcloud']['func'] = speak_with_gcloud
 TTS_PROVIDERS['elevenlabs']['func'] = speak_with_elevenlabs
 TTS_PROVIDERS['deepgram']['func'] = speak_with_deepgram
 TTS_PROVIDERS['kittentts']['func'] = speak_with_kittentts
+TTS_PROVIDERS['kokoro']['func'] = speak_with_kokoro
 
 # Add 'polly' as an alias for 'aws' for backward compatibility
 TTS_PROVIDERS['polly'] = TTS_PROVIDERS['aws']
@@ -1757,7 +1905,7 @@ def parse_arguments():
     """Parse TTS provider command-line arguments."""
     parser = argparse.ArgumentParser(description='Text-to-Speech with multiple provider support')
     parser.add_argument('--tts-provider', type=str, default=None,
-                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts'],
+                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro'],
                        help='TTS provider to use (default: auto-select best available)')
     parser.add_argument('--voice', type=str, default=None,
                        help='Voice to use (provider-specific)')
@@ -1773,7 +1921,7 @@ def parse_arguments():
 
 def configure_tts_provider(args):
     """Configure TTS provider from command-line args."""
-    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, kittentts_model, kittentts_voice
+    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, kittentts_model, kittentts_voice, kokoro_language, kokoro_voice, kokoro_speed
     
     # Auto-select provider if not specified
     provider = args.tts_provider
@@ -1852,8 +2000,12 @@ def configure_tts_provider(args):
     elif tts_provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            from kittentts import KittenTTS
-            import soundfile as sf
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+                from kittentts import KittenTTS
+                import soundfile as sf
         except ImportError:
             print(f"Error: KittenTTS dependencies not installed")
             print(f"Please install with:")
@@ -1864,6 +2016,26 @@ def configure_tts_provider(args):
         if args.voice:
             kittentts_voice = args.voice
         log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
+    
+    elif tts_provider == 'kokoro':
+        # Additional KokoroTTS validation
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+                from kokoro import KPipeline
+                import soundfile as sf
+        except ImportError:
+            print(f"Error: KokoroTTS dependencies not installed")
+            print(f"Please install with:")
+            print(f"  pip install kokoro>=0.9.4 soundfile")
+            return False
+        
+        kokoro_language = args.language if hasattr(args, 'language') else 'a'
+        if args.voice:
+            kokoro_voice = args.voice
+        log_message("INFO", f"Using KokoroTTS with language: {kokoro_language} and voice: {kokoro_voice}")
     
     return True
 
@@ -2001,8 +2173,12 @@ def configure_tts_from_dict(config: dict) -> bool:
     elif provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            from kittentts import KittenTTS
-            import soundfile as sf
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+                from kittentts import KittenTTS
+                import soundfile as sf
         except ImportError:
             print(f"Error: KittenTTS dependencies not installed")
             print(f"Please install with:")
