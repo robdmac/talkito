@@ -408,8 +408,20 @@ async def run_claude_hybrid(args) -> int:
     api_port = port + 1
     
     # Set environment variables for provider preferences
+    # Check if the TTS provider is valid first, fall back to system on macOS if not
     if args.tts_provider:
-        os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+        # Validate the provider before setting it
+        if not tts.validate_provider_config(args.tts_provider):
+            import platform
+            if platform.system() == 'Darwin':  # macOS
+                print(f"Falling back to system TTS provider on macOS")
+                args.tts_provider = 'system'
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = 'system'
+            else:
+                # On non-macOS systems, let it fail as before
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+        else:
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
     if args.asr_provider:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
     
