@@ -79,6 +79,7 @@ SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to ad
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
 disable_tts = False  # Whether to disable TTS completely (for testing)
 tts_provider = "system"  # Current TTS provider (system, openai, polly, azure, gcloud, elevenlabs, deepgram, etc.)
+_kittentts_warning_shown = False  # Track if KittenTTS warning has been shown
 openai_voice = os.environ.get('OPENAI_VOICE', 'alloy')  # Default OpenAI voice
 polly_voice = os.environ.get('AWS_POLLY_VOICE', 'Joanna')  # Default AWS Polly voice
 polly_region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')  # Default AWS region for Polly
@@ -89,6 +90,8 @@ gcloud_language_code = os.environ.get('GCLOUD_LANGUAGE_CODE', 'en-US')  # Defaul
 elevenlabs_voice_id = os.environ.get('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default ElevenLabs voice (Rachel)
 elevenlabs_model_id = os.environ.get('ELEVENLABS_MODEL_ID', 'eleven_monolingual_v1')  # Default ElevenLabs model
 deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')  # Default Deepgram model
+kittentts_model = os.environ.get('KITTENTTS_MODEL', 'KittenML/kitten-tts-nano-0.1')  # Default KittenTTS model
+kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'expr-voice-3-f')  # Default KittenTTS voice
 
 
 def get_tts_config():
@@ -121,6 +124,9 @@ def get_tts_config():
                 config['voice'] = state.tts_voice or elevenlabs_voice_id
             elif state.tts_provider == 'deepgram':
                 config['voice'] = state.tts_voice or deepgram_voice_model
+            elif state.tts_provider == 'kittentts':
+                config['voice'] = state.tts_voice or kittentts_voice
+                config['model'] = state.tts_model or kittentts_model
             
             return config
         except Exception:
@@ -191,6 +197,15 @@ TTS_PROVIDERS = {
         'display_name': 'Deepgram',
         'install': 'pip install deepgram-sdk',
         'config_keys': ['model']
+    },
+    'kittentts': {
+        'func': None,  # Will be set to speak_with_kittentts after function definition
+        'env_var': None,  # KittenTTS doesn't need an API key
+        'model_var': 'kittentts_model',
+        'voice_var': 'kittentts_voice',
+        'display_name': 'KittenTTS',
+        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile',
+        'config_keys': ['model', 'voice']
     }
 }
 
@@ -406,6 +421,21 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         "note": "Requires DEEPGRAM_API_KEY environment variable"
     }
     
+    # KittenTTS - Check if dependencies are installed
+    kittentts_available = False
+    kittentts_note = "Ultra-lightweight TTS that runs without GPU (no API key required)"
+    try:
+        from kittentts import KittenTTS
+        import soundfile as sf
+        kittentts_available = True
+    except ImportError:
+        kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
+    
+    accessible["kittentts"] = {
+        "available": kittentts_available,
+        "note": kittentts_note
+    }
+    
     return accessible
 
 
@@ -531,6 +561,23 @@ def validate_provider_config(provider: str) -> bool:
         print(f"Error: {env_var} environment variable not set")
         print(f"Please set it with: export {env_var}='your-api-key'")
         return False
+    
+    # Special case for KittenTTS - check if package is installed
+    if provider == 'kittentts':
+        global _kittentts_warning_shown
+        try:
+            from kittentts import KittenTTS
+            import soundfile as sf
+        except ImportError:
+            # Only print the installation message once
+            if not _kittentts_warning_shown:
+                print(f"Error: KittenTTS dependencies not installed")
+                print(f"Please install with:")
+                print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+                print(f"  pip install soundfile")
+                _kittentts_warning_shown = True
+            log_message("DEBUG", "KittenTTS dependencies not installed")
+            return False
     
     # Special case for AWS Polly - check AWS credentials
     if provider in ['aws', 'polly']:
@@ -894,6 +941,74 @@ def speak_with_deepgram(text: str) -> bool:
         return _handle_provider_error("Deepgram", e)
 
 
+def _synthesize_kittentts(text: str) -> Optional[bytes]:
+    """Synthesize speech using KittenTTS."""
+    try:
+        from kittentts import KittenTTS
+        import soundfile as sf
+        import tempfile
+        import os
+        
+        # Get configuration from shared state
+        config = get_tts_config()
+        model_name = config.get('model') or kittentts_model
+        voice = config.get('voice') or kittentts_voice
+        
+        # Create KittenTTS model
+        m = KittenTTS(model_name)
+        
+        # Generate audio with the specified voice
+        audio = m.generate(text, voice=voice)
+        
+        # Save to temporary WAV file first (soundfile doesn't support MP3 writing directly)
+        # KittenTTS returns audio at 24000 Hz sample rate
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
+            sf.write(tmp_wav.name, audio, 24000)
+            tmp_wav_path = tmp_wav.name
+        
+        try:
+            # Convert WAV to MP3 using ffmpeg if available, otherwise use WAV directly
+            if shutil.which('ffmpeg'):
+                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_mp3:
+                    tmp_mp3_path = tmp_mp3.name
+                
+                # Convert to MP3
+                subprocess.run(
+                    ['ffmpeg', '-i', tmp_wav_path, '-acodec', 'mp3', '-ab', '128k', tmp_mp3_path, '-y'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True
+                )
+                
+                # Read MP3 data
+                with open(tmp_mp3_path, 'rb') as f:
+                    audio_data = f.read()
+                
+                # Clean up MP3 file
+                os.unlink(tmp_mp3_path)
+            else:
+                # If ffmpeg not available, use WAV directly
+                with open(tmp_wav_path, 'rb') as f:
+                    audio_data = f.read()
+            
+            return audio_data
+        finally:
+            # Always clean up WAV file
+            if os.path.exists(tmp_wav_path):
+                os.unlink(tmp_wav_path)
+    except Exception as e:
+        log_message("ERROR", f"KittenTTS synthesis error: {e}")
+        return None
+
+
+def speak_with_kittentts(text: str) -> bool:
+    """Speak text using KittenTTS."""
+    try:
+        return synthesize_and_play(_synthesize_kittentts, text, use_process_control=True)
+    except Exception as e:
+        return _handle_provider_error("KittenTTS", e)
+
+
 # Initialize provider functions in the registry
 TTS_PROVIDERS['openai']['func'] = speak_with_openai
 TTS_PROVIDERS['aws']['func'] = speak_with_polly
@@ -901,6 +1016,7 @@ TTS_PROVIDERS['azure']['func'] = speak_with_azure
 TTS_PROVIDERS['gcloud']['func'] = speak_with_gcloud
 TTS_PROVIDERS['elevenlabs']['func'] = speak_with_elevenlabs
 TTS_PROVIDERS['deepgram']['func'] = speak_with_deepgram
+TTS_PROVIDERS['kittentts']['func'] = speak_with_kittentts
 
 # Add 'polly' as an alias for 'aws' for backward compatibility
 TTS_PROVIDERS['polly'] = TTS_PROVIDERS['aws']
@@ -1641,7 +1757,7 @@ def parse_arguments():
     """Parse TTS provider command-line arguments."""
     parser = argparse.ArgumentParser(description='Text-to-Speech with multiple provider support')
     parser.add_argument('--tts-provider', type=str, default=None,
-                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
+                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts'],
                        help='TTS provider to use (default: auto-select best available)')
     parser.add_argument('--voice', type=str, default=None,
                        help='Voice to use (provider-specific)')
@@ -1657,7 +1773,7 @@ def parse_arguments():
 
 def configure_tts_provider(args):
     """Configure TTS provider from command-line args."""
-    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id
+    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, kittentts_model, kittentts_voice
     
     # Auto-select provider if not specified
     provider = args.tts_provider
@@ -1733,6 +1849,22 @@ def configure_tts_provider(args):
             deepgram_voice_model = args.voice
         log_message("INFO", f"Using Deepgram TTS with model: {deepgram_voice_model}")
     
+    elif tts_provider == 'kittentts':
+        # Additional KittenTTS validation
+        try:
+            from kittentts import KittenTTS
+            import soundfile as sf
+        except ImportError:
+            print(f"Error: KittenTTS dependencies not installed")
+            print(f"Please install with:")
+            print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+            print(f"  pip install soundfile")
+            return False
+        
+        if args.voice:
+            kittentts_voice = args.voice
+        log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
+    
     return True
 
 
@@ -1779,7 +1911,7 @@ def select_best_tts_provider() -> str:
 
 def configure_tts_from_dict(config: dict) -> bool:
     """Configure TTS provider from config dictionary."""
-    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model
+    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
     
     provider = config.get('provider', 'system')
     tts_provider = provider
@@ -1865,6 +1997,24 @@ def configure_tts_from_dict(config: dict) -> bool:
         if config.get('model'):
             deepgram_voice_model = config['model']
         log_message("INFO", f"Using Deepgram TTS with model: {deepgram_voice_model}")
+    
+    elif provider == 'kittentts':
+        # Additional KittenTTS validation
+        try:
+            from kittentts import KittenTTS
+            import soundfile as sf
+        except ImportError:
+            print(f"Error: KittenTTS dependencies not installed")
+            print(f"Please install with:")
+            print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+            print(f"  pip install soundfile")
+            return False
+        
+        if config.get('voice'):
+            kittentts_voice = config['voice']
+        if config.get('model'):
+            kittentts_model = config['model']
+        log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
     
     return True
 

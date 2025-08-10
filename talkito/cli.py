@@ -121,7 +121,7 @@ def parse_arguments():
     # TTS options
     tts_group = parser.add_argument_group('TTS options')
     tts_group.add_argument('--tts-provider', type=str, 
-                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
+                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts'],
                            help='TTS provider to use')
     tts_group.add_argument('--tts-voice', type=str, 
                            help='Voice to use (provider-specific)')
