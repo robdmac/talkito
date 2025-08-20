@@ -953,8 +953,7 @@ def _process_buffer_and_queue(cleaned_line: str, line: str, buffer: List[str], l
 
 
 def process_line(line: str, buffer: List[str], prev_line: str,
-                 skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[
-    List[str], str, bool]:
+                 skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[List[str], str, bool]:
     """Process a single line and queue text internally. Returns (new_buffer, new_prev_line, detected_prompt)"""
 
     # Check if this is a question line - these should ALWAYS be spoken
@@ -1276,7 +1275,6 @@ def configure_tts_engine(tts_config: dict, auto_skip_tts: bool) -> str:
     tts.start_tts_worker(engine, auto_skip_tts)
     
     # Update shared state
-    from .state import get_shared_state
     shared_state = get_shared_state()
     
     # Get the actual provider that was configured
