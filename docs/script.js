@@ -3,7 +3,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const rotatingText = document.getElementById('rotatingText');
     const rotatingText2 = document.getElementById('rotatingText2');
     
-    const words1 = ['bolt.new', 'claude code', 'any website', 'any app'];
+    const words1 = ['claude code', 'bolt.new', 'any website', 'any app'];
     const words2 = ['talk', 'listen', 'text', 'slack'];
     
     let currentIndex1 = 0;
