@@ -238,6 +238,7 @@ class ASRState:
 # State instances will be created by TalkitoCore
 active_profile: Optional[Profile] = None  # Will be initialized to default profile
 terminal = None  # Will be set by TalkitoCore
+processed_lines_buffer: List[str] = []  # Buffer of processed but unspoken lines for slack context
 asr_state: ASRState = ASRState()  # Will be set by TalkitoCore
 
 class OutputBuffer:
@@ -397,13 +398,26 @@ def setup_logging(log_file_path: Optional[str] = None):
 def send_to_comms(text: str):
     log_message("DEBUG", "send_to_comms")
     """Send text to communication channels if configured"""
-    global comm_manager
+    global comm_manager, processed_lines_buffer
     if comm_manager:
         if text.strip():
-            log_message("DEBUG", f"[COMMS] Sending to comms: {text}...")
+            # Check if we're in slack mode and have buffered lines
+            from .state import get_shared_state
+            shared_state = get_shared_state()
+            final_text = text
+            
+            if shared_state.slack_mode_active and processed_lines_buffer:
+                # Prepend buffered lines as code block for slack
+                buffer_text = '\n'.join(processed_lines_buffer)
+                final_text = f"```\n{buffer_text}\n```\n{text}"
+                log_message("DEBUG", f"[COMMS] Prepended {len(processed_lines_buffer)} buffered lines for slack")
+                # Clear the buffer after using it
+                processed_lines_buffer.clear()
+            
+            log_message("DEBUG", f"[COMMS] Sending to comms: {final_text}...")
             try:
                 # send_output already checks shared state for channels internally
-                comm_manager.send_output(text)
+                comm_manager.send_output(final_text)
             except Exception as e:
                 log_message("ERROR", f"[COMMS] Failed to send to comms: {e}")
     else:
@@ -830,6 +844,15 @@ def update_cursor_position(cursor_row: int, cursor_delta: int, did_scroll: bool)
 
 def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = False) -> Tuple[List[str], str, bool]:
     """Helper to skip a line and return with common pattern"""
+    global processed_lines_buffer
+    # Add cleaned line to processed buffer for slack context
+    cleaned_line = clean_text(line)
+    if cleaned_line and cleaned_line.strip():
+        processed_lines_buffer.append(cleaned_line.strip())
+        # Keep buffer size reasonable (last 20 lines)
+        if len(processed_lines_buffer) > 20:
+            processed_lines_buffer = processed_lines_buffer[-20:]
+    
     terminal.previous_line_was_skipped = True
     send_pending_text()
     return buffer, line, detected_prompt
