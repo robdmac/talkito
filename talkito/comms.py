@@ -330,15 +330,11 @@ class SlackProvider(CommsProvider):
 
     def send_message(self, message: Message) -> bool:
         """Send Slack message."""
-        # print(f"[COMMS DEBUG] SlackProvider.send_message called", file=sys.stderr)
-        # print(f"[COMMS DEBUG] Message: content='{message.content[:50]}...', sender={message.sender}, channel={message.channel}", file=sys.stderr)
-        # print(f"[COMMS DEBUG] Provider active: {self.active}", file=sys.stderr)
-        # print(f"[COMMS DEBUG] self.channel: {self.channel}", file=sys.stderr)
         log_message("DEBUG", f"SlackProvider.send_message called with: content='{message.content[:50]}...', sender={message.sender}, channel={message.channel}")
         
         # Check if provider is active
         if not self.active:
-            log_message("DEBUG", "[COMMS] Provider is not active, returning False", file=sys.stderr)
+            log_message("DEBUG", "[COMMS] Provider is not active, returning False")
             return False
         
         # Check if we're currently rate limited
@@ -367,7 +363,7 @@ class SlackProvider(CommsProvider):
                     thread_ts=message.reply_to
                 )
             except Exception as api_e:
-                log_message("ERROR" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}", file=sys.stderr)
+                log_message("ERROR" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}")
                 print(f"error {type(api_e).__name__}: {str(api_e)}")
                 raise
             

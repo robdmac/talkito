@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-""""Text-to-Speech engine and text processing utilities with TTS engine detection, symbol conversion, and speech synthesis support."""
+"""Text-to-Speech engine and text processing utilities with TTS engine detection, symbol conversion, and speech synthesis support."""
 
 import subprocess
 import shutil
