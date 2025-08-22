@@ -20,7 +20,6 @@
 
 import os
 import re
-import logging
 import time
 import hashlib
 import threading
@@ -28,7 +27,6 @@ import signal
 import subprocess
 import sys
 import traceback
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable, Tuple, Deque
@@ -38,6 +36,14 @@ from difflib import SequenceMatcher
 
 # Import centralized logging utilities
 from .logs import log_message as _base_log_message
+
+# Import shared state for tool use detection
+try:
+    from .state import get_shared_state
+    SHARED_STATE_AVAILABLE = True
+except ImportError:
+    SHARED_STATE_AVAILABLE = False
+    get_shared_state = None
 
 # Try to load .env files if available
 try:
@@ -65,12 +71,6 @@ try:
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
-
-# For webhook server - using Python's built-in HTTP server
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-
-# Tunnel support (using zrok - free, open source, zero trust)
 
 def log_message(level: str, message: str, force_console: bool = False) -> None:
     """Log a message with [COMMS] prefix"""
@@ -249,7 +249,7 @@ class TwilioSMSProvider(TwilioBaseProvider):
                 if len(chunks) > 1:
                     chunk = f"[{i+1}/{len(chunks)}] {chunk}"
                 
-                result = self.client.messages.create(
+                self.client.messages.create(
                     body=chunk,
                     from_=self.phone_number,
                     to=message.sender
@@ -259,7 +259,6 @@ class TwilioSMSProvider(TwilioBaseProvider):
         except Exception as e:
             log_message("ERROR", f"Failed to send SMS: {e}")
             return False
-    
 
 
 class TwilioWhatsAppProvider(TwilioBaseProvider):
@@ -321,7 +320,14 @@ class SlackProvider(CommsProvider):
             log_message("INFO", f"Initialized Slack provider with Socket Mode for channel {self.channel}")
         else:
             log_message("INFO", f"Initialized Slack provider for channel {self.channel} (send-only)")
-    
+
+    def prep_for_slack(self, s: str) -> str:
+        # minimal, safe unescape for common cases
+        return (s.replace('\\r\\n', '\n')
+                .replace('\\n', '\n')
+                .replace('\\r', '\n')
+                .replace('\\t', '\t'))
+
     def send_message(self, message: Message) -> bool:
         """Send Slack message."""
         # print(f"[COMMS DEBUG] SlackProvider.send_message called", file=sys.stderr)
@@ -332,7 +338,7 @@ class SlackProvider(CommsProvider):
         
         # Check if provider is active
         if not self.active:
-            log_message("DEBUG", f"[COMMS DEBUG] Provider is not active, returning False", file=sys.stderr)
+            log_message("DEBUG", "[COMMS] Provider is not active, returning False", file=sys.stderr)
             return False
         
         # Check if we're currently rate limited
@@ -347,10 +353,7 @@ class SlackProvider(CommsProvider):
                 log_message("INFO", "Slack rate limit has been lifted")
         
         try:
-            # Format for code blocks if it looks like terminal output
-            content = message.content
-            if any(char in content for char in ['│', '╰', '├', '└', '⏺']):
-                content = f"```\n{content}\n```"
+            content = self.prep_for_slack(message.content)
             
             # Determine target channel
             target = message.sender if message.sender != self.channel else self.channel
@@ -361,10 +364,11 @@ class SlackProvider(CommsProvider):
                 result = self.client.chat_postMessage(
                     channel=target,
                     text=content,
-                    thread_ts=message.reply_to  # Thread support
+                    thread_ts=message.reply_to
                 )
             except Exception as api_e:
                 log_message("ERROR" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}", file=sys.stderr)
+                print(f"error {type(api_e).__name__}: {str(api_e)}")
                 raise
             
             # Store message timestamp for threading
@@ -492,7 +496,7 @@ class SlackProvider(CommsProvider):
             try:
                 self.socket_client.close()
                 log_message("INFO", "Slack Socket Mode disconnected")
-            except:
+            except Exception:
                 pass
         log_message("INFO", "Slack provider stopped")
 
@@ -504,6 +508,11 @@ class CommunicationManager:
     CACHE_SIZE = 1000  # Cache size for similarity checking
     CACHE_TIMEOUT = 18000  # 5 hours - Seconds before a cached message can be sent again
     SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
+    
+    # Buffer-specific constants
+    BUFFER_CACHE_SIZE = 100  # Cache size for buffer deduplication
+    BUFFER_SIMILARITY_THRESHOLD = 0.90  # Higher threshold for buffer content
+    BUFFER_MAX_LINES = 50  # Maximum lines to keep in buffer
     
     def __init__(self, config: CommsConfig):
         self.config = config
@@ -519,6 +528,11 @@ class CommunicationManager:
         # Message cache to prevent duplicate sends
         self.sent_cache: Deque[Tuple[str, str, float]] = deque(maxlen=self.CACHE_SIZE)  # (content, channel, timestamp)
         self._cache_lock = threading.Lock()
+        
+        # Buffer management for slack context
+        self.processed_lines_buffer: List[str] = []  # Global buffer for processed but unspoken lines
+        self.buffer_cache: Deque[Tuple[str, str, float]] = deque(maxlen=self.BUFFER_CACHE_SIZE)  # (buffer_content, channel, timestamp)
+        self._buffer_lock = threading.Lock()
     
     def _generate_session_id(self) -> str:
         """Generate unique session ID"""
@@ -559,6 +573,66 @@ class CommunicationManager:
         with self._cache_lock:
             self.sent_cache.clear()
         log_message("INFO", "Communication message cache reset")
+    
+    def _is_duplicate_buffer(self, buffer_lines: List[str], channel: str) -> bool:
+        """Check if buffer content is a duplicate"""
+        if not buffer_lines:
+            return False
+            
+        buffer_content = '\n'.join(buffer_lines)
+        
+        with self._buffer_lock:
+            current_time = time.time()
+            
+            # Clean old cache entries
+            while self.buffer_cache and (current_time - self.buffer_cache[0][2]) > self.CACHE_TIMEOUT:
+                self.buffer_cache.popleft()
+            
+            # Check for exact matches first
+            for cached_content, cached_channel, _ in self.buffer_cache:
+                if cached_channel == channel and cached_content == buffer_content:
+                    return True
+            
+            # Check for similarity
+            for cached_content, cached_channel, _ in self.buffer_cache:
+                if cached_channel == channel:
+                    similarity = SequenceMatcher(None, buffer_content.lower(), cached_content.lower()).ratio()
+                    if similarity >= self.BUFFER_SIMILARITY_THRESHOLD:
+                        log_message("INFO", f"Buffer content is {similarity:.2%} similar to cached buffer on {channel}")
+                        return True
+        
+        return False
+    
+    def _add_buffer_to_cache(self, buffer_lines: List[str], channel: str):
+        """Add buffer content to cache"""
+        if not buffer_lines:
+            return
+        buffer_content = '\n'.join(buffer_lines)
+        with self._buffer_lock:
+            self.buffer_cache.append((buffer_content, channel, time.time()))
+    
+    def add_to_buffer(self, line: str, active_profile, verbosity_level: int = 2):
+        """Add a line to the processed lines buffer with verbosity filtering"""
+        if not line or not line.strip():
+            return
+
+        # Check if this line should be filtered based on verbosity level
+        if active_profile.should_skip(line, verbosity_level):
+            log_message("DEBUG", f"#### Filtered buffer line by profile (verbosity={verbosity_level}): '{line[:50]}...'")
+            return
+
+        cleaned_line = line.replace(" │ │", "").strip().replace("│", "")
+        
+        if cleaned_line and any(c.isalnum() for c in cleaned_line):
+            log_message("DEBUG", f"#### Added to buffer ({cleaned_line})")
+            self.processed_lines_buffer.append(cleaned_line)
+            # Keep buffer size reasonable
+            if len(self.processed_lines_buffer) > self.BUFFER_MAX_LINES:
+                self.processed_lines_buffer = self.processed_lines_buffer[-self.BUFFER_MAX_LINES:]
+    
+    def clear_buffer(self):
+        """Clear the processed lines buffer"""
+        self.processed_lines_buffer.clear()
     
     def add_provider(self, provider_type: str, recipients: List[str] = None) -> bool:
         """Add a communication provider - returns True if successful, False otherwise."""
@@ -655,32 +729,36 @@ class CommunicationManager:
                     self.tunnel_process.terminate()
                 self.tunnel_process.wait(timeout=5)
                 log_message("INFO", "Zrok tunnel disconnected")
-            except:
+            except Exception:
                 try:
                     if os.name != 'nt':
                         os.killpg(os.getpgid(self.tunnel_process.pid), signal.SIGKILL)
                     else:
                         self.tunnel_process.kill()
-                except:
+                except Exception:
                     pass
         
         log_message("INFO", "Communication manager stopped")
     
-    def send_output(self, text: str, recipients: List[str] = None):
+    def send_output(self, text: str, recipients: List[str] = None, processed_lines_buffer: List[str] = None):
         """Queue output to be sent to all configured recipients"""
         if not text.strip():
             return
         
         # Check shared state for active modes
-        from .state import get_shared_state
-        shared_state = get_shared_state()
-        
+        shared_state = get_shared_state() if SHARED_STATE_AVAILABLE else None
+
+
         # Send to SMS recipients
         sms_recipients = recipients or self.config.sms_recipients
         for phone in sms_recipients:
-            # Check for duplicate before queuing
+            # Check for duplicate before queuing (skip if in tool use mode)
             channel_key = f"sms:{phone}"
-            if not self._is_duplicate_message(text, channel_key):
+            in_tool_use = False
+            if SHARED_STATE_AVAILABLE and shared_state:
+                in_tool_use = shared_state.get_in_tool_use()
+            
+            if in_tool_use or not self._is_duplicate_message(text, channel_key):
                 msg = Message(
                     content=text,
                     sender=phone,
@@ -699,9 +777,13 @@ class CommunicationManager:
                 whatsapp_recipients.append(shared_state.communication.whatsapp_to_number)
         
         for phone in whatsapp_recipients:
-            # Check for duplicate before queuing
+            # Check for duplicate before queuing (skip if in tool use mode)
             channel_key = f"whatsapp:{phone}"
-            if not self._is_duplicate_message(text, channel_key):
+            in_tool_use = False
+            if SHARED_STATE_AVAILABLE and shared_state:
+                in_tool_use = shared_state.get_in_tool_use()
+            
+            if in_tool_use or not self._is_duplicate_message(text, channel_key):
                 msg = Message(
                     content=text,
                     sender=phone,
@@ -715,23 +797,48 @@ class CommunicationManager:
         
         # Send to Slack (use mode channel if active)
         if any(isinstance(p, SlackProvider) for p in self.providers):
-            slack_channel = self.config.slack_channel
-            if shared_state.slack_mode_active and shared_state.communication.slack_channel:
-                slack_channel = shared_state.communication.slack_channel
+            # Prepare final text with buffer if in slack mode
+            final_text = text.replace("│", "").strip()
+            buffer_lines_to_use = processed_lines_buffer or self.processed_lines_buffer
+
+            if self.config.slack_channel and buffer_lines_to_use:
+                # Check if buffer content is duplicate
+                if not self._is_duplicate_buffer(buffer_lines_to_use, f"slack:{self.config.slack_channel}"):
+                    # Prepend buffered lines as code block for slack
+                    buffer_text = '\n'.join(buffer_lines_to_use)
+                    buffer_text = buffer_text.replace('```', '')  # Escape existing code blocks
+                    final_text = f"```\n{buffer_text}\n```\n{final_text}"
+                    log_message("DEBUG", f"Prepended {len(buffer_lines_to_use)} buffered lines for slack")
+                    
+                    # Add buffer to cache
+                    self._add_buffer_to_cache(buffer_lines_to_use, f"slack:{self.config.slack_channel}")
+                else:
+                    log_message("INFO", f"Skipped duplicate buffer content for Slack {self.config.slack_channel}")
+                
+                # Clear buffer after using (either our internal buffer or passed buffer)
+                if processed_lines_buffer:
+                    processed_lines_buffer.clear()
+                else:
+                    self.clear_buffer()
             
-            # Check for duplicate before queuing
-            channel_key = f"slack:{slack_channel}"
-            if not self._is_duplicate_message(text, channel_key):
+            # Check for duplicate message before queuing (skip if in tool use mode)
+            channel_key = f"slack:{self.config.slack_channel}"
+            in_tool_use = False
+            if SHARED_STATE_AVAILABLE and shared_state:
+                in_tool_use = shared_state.get_in_tool_use()
+            
+            if in_tool_use or not self._is_duplicate_message(final_text, channel_key):
+                log_message("DEBUG", f"#### sending final text {len(final_text)} {final_text} to slack")
                 msg = Message(
-                    content=text,
-                    sender=slack_channel,
+                    content=final_text,
+                    sender=self.config.slack_channel,
                     channel="slack",
                     session_id=self.current_session_id
                 )
                 self.output_queue.put(msg)
-                self._add_to_cache(text, channel_key)
+                self._add_to_cache(final_text, channel_key)
             else:
-                log_message("INFO", f"Recently sent to Slack {slack_channel}: '{text[:50]}...'")
+                log_message("INFO", f"#### Recently sent to Slack {self.config.slack_channel}: '{final_text[:50]}...'")
     
     def get_input(self, timeout: float = None) -> Optional[str]:
         """Get input from communication channels."""
@@ -899,8 +1006,7 @@ class CommunicationManager:
     def _print_webhook_info(self):
         """Print webhook configuration information."""
         # Check if running in Claude wrapper mode
-        from .state import get_shared_state
-        shared_state = get_shared_state()
+        shared_state = get_shared_state() if SHARED_STATE_AVAILABLE else None
         is_wrapper_mode = shared_state and (shared_state.slack_mode_active or shared_state.whatsapp_mode_active)
         
         has_sms = any(isinstance(p, TwilioSMSProvider) for p in self.providers)
@@ -926,14 +1032,14 @@ class CommunicationManager:
                 print(f"  WhatsApp: {self.webhook_url}/whatsapp")
             
             if has_sms or has_whatsapp:
-                print(f"\nAdd these URLs in your Twilio console:\n")
-                print(f"  1. Go to https://console.twilio.com/")
-                print(f"  2. For SMS: Phone Numbers → Manage → Active Numbers → Your Number → Messaging")
-                print(f"  3. For WhatsApp: Messaging → Settings → WhatsApp Sandbox Settings")
-                print(f"  4. Set the webhook URL for incoming messages")
+                print("\nAdd these URLs in your Twilio console:\n")
+                print("  1. Go to https://console.twilio.com/")
+                print("  2. For SMS: Phone Numbers → Manage → Active Numbers → Your Number → Messaging")
+                print("  3. For WhatsApp: Messaging → Settings → WhatsApp Sandbox Settings")
+                print("  4. Set the webhook URL for incoming messages")
             
             if not self.config.zrok_reserved_token:
-                print(f"Note: This URL will change on restart. Use 'zrok reserve' for a permanent URL and set the")
+                print("Note: This URL will change on restart. Use 'zrok reserve' for a permanent URL and set the")
                 print("ZROK_RESERVED_TOKEN env variable so you won't need to update Twilio settings on restart!")
     
     def _read_zrok_output(self, stream, stream_name: str, url_found: threading.Event):
@@ -974,8 +1080,6 @@ class CommunicationManager:
     def _setup_zrok(self):
         """Set up zrok (free, open source, zero trust tunneling)"""
         try:
-            import re
-            
             # Build zrok command
             zrok_cmd = self._build_zrok_command()
             
@@ -1113,7 +1217,7 @@ def run_interactive_mode(manager: CommunicationManager, providers: List[str]):
     # Clear any buffered input and reset terminal
     try:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except:
+    except Exception:
         pass
         
     # Now start interactive mode
@@ -1131,7 +1235,7 @@ def run_interactive_mode(manager: CommunicationManager, providers: List[str]):
                 if incoming:
                     print(f"\n[RECEIVED] {incoming}")
                     print("> ", end='', flush=True)
-            except:
+            except Exception:
                 pass
     
     # Start incoming message handler
@@ -1191,16 +1295,9 @@ if __name__ == "__main__":
     
     # Set up logging
     if args.log_file:
-        # Configure file logging
-        logging.basicConfig(
-            level=getattr(logging, args.log_level),
-            format='[%(asctime)s] [%(levelname)s] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S',
-            filename=args.log_file,
-            filemode='a',
-            force=True
-        )
-        set_logger(logging.getLogger())
+        from .logs import setup_logging
+        setup_logging(args.log_file)
+        print(f"Logging to: {args.log_file}")
         
         # Temporarily set DEBUG for zrok troubleshooting
         if args.log_level != "DEBUG":

@@ -16,10 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-asr.py - Automatic Speech Recognition module
-Demonstrates a more DRY and maintainable approach to supporting multiple ASR providers
-"""
+"""Automatic Speech Recognition module demonstrating a more DRY and maintainable approach to supporting multiple ASR providers."""
 
 # Suppress pkg_resources deprecation warnings from Google Cloud SDK dependencies
 import warnings
@@ -1330,13 +1327,7 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
 
 
 def select_best_asr_provider() -> str:
-    """Select the best available ASR provider based on accessibility and preferences.
-    
-    Order of preference:
-    1. TALKITO_PREFERRED_ASR_PROVIDER from environment (if accessible)
-    2. First accessible non-google provider (alphabetically)
-    3. Google free as fallback
-    """
+    """Select the best available ASR provider based on accessibility and preferences with order: preferred env var, accessible non-google providers, then Google free fallback."""
     preferred = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
     accessible = check_asr_provider_accessibility()
     

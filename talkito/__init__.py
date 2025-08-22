@@ -14,15 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Talkito - Universal TTS wrapper and voice interaction library
-
-This package provides both a command-line interface and a Python API for:
-- Text-to-Speech (TTS) with multiple providers
-- Automatic Speech Recognition (ASR) with multiple providers  
-- Remote communication via SMS, WhatsApp, and Slack
-- Voice-enabled interaction with any command-line program
-"""
+"""Talkito - Universal TTS wrapper and voice interaction library providing TTS, ASR, communication, and voice-enabled CLI interaction."""
 
 from .__version__ import __version__, __author__, __email__, __license__
 
