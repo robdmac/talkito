@@ -56,12 +56,7 @@ class APIServer:
         self.running = False
         
     def register_endpoint(self, path: str, handler: Callable[[dict], dict]) -> None:
-        """Register a handler for a specific endpoint path
-        
-        Args:
-            path: The URL path (e.g., '/hook', '/sms')
-            handler: Function that takes request data dict and returns response dict
-        """
+        """Register a handler for a specific endpoint path - Args: path: The URL path (e.g., '/hook', '/sms'), handler: Function that takes request data dict and returns response dict"""
         self.endpoints[path.strip('/')] = handler
         log_message("INFO", f"Registered endpoint: /{path.strip('/')}")
     

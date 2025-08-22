@@ -16,14 +16,10 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-profiles.py - Program-specific profiles for talkito.py
-Contains pattern matching rules and behavior customization for different CLI programs.
-"""
+"""Program-specific profiles for talkito.py - Contains pattern matching rules and behavior customization for different CLI programs."""
 
 import re
 import argparse
-import sys
 from typing import Dict, List, Tuple, Optional, Pattern, Union
 from dataclasses import dataclass, field
 
@@ -116,6 +112,9 @@ class Profile:
     
     def should_skip(self, line: str, verbosity: int = 0) -> bool:
         """Check if line should be skipped based on cleaned patterns and verbosity level"""
+        if self.is_question_line(line):
+            return False
+
         # Check exception patterns first - these override all skip rules
         for min_verbosity, pattern in self._compiled_exceptions:
             if pattern.search(line) and verbosity >= min_verbosity:
@@ -237,7 +236,7 @@ COMMON_SKIP_PATTERNS = [
 CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
-    continuation_prefix=r'^\s+[-\w()\'"]',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
@@ -245,42 +244,41 @@ CLAUDE_PROFILE = Profile(
     ],
     exception_patterns=[
         (0, r'│\s*✻ Welcome'),                # ✻ Welcome to Claude Code
-        (1, r'\s*✻'),                         # Interim thinking
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
-        (1, r'[A-Z][a-z]+…'),                 # Single words like "Sparkling.", "Running."
         (1, r'Tip:'),                         # Tips
         (1, r'usage limit'),                  # Usage limit messages
         (1, r'to use best available model'),  # Model suggestions
-        (1, r'esc to interrupt'),             # UI hints
         (1, r'Update Todos'),                 # Update Todos
         
-        # Level 2: Filter unless -vv (tool operations, file operations)
-        (1, r'ctrl\s*\+r\s*to\s*expand'),     # UI hints
-        (2, r'^\s*⏺\s+Task\('),               # Claude Code task indicator
-        (2, r'^Task\([^)]+\)'),               # Task() without prefix
-        (2, r'Read \d+ lines'),               # Skip "Read X lines" messages
-        (2, r'Edit file'),
-        (2, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('),  # Tool invocations
-        (2, r'\)…'),
-        (2, r'\/help'),
-        (2, r'cwd:'),
-        (2, r'⎿'),                           # subheadings underneath an edit block like "Wrote 122 lines to x.py"
+        # Level 2: Filter unless -vv (code)
         (2, r'^  \+'),
         (2, r'^  \['),
-        
-        # Level 3: Filter unless -vvv (code content, implementation details)
-        (3, r'import\s+\w+…\)'),              # Skip import statements in tool output
-        (3, r'│'),                            # Skip lines with pipes anywhere
-        (3, r'^\s{2,}\d+\s{2,}[a-zA-Z_#]'),   # Line numbers + code/comments
-        (3, r'/usr/bin/'),                    # Skip shebang path prefix
-        (3, r'^\s{2,}import\s+'),             # Skip indented import statements
-        # (3, r'^\s{2,}[a-zA-Z_]+'),          # Skip any line starting with 2+ spaces followed by code
+        (2, r'import\s+\w+…\)'),              # Import statements in tool output
+        (2, r'     '),                        # Indent usually means code
+        (2, r'  - '),                         # Indent with dash usually means code
+        (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#]'),   # Line numbers + code/comments
+        (2, r'/usr/bin/'),                    # Shebang path prefix
+        (2, r'^\s{2,}import\s+'),             # Indented import statements
+        (2, r'│'),                            # Lines with pipes anywhere
+
+        # Level 3: Filter unless -vvv (tool calling details, implementation details)
+        (3, r'esc to interrupt'),             # UI hints
+        (3, r'ctrl\s*\+r\s*to\s*expand'),     # UI hints
+        (3, r'^\s*⏺\s+Task\('),               # Claude Code task indicator
+        (3, r'^Task\([^)]+\)'),               # Task() without prefix
+        (3, r'Read \d+ lines'),               # Skip "Read X lines" messages
+        (3, r'Edit file'),
+        (3, r'\)…'),
+        (3, r'\/help'),
+        (3, r'^\/'),
+        (3, r'cwd:'),
+        (3, r'⎿'),                           # subheadings underneath an edit block like "Wrote 122 lines to x.py"
+        (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('), # Tool invocations
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
-        (3, r'     '),                        # Indent usually means code
-        (3, r'  - '),                         # Indent with dash usually means code
         (3, r'talkito:'),
+        (3, r'[A-Z][a-z]+(?:-[a-z]+)*…'),     # Single words like "Sparkling.", "Running.", "Higgledy-piggleding"
 
         # Level 4: Always filter (these would need -vvvv which we don't allow)
         (4, r'Error File content'),           # Skip file size error messages
@@ -427,7 +425,7 @@ def test_line(profile: Profile, line: str, verbosity: int):
     # Test raw skip
     raw_skip_reason = profile.get_raw_skip_reason(line)
     if raw_skip_reason:
-        print(f"✗ RAW SKIP: Line matches raw skip pattern")
+        print("✗ RAW SKIP: Line matches raw skip pattern")
         print(f"  - {raw_skip_reason}")
         return
     

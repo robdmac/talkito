@@ -14,9 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Core functionality for talkito - terminal interaction and processing
-"""
+"""Core functionality for talkito - terminal interaction and processing"""
 
 import asyncio
 import atexit
@@ -238,7 +236,6 @@ class ASRState:
 # State instances will be created by TalkitoCore
 active_profile: Optional[Profile] = None  # Will be initialized to default profile
 terminal = None  # Will be set by TalkitoCore
-processed_lines_buffer: List[str] = []  # Buffer of processed but unspoken lines for slack context
 asr_state: ASRState = ASRState()  # Will be set by TalkitoCore
 
 class OutputBuffer:
@@ -384,11 +381,7 @@ class LineBuffer:
 
 # Override the imported setup_logging to add module-specific setup
 def setup_logging(log_file_path: Optional[str] = None):
-    """Set up logging and pass logger to modules that need it
-    
-    Args:
-        log_file_path: Optional path to log file. If provided, enables logging.
-    """
+    """Set up logging configuration with optional log file path."""
     # Import the base setup_logging function with a different name to avoid recursion
     from .logs import setup_logging as base_setup_logging
     
@@ -398,26 +391,13 @@ def setup_logging(log_file_path: Optional[str] = None):
 def send_to_comms(text: str):
     log_message("DEBUG", "send_to_comms")
     """Send text to communication channels if configured"""
-    global comm_manager, processed_lines_buffer
+    global comm_manager
     if comm_manager:
         if text.strip():
-            # Check if we're in slack mode and have buffered lines
-            from .state import get_shared_state
-            shared_state = get_shared_state()
-            final_text = text
-            
-            if shared_state.slack_mode_active and processed_lines_buffer:
-                # Prepend buffered lines as code block for slack
-                buffer_text = '\n'.join(processed_lines_buffer)
-                final_text = f"```\n{buffer_text}\n```\n{text}"
-                log_message("DEBUG", f"[COMMS] Prepended {len(processed_lines_buffer)} buffered lines for slack")
-                # Clear the buffer after using it
-                processed_lines_buffer.clear()
-            
-            log_message("DEBUG", f"[COMMS] Sending to comms: {final_text}...")
+            log_message("DEBUG", f"[COMMS] Sending to comms: {text}...")
             try:
-                # send_output already checks shared state for channels internally
-                comm_manager.send_output(final_text)
+                # send_output now handles buffer logic internally with deduplication and verbosity filtering
+                comm_manager.send_output(text)
             except Exception as e:
                 log_message("ERROR", f"[COMMS] Failed to send to comms: {e}")
     else:
@@ -468,13 +448,7 @@ def send_pending_text():
             send_to_comms(terminal.pending_speech_text)
 
 def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
-    """Queue text for both TTS and communication channels
-    
-    Args:
-        text: The text to queue
-        line_number: Optional line number for tracking
-        exception_match: If True, this text matches a profile exception pattern
-    """
+    """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
     if line_number < terminal.last_line_number:
         log_message("DEBUG", f"queue_output skipping previously seen line number")
@@ -495,6 +469,8 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
         terminal.last_line_number = line_number
         if append:
             log_message("DEBUG", f"queue_output appending")
+            if text.startswith("  "):
+                text = "\n" + text
             terminal.pending_speech_text = terminal.pending_speech_text + text
         else:
             if terminal.pending_speech_text:
@@ -844,14 +820,14 @@ def update_cursor_position(cursor_row: int, cursor_delta: int, did_scroll: bool)
 
 def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = False) -> Tuple[List[str], str, bool]:
     """Helper to skip a line and return with common pattern"""
-    global processed_lines_buffer
-    # Add cleaned line to processed buffer for slack context
+    global comm_manager
+    # Add cleaned line to processed buffer for slack context with higher verbosity (level 2)
     cleaned_line = clean_text(line)
-    if cleaned_line and cleaned_line.strip():
-        processed_lines_buffer.append(cleaned_line.strip())
-        # Keep buffer size reasonable (last 20 lines)
-        if len(processed_lines_buffer) > 20:
-            processed_lines_buffer = processed_lines_buffer[-20:]
+    if cleaned_line and cleaned_line.strip() and '───' not in cleaned_line:
+        log_message("INFO", "adding line to buffer with verbosity level 2 (more verbose)")
+        if comm_manager:
+            # Use the new comm_manager buffer with hard-coded verbosity level 2 for more verbose output
+            comm_manager.add_to_buffer(cleaned_line.strip(), active_profile)
     
     terminal.previous_line_was_skipped = True
     send_pending_text()
@@ -1759,12 +1735,7 @@ def check_tap_to_talk_timeout():
 
 
 def ensure_asr_cleanup():
-    """Ensure ASR is properly cleaned up when disabled.
-    
-    This function handles ASR cleanup when:
-    - MCP disables ASR
-    - ASR encounters errors requiring cleanup
-    """
+    """Ensure ASR is properly cleaned up when MCP disables ASR or errors occur."""
     if not ASR_AVAILABLE:
         return
         
@@ -1794,16 +1765,7 @@ def ensure_asr_cleanup():
 
 
 def ensure_asr_initialized():
-    """Ensure ASR is initialized if it's enabled but not yet initialized.
-    
-    This centralized function handles ASR initialization for all cases:
-    - Initial CLI startup with ASR enabled
-    - MCP enabling ASR after startup
-    - Re-initialization after ASR errors
-    
-    Returns:
-        bool: True if ASR was newly initialized, False otherwise
-    """
+    """Ensure ASR is initialized if it's enabled but not yet initialized; returns True if ASR was newly initialized."""
     if not ASR_AVAILABLE:
         return False
         
