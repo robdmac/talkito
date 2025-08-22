@@ -355,6 +355,8 @@ def print_configuration_status(args):
             shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
         if has_slack and comms_config.slack_channel:
             shared_state.communication.slack_channel = comms_config.slack_channel
+            # Automatically activate slack mode when --slack-channel is provided
+            shared_state.set_slack_mode(True)
     
     # Get the status summary using the shared function
     # Pass the configured providers from args if available

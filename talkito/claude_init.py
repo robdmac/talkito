@@ -16,10 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Claude integration initialization for Talkito
-Handles setting up Claude Desktop configuration and permissions
-"""
+"""Claude integration initialization for Talkito - handles setting up Claude Desktop configuration and permissions"""
 
 import json
 from pathlib import Path
@@ -27,10 +24,6 @@ import subprocess
 import shutil
 import os
 import sys
-import asyncio
-import time
-import threading
-import signal
 from typing import Optional
 
 from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
@@ -38,7 +31,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import run_with_talkito
-from .state import get_status_summary, get_shared_state
+from .state import get_status_summary
 
 
 TALKITO_PERMISSIONS = [
@@ -414,7 +407,7 @@ async def run_claude_hybrid(args) -> int:
         if not tts.validate_provider_config(args.tts_provider):
             import platform
             if platform.system() == 'Darwin':  # macOS
-                print(f"Falling back to system TTS provider on macOS")
+                print("Falling back to system TTS provider on macOS")
                 args.tts_provider = 'system'
                 os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = 'system'
             else:

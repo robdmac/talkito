@@ -16,9 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Template files for Talkito initialization
-"""
+"""Template files for Talkito initialization"""
 
 ENV_EXAMPLE_TEMPLATE = """# Talkito environment configuration template
 # Copy settings from this file to your .env file and fill in the API keys you want to use
