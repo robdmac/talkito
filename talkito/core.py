@@ -14,9 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Core functionality for talkito - terminal interaction and processing
-"""
+"""Core functionality for talkito - terminal interaction and processing"""
 
 import asyncio
 import atexit
@@ -383,11 +381,7 @@ class LineBuffer:
 
 # Override the imported setup_logging to add module-specific setup
 def setup_logging(log_file_path: Optional[str] = None):
-    """Set up logging and pass logger to modules that need it
-    
-    Args:
-        log_file_path: Optional path to log file. If provided, enables logging.
-    """
+    """Set up logging configuration with optional log file path."""
     # Import the base setup_logging function with a different name to avoid recursion
     from .logs import setup_logging as base_setup_logging
     
@@ -402,7 +396,7 @@ def send_to_comms(text: str):
         if text.strip():
             log_message("DEBUG", f"[COMMS] Sending to comms: {text}...")
             try:
-                # send_output already checks shared state for channels internally
+                # send_output now handles buffer logic internally with deduplication and verbosity filtering
                 comm_manager.send_output(text)
             except Exception as e:
                 log_message("ERROR", f"[COMMS] Failed to send to comms: {e}")
@@ -454,13 +448,7 @@ def send_pending_text():
             send_to_comms(terminal.pending_speech_text)
 
 def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
-    """Queue text for both TTS and communication channels
-    
-    Args:
-        text: The text to queue
-        line_number: Optional line number for tracking
-        exception_match: If True, this text matches a profile exception pattern
-    """
+    """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
     if line_number < terminal.last_line_number:
         log_message("DEBUG", f"queue_output skipping previously seen line number")
@@ -481,6 +469,8 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
         terminal.last_line_number = line_number
         if append:
             log_message("DEBUG", f"queue_output appending")
+            if text.startswith("  "):
+                text = "\n" + text
             terminal.pending_speech_text = terminal.pending_speech_text + text
         else:
             if terminal.pending_speech_text:
@@ -828,34 +818,135 @@ def update_cursor_position(cursor_row: int, cursor_delta: int, did_scroll: bool)
     return cursor_row
 
 
+def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = False) -> Tuple[List[str], str, bool]:
+    """Helper to skip a line and return with common pattern"""
+    global comm_manager
+    # Add cleaned line to processed buffer for slack context with higher verbosity (level 2)
+    cleaned_line = clean_text(line)
+    if cleaned_line and cleaned_line.strip() and '───' not in cleaned_line:
+        log_message("INFO", "adding line to buffer with verbosity level 2 (more verbose)")
+        if comm_manager:
+            # Use the new comm_manager buffer with hard-coded verbosity level 2 for more verbose output
+            comm_manager.add_to_buffer(cleaned_line.strip(), active_profile)
+    
+    terminal.previous_line_was_skipped = True
+    send_pending_text()
+    return buffer, line, detected_prompt
+
+
+def _queue_text(text: str, line_number: Optional[int] = None) -> None:
+    """Helper to queue text with exception matching"""
+    exception_match = active_profile and active_profile.matches_exception_pattern(text, verbosity_level)
+    queue_output(strip_profile_symbols(text), line_number, exception_match)
+
+
+def _queue_and_return(text: str, buffer: List[str], line: str, line_number: Optional[int] = None, 
+                     detected_prompt: bool = False) -> Tuple[List[str], str, bool]:
+    """Helper to queue text and return"""
+    _queue_text(text, line_number)
+    return buffer, line, detected_prompt
+
+
+def _should_skip_raw_patterns(line: str) -> bool:
+    """Helper to check if line should be skipped by raw patterns"""
+    if not active_profile:
+        return False
+    
+    # Check using profile's should_skip_raw method
+    if active_profile.should_skip_raw(line):
+        return True
+        
+    # Check raw skip patterns manually
+    if active_profile.raw_skip_patterns:
+        return any(re.search(pattern, line) for pattern in active_profile.raw_skip_patterns)
+    
+    return False
+
+
+def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], line_number: Optional[int] = None) -> Optional[Tuple[List[str], str, bool]]:
+    """Handle continuation line logic. Returns tuple if handled, None otherwise."""
+    if not active_profile or not active_profile.is_continuation_line(cleaned_line):
+        return None
+        
+    if not (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
+        return None
+        
+    log_message("DEBUG", f"Detected continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
+    
+    if terminal.previous_line_was_skipped:
+        log_message("FILTER", f"Skipping continuation line (previous was skipped): '{line[:MAX_LINE_PREVIEW]}...'")
+        return buffer, line, False
+    elif terminal.previous_line_was_queued:
+        if not cleaned_line.strip():
+            send_pending_text()
+        log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
+        _queue_text(cleaned_line, line_number)
+        return [], line, False
+        
+    return None
+
+
+def _handle_response_line(cleaned_line: str, line: str, buffer: List[str], line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Optional[Tuple[List[str], str, bool]]:
+    """Handle response line logic. Returns tuple if handled, None otherwise."""
+    if not is_response_line(cleaned_line):
+        return None
+        
+    asr_state.waiting_for_input = False
+    log_message("DEBUG", f"Set asr_state.waiting_for_input=False in process_line (response detected)")
+    check_and_enable_auto_listen(asr_mode)
+    
+    # Response lines should be spoken unless filtered by profile
+    if active_profile and active_profile.should_skip(cleaned_line, verbosity_level):
+        log_message("FILTER", f"Skipped response by profile (verbosity={verbosity_level}): '{cleaned_line}'")
+        return _skip_line_and_return(buffer, line)
+    
+    log_message("INFO", f"Queueing for speech response line: '{cleaned_line}'")
+    return _queue_and_return(cleaned_line, buffer, line, line_number)
+
+
+def _process_buffer_and_queue(cleaned_line: str, line: str, buffer: List[str], line_number: Optional[int] = None) -> Tuple[List[str], str, bool]:
+    """Process the buffer and handle final queuing logic."""
+    filtered_buffer = [line for line in buffer if line and line.strip()]
+    text_to_speak = '. '.join(filtered_buffer) if filtered_buffer else None
+
+    # Debug suspicious short text
+    if text_to_speak and len(text_to_speak) <= 5:
+        log_message("WARNING", f"Short text_to_speak='{text_to_speak}' from buffer={filtered_buffer}, "
+                                f"cleaned_line='{cleaned_line}', raw_line='{line[:50]}...'")
+
+    new_buffer = [cleaned_line] if cleaned_line and cleaned_line.strip() else []
+
+    if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
+        if text_to_speak:
+            log_message("INFO", f"Queueing buffered text before sentence end")
+            _queue_text(text_to_speak, line_number)
+            return [], line, False
+        return [], line, False
+    
+    if text_to_speak:
+        _queue_text(text_to_speak, line_number)
+    return new_buffer, line, False
+
+
 def process_line(line: str, buffer: List[str], prev_line: str,
-                 skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[
-    Optional[str], List[str], str, bool]:
-    """Process a single line and return (text_to_speak, new_buffer, new_prev_line, detected_prompt)"""
+                 skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[List[str], str, bool]:
+    """Process a single line and queue text internally. Returns (new_buffer, new_prev_line, detected_prompt)"""
 
     # Check if this is a question line - these should ALWAYS be spoken
     if active_profile and active_profile.is_question_line(line):
         log_message("INFO", f"Detected question line: '{line[:MAX_LINE_PREVIEW]}...'")
         asr_state.question_mode = True
         cleaned_line = clean_text(line)
-        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
-        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
+        _queue_text(cleaned_line, line_number)
         terminal.previous_line_was_skipped = True
-        return None, buffer, line, False
+        return buffer, line, False
 
     cleaned_line = clean_text(line)
 
     # Check if this is a continuation line
-    if active_profile and active_profile.is_continuation_line(cleaned_line) and (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
-        log_message("DEBUG", f"Detected continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
-        if terminal.previous_line_was_skipped:
-            log_message("FILTER", f"Skipping continuation line (previous was skipped): '{line[:MAX_LINE_PREVIEW]}...'")
-            return None, buffer, line, False
-        elif terminal.previous_line_was_queued:
-            if not cleaned_line.strip():
-                send_pending_text()
-            log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
-            return cleaned_line, [], line, False
+    continuation_result = _handle_continuation_line(cleaned_line, line, buffer, line_number)
+    if continuation_result is not None:
+        return continuation_result
     elif cleaned_line.strip(): # Reset on non empty lines
         log_message("DEBUG", f"{cleaned_line=} reset previous_line_was_queued and previous_line_was_skipped to false")
         send_pending_text()
@@ -863,18 +954,9 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         terminal.previous_line_was_skipped = False
         terminal.previous_line_was_queued_space_seperated = False
 
-    if active_profile and active_profile.should_skip_raw(line):
+    if _should_skip_raw_patterns(line):
         log_message("WARNING", f"Skipped by raw pattern: '{line[:MAX_LINE_PREVIEW]}...'")
-        terminal.previous_line_was_skipped = True
-        send_pending_text()
-        return None, buffer, line, False
-    elif active_profile and active_profile.raw_skip_patterns:
-        for pattern in active_profile.raw_skip_patterns:
-            if re.search(pattern, line):
-                log_message("WARNING", f"Skipped by raw pattern: '{line[:MAX_LINE_PREVIEW]}...'")
-                terminal.previous_line_was_skipped = True
-                send_pending_text()
-                return None, buffer, line, False
+        return _skip_line_and_return(buffer, line)
 
     # Detect prompts
     is_prompt = (active_profile and active_profile.input_start and active_profile.input_start in line) or is_prompt_line(cleaned_line)
@@ -883,87 +965,37 @@ def process_line(line: str, buffer: List[str], prev_line: str,
     if ">" in cleaned_line and "│" in cleaned_line:
         log_message("DEBUG", f"Checking prompt detection for line: '{cleaned_line[:50]}...' - is_prompt={is_prompt}")
 
-    if is_response_line(cleaned_line):
-        asr_state.waiting_for_input = False
-        log_message("DEBUG", f"Set asr_state.waiting_for_input=False in process_line (response detected)")
-        check_and_enable_auto_listen(asr_mode)
-        
-        # Response lines should be spoken unless filtered by profile
-        # Use the profile's should_skip method which properly handles verbosity and exceptions
-        if active_profile and active_profile.should_skip(cleaned_line, verbosity_level):
-            log_message("FILTER", f"Skipped response by profile (verbosity={verbosity_level}): '{cleaned_line}'")
-            terminal.previous_line_was_skipped = True
-            send_pending_text()
-            return None, buffer, line, False
-        
-        log_message("INFO", f"Queueing for speech response line: '{cleaned_line}'")
-        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
-        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
-        return None, buffer, line, False
+    # Handle response lines
+    response_result = _handle_response_line(cleaned_line, line, buffer, line_number, asr_mode)
+    if response_result is not None:
+        return response_result
 
     # Move prompt detection here, before we process the line
     if is_prompt:
         log_message("INFO", f"Detected prompt in line ({line_number}): '{cleaned_line}'")
-        terminal.previous_line_was_skipped = True
-        send_pending_text()
-        return None, buffer, line, True
+        return _skip_line_and_return(buffer, line, True)
 
     if cleaned_line:
         # Check if extracted text should be filtered based on verbosity
         if active_profile and active_profile.should_skip(cleaned_line, verbosity_level):
             log_message("FILTER", f"Skipped extracted text by profile (verbosity={verbosity_level}): '{cleaned_line}'")
-            terminal.previous_line_was_skipped = True
-            send_pending_text()
-            return None, buffer, line, False
-        exception_match = active_profile and active_profile.matches_exception_pattern(cleaned_line, verbosity_level)
-        queue_output(strip_profile_symbols(cleaned_line), line_number, exception_match)
-        return None, buffer, line, False
+            return _skip_line_and_return(buffer, line)
+        return _queue_and_return(cleaned_line, buffer, line, line_number)
 
     if skip_duplicates and cleaned_line:
         if is_duplicate_screen_content(cleaned_line):
             log_message("WARNING", f"Skipping duplicate content: '{cleaned_line[:MAX_LINE_PREVIEW]}...'")
-            terminal.previous_line_was_skipped = True
-            send_pending_text()
-            return None, buffer, line, False
+            return _skip_line_and_return(buffer, line)
 
     box_content = extract_box_content(cleaned_line)
     if box_content and not is_prompt:
         cleaned_line = box_content
 
     if should_skip_line(cleaned_line):
-        terminal.previous_line_was_skipped = True
-        send_pending_text()
-        return None, buffer, prev_line, False
+        return _skip_line_and_return(buffer, prev_line)
 
-    # if re.match(r'^\s+\S', line) and prev_line:
-    #     log_message("WARNING", f"Processing continuation line")
-    #     continuation_text = clean_text(line).lstrip()
-    #     if continuation_text.strip():
-    #         buffer.append(continuation_text)
-    #     # Don't update state here - buffer append doesn't determine final state
-    #     return None, buffer, line, False
-
-    filtered_buffer = [line for line in buffer if line and line.strip()]
-    text_to_speak = '. '.join(filtered_buffer) if filtered_buffer else None
-
-    # Debug suspicious short text
-    if text_to_speak and len(text_to_speak) <= 5:
-        log_message("WARNING", f"Short text_to_speak='{text_to_speak}' from buffer={filtered_buffer}, "
-                              f"cleaned_line='{cleaned_line}', raw_line='{line[:50]}...'")
-
-    buffer = []
-
-    new_buffer = [cleaned_line] if cleaned_line and cleaned_line.strip() else []
-
-    if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
-        if text_to_speak:
-            log_message("INFO", f"Queueing buffered text before sentence end")
-            exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
-            queue_output(strip_profile_symbols(text_to_speak), line_number, exception_match)
-            return cleaned_line, [], line, False
-        return cleaned_line, [], line, False
-    
-    return text_to_speak, new_buffer, line, False
+    # Process buffer and handle final queuing
+    return _process_buffer_and_queue(cleaned_line, line, buffer, line_number)
 
 
 def detect_screen_reset(data: bytes) -> bool:
@@ -1219,7 +1251,6 @@ def configure_tts_engine(tts_config: dict, auto_skip_tts: bool) -> str:
     tts.start_tts_worker(engine, auto_skip_tts)
     
     # Update shared state
-    from .state import get_shared_state
     shared_state = get_shared_state()
     
     # Get the actual provider that was configured
@@ -1704,12 +1735,7 @@ def check_tap_to_talk_timeout():
 
 
 def ensure_asr_cleanup():
-    """Ensure ASR is properly cleaned up when disabled.
-    
-    This function handles ASR cleanup when:
-    - MCP disables ASR
-    - ASR encounters errors requiring cleanup
-    """
+    """Ensure ASR is properly cleaned up when MCP disables ASR or errors occur."""
     if not ASR_AVAILABLE:
         return
         
@@ -1739,16 +1765,7 @@ def ensure_asr_cleanup():
 
 
 def ensure_asr_initialized():
-    """Ensure ASR is initialized if it's enabled but not yet initialized.
-    
-    This centralized function handles ASR initialization for all cases:
-    - Initial CLI startup with ASR enabled
-    - MCP enabling ASR after startup
-    - Re-initialization after ASR errors
-    
-    Returns:
-        bool: True if ASR was newly initialized, False otherwise
-    """
+    """Ensure ASR is initialized if it's enabled but not yet initialized; returns True if ASR was newly initialized."""
     if not ASR_AVAILABLE:
         return False
         
@@ -2299,12 +2316,9 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                 line_idx, action = output_buffer.add_or_update_line(line)
 
                                 if action in ['added', 'modified']:
-                                    text_to_speak, buffer, prev_line, _ = process_line(
+                                    buffer, prev_line, _ = process_line(
                                         line, buffer, prev_line, False, line_idx, asr_mode
                                     )
-                                    if text_to_speak:
-                                        exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
-                                        queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
                     except:
                         pass
                 else:
@@ -2321,10 +2335,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             line_idx, action = output_buffer.add_or_update_line(line)
 
             if action in ['added', 'modified']:
-                text_to_speak, buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
-                if text_to_speak:
-                    exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
-                    queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
+                buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
 
         if buffer:
             # Use the last line index for any remaining buffer content
@@ -2470,12 +2481,11 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         
         # Only process lines that have been added or modified
         if action in ['added', 'modified']:
-            text_to_speak, text_buffer, prev_line, detected_prompt = process_line(
+            text_buffer, prev_line, detected_prompt = process_line(
                 line, text_buffer, prev_line, skip_duplicates, line_idx, asr_mode
             )
         else:
             # For unchanged lines, don't process but preserve state
-            text_to_speak = None
             detected_prompt = False
 
         response_prefix = active_profile.response_prefix
@@ -2489,10 +2499,6 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             asr_state.refresh_spaces_added = 0  # Reset refresh spaces for new prompt
             log_message("INFO", f"Detected prompt")
             check_and_enable_auto_listen(asr_mode)
-        
-        if text_to_speak:
-            exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
-            queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
     
     return line_buffer, text_buffer, prev_line, cursor_row, detected_prompt
 
@@ -2762,12 +2768,9 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
         line_idx, action = output_buffer.add_or_update_line(line)
         
         if action in ['added', 'modified']:
-            text_to_speak, buffer, prev_line, _ = process_line(
+            buffer, prev_line, _ = process_line(
                 line, buffer, prev_line, skip_duplicate_mode, line_idx, "off"
             )
-            if text_to_speak:
-                exception_match = active_profile and active_profile.matches_exception_pattern(text_to_speak, verbosity_level)
-                queue_output(strip_profile_symbols(text_to_speak), line_idx, exception_match)
     
     # Process any remaining buffer
     if buffer:

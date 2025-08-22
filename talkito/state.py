@@ -1,7 +1,4 @@
-"""
-Shared state manager for Talkito MCP and wrapper integration.
-This ensures configuration changes made through MCP tools affect the wrapper runtime.
-"""
+"""Shared state manager for Talkito MCP and wrapper integration ensuring configuration changes made through MCP tools affect the wrapper runtime."""
 
 import threading
 from typing import Optional, Dict, Any, Callable, List
@@ -448,20 +445,7 @@ def save_shared_state():
 def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channel=None,
                        tts_override=False, asr_override=False, 
                        configured_tts_provider=None, configured_asr_provider=None) -> str:
-    """Generate a one-line status summary for TalkiTo components
-    
-    Args:
-        comms_manager: Communication manager instance (optional)
-        whatsapp_recipient: Current WhatsApp recipient (optional)
-        slack_channel: Current Slack channel (optional)
-        tts_override: Whether TTS is being overridden to show as enabled
-        asr_override: Whether ASR is being overridden to show as enabled
-        configured_tts_provider: TTS provider from command line args (optional)
-        configured_asr_provider: ASR provider from command line args (optional)
-    
-    Returns:
-        One-line formatted status string
-    """
+    """Generate a one-line status summary for TalkiTo components with optional communication manager, recipients, channels, and provider overrides."""
     try:
         # Import needed modules
         from . import tts
