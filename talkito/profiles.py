@@ -278,7 +278,7 @@ CLAUDE_PROFILE = Profile(
         (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('), # Tool invocations
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'talkito:'),
-        (3, r'[A-Z][a-z]+(?:-[a-z]+)*…'),     # Single words like "Sparkling.", "Running.", "Higgledy-piggleding"
+        (3, r'[A-Z][a-z]+(?:-[a-z]+)*[.…]'),     # Single words like "Sparkling.", "Running.", "Higgledy-piggleding"
 
         # Level 4: Always filter (these would need -vvvv which we don't allow)
         (4, r'Error File content'),           # Skip file size error messages
