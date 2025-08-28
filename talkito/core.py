@@ -2626,9 +2626,9 @@ def signal_handler(signum, frame=None):
     os._exit(exit_code)  # type: ignore[attr-defined]
 
 
-async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, tts_config: dict = None, record_file: str = None, capture_tts: bool = False, disable_tts: bool = False, show_output: bool = True, command_name: str = None, verbosity: int = 0, log_file: str = None) -> Union[int, List[Tuple[float, str, int]]]:
+async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, tts_config: dict = None, record_file: str = None, capture_tts: bool = False, disable_tts: bool = False, show_output: bool = True, command_name: str = None, verbosity: int = 0, log_file: str = None, comms_config: Optional["comms.CommsConfig"] = None) -> Union[int, List[Tuple[float, str, int]]]:
     """Replay a recorded session file through the TTS pipeline for debugging"""
-    global active_profile, terminal, asr_state, verbosity_level
+    global active_profile, terminal, asr_state, verbosity_level, comm_manager
 
     # Initialize terminal state if not already done
     if terminal is None:
@@ -2643,6 +2643,52 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
     
     setup_logging(log_file)
     log_message("INFO", f"Replaying recorded session: {replay_file} with verbosity level {verbosity}")
+    
+    # Set up communications if configured - this was missing from replay!
+    if comms_config and COMMS_AVAILABLE:
+        log_message("INFO", "Setting up communication manager for replay session")
+        try:
+            # Extract enabled providers from config
+            providers = []
+            if hasattr(comms_config, 'sms_enabled') and comms_config.sms_enabled:
+                providers.append('sms')
+            if hasattr(comms_config, 'whatsapp_enabled') and comms_config.whatsapp_enabled:
+                providers.append('whatsapp')
+            if hasattr(comms_config, 'slack_enabled') and comms_config.slack_enabled:
+                providers.append('slack')
+
+            if providers:
+                comm_manager = comms.setup_communication(providers=providers, config=comms_config)
+                log_message("INFO", f"Communication manager initialized with providers: {providers}")
+                
+                # Update shared state with configured providers  
+                from .state import get_shared_state
+                shared_state = get_shared_state()
+                
+                if comm_manager:
+                    # Check which providers are actually configured
+                    has_whatsapp = any(isinstance(p, comms.TwilioWhatsAppProvider) for p in comm_manager.providers)
+                    has_slack = any(isinstance(p, comms.SlackProvider) for p in comm_manager.providers)
+                    
+                    # Update communication config in shared state
+                    shared_state.communication.whatsapp_enabled = has_whatsapp
+                    shared_state.communication.slack_enabled = has_slack
+                    
+                    # Set channel info for Slack
+                    if has_slack and hasattr(comms_config, 'slack_channel') and comms_config.slack_channel:
+                        shared_state.communication.slack_channel = comms_config.slack_channel
+                        shared_state.set_slack_mode(True)
+                        log_message("INFO", f"Slack mode activated for channel: {comms_config.slack_channel}")
+            else:
+                log_message("INFO", "No communication providers enabled in config")
+        except Exception as e:
+            log_message("ERROR", f"Failed to set up communication manager: {e}")
+            # Don't fail the replay if communication setup fails
+    else:
+        if not COMMS_AVAILABLE:
+            log_message("DEBUG", "Communication libraries not available")
+        else:
+            log_message("DEBUG", "No communication config provided for replay")
     
     # Set the disable_tts flag in tts module if requested
     if disable_tts:

@@ -451,6 +451,9 @@ async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
     # Build TTS config if specified
     tts_config = build_tts_config(args)
     
+    # Build communication config if specified - this was missing!
+    comms_config = build_comms_config(args)
+    
     # Use the command argument as profile name if provided
     command_name = args.command if args.command else None
     
@@ -465,7 +468,8 @@ async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
         show_output=not args.no_output,
         command_name=command_name,
         verbosity=args.verbose,
-        log_file=args.log_file
+        log_file=args.log_file,
+        comms_config=comms_config  # Pass communication config to replay
     )
     
     # Handle capture_tts output
