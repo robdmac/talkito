@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import tts
 from .profiles import get_profile, Profile
-from .logs import setup_logging, get_logger, log_message, restore_stderr, log_debug, is_logging_enabled
+from .logs import setup_logging, get_logger, log_message, restore_stderr, is_logging_enabled
 from .state import get_shared_state
 from .tts import stop_tts_immediately
 
@@ -302,7 +302,6 @@ class LineBuffer:
 
     def _find_similar_line(self, content: str) -> Optional[int]:
         """Find a similar line in recent history"""
-        content_hash = self._compute_line_hash(content)
         content_len = len(content)
         
         # Pre-filter: only check lines with similar length
@@ -379,14 +378,6 @@ class LineBuffer:
         return len(self.lines)
 
 
-# Override the imported setup_logging to add module-specific setup
-def setup_logging(log_file_path: Optional[str] = None):
-    """Set up logging configuration with optional log file path."""
-    # Import the base setup_logging function with a different name to avoid recursion
-    from .logs import setup_logging as base_setup_logging
-    
-    # Use centralized logging setup
-    base_setup_logging(log_file_path)
 
 def send_to_comms(text: str):
     log_message("DEBUG", "send_to_comms")
@@ -451,7 +442,7 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
     """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
     if line_number < terminal.last_line_number:
-        log_message("DEBUG", f"queue_output skipping previously seen line number")
+        log_message("DEBUG", "queue_output skipping previously seen line number")
     elif text and text.strip():
         # Check if TTS is enabled before accumulating text
         shared_state = get_shared_state()
@@ -468,7 +459,7 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
         append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
         terminal.last_line_number = line_number
         if append:
-            log_message("DEBUG", f"queue_output appending")
+            log_message("DEBUG", "queue_output appending")
             if text.startswith("  "):
                 text = "\n" + text
             terminal.pending_speech_text = terminal.pending_speech_text + text
@@ -865,13 +856,30 @@ def _should_skip_raw_patterns(line: str) -> bool:
 
 def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], line_number: Optional[int] = None) -> Optional[Tuple[List[str], str, bool]]:
     """Handle continuation line logic. Returns tuple if handled, None otherwise."""
-    if not active_profile or not active_profile.is_continuation_line(cleaned_line):
+    is_regular_continuation = active_profile and active_profile.is_continuation_line(cleaned_line)
+    
+    # Only treat interaction menu lines as continuations if Slack communications are active
+    is_interaction_menu = False
+    if active_profile and active_profile.is_interaction_menu_line(cleaned_line):
+        # Check if Slack communications are active
+        shared_state = get_shared_state()
+        is_interaction_menu = shared_state.slack_mode_active if shared_state else False
+        
+        if is_interaction_menu:
+            log_message("DEBUG", f"Detected interaction menu line (Slack mode active): '{line[:MAX_LINE_PREVIEW]}...'")
+        else:
+            log_message("DEBUG", f"Interaction menu detected but Slack not active, treating as normal line: '{line[:MAX_LINE_PREVIEW]}...'")
+    
+    if not (is_regular_continuation or is_interaction_menu):
         return None
         
     if not (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
         return None
         
-    log_message("DEBUG", f"Detected continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
+    if is_interaction_menu:
+        log_message("DEBUG", f"Processing interaction menu line as continuation: '{line[:MAX_LINE_PREVIEW]}...'")
+    else:
+        log_message("DEBUG", f"Processing regular continuation line: '{line[:MAX_LINE_PREVIEW]}...'")
     
     if terminal.previous_line_was_skipped:
         log_message("FILTER", f"Skipping continuation line (previous was skipped): '{line[:MAX_LINE_PREVIEW]}...'")
@@ -879,7 +887,10 @@ def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], l
     elif terminal.previous_line_was_queued:
         if not cleaned_line.strip():
             send_pending_text()
-        log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
+        if is_interaction_menu:
+            log_message("INFO", f"Processing interaction menu line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
+        else:
+            log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
         _queue_text(cleaned_line, line_number)
         return [], line, False
         
@@ -892,7 +903,7 @@ def _handle_response_line(cleaned_line: str, line: str, buffer: List[str], line_
         return None
         
     asr_state.waiting_for_input = False
-    log_message("DEBUG", f"Set asr_state.waiting_for_input=False in process_line (response detected)")
+    log_message("DEBUG", "Set asr_state.waiting_for_input=False in process_line (response detected)")
     check_and_enable_auto_listen(asr_mode)
     
     # Response lines should be spoken unless filtered by profile
@@ -918,7 +929,7 @@ def _process_buffer_and_queue(cleaned_line: str, line: str, buffer: List[str], l
 
     if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
         if text_to_speak:
-            log_message("INFO", f"Queueing buffered text before sentence end")
+            log_message("INFO", "Queueing buffered text before sentence end")
             _queue_text(text_to_speak, line_number)
             return [], line, False
         return [], line, False
@@ -1054,7 +1065,7 @@ def handle_alternate_screen_buffer(data: bytes) -> bool:
     """Detect and handle alternate screen buffer switches"""
     for seq in ALT_SCREEN_SEQUENCES:
         if seq in data:
-            log_message("INFO", f"Alternate screen buffer switch detected")
+            log_message("INFO", "Alternate screen buffer switch detected")
             return True
 
     return False
@@ -1275,7 +1286,7 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
     if is_logging_enabled():
         log_message("DEBUG", f"[process_pty_output] Called with {len(data)} bytes of data")
     if b'\xe2\x8f\xba' in data:
-        log_message("INFO", f"[process_pty_output] Data contains response marker!")
+        log_message("INFO", "[process_pty_output] Data contains response marker!")
     
     if recorder.enabled:
         recorder.record_event('OUTPUT', data)
@@ -1305,7 +1316,7 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
     
     # Also log when we detect clear sequences
     if b'\x1b[2K' in data:
-        log_message("DEBUG", f"Data contains clear line sequences (\\x1b[2K found)")
+        log_message("DEBUG", "Data contains clear line sequences (\\x1b[2K found)")
     
     if has_clear_sequences:
         log_message("DEBUG", "Clear sequences detected - processing all buffered lines")
@@ -1914,7 +1925,7 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     # If ASR was explicitly enabled via MCP when CLI had it off, treat as auto-input
     if asr_mode == "off" and shared_state.asr_enabled:
         asr_mode = "auto-input"
-        log_message("DEBUG", f"ASR enabled via MCP, overriding CLI mode to auto-input")
+        log_message("DEBUG", "ASR enabled via MCP, overriding CLI mode to auto-input")
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
@@ -2072,7 +2083,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
         # Terminal state tracking
         in_alternate_buffer = False
-        buffer_switch_time = 0
         consecutive_redraws = 0
         last_redraw_time = 0
         skip_duplicate_mode = False
@@ -2255,7 +2265,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                             import traceback
                             log_message("ERROR", f"Traceback: {traceback.format_exc()}")
                     
-                    log_message("DEBUG", f"After stdout write/flush")
+                    log_message("DEBUG", "After stdout write/flush")
 
                     # Removed buffer switch delay to ensure all lines are processed
 
@@ -2311,7 +2321,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                     line = line_bytes.decode('utf-8')
                                 except UnicodeDecodeError:
                                     # Skip malformed lines
-                                    log_message("WARNING", f"Skipping malformed UTF-8 line")
+                                    log_message("WARNING", "Skipping malformed UTF-8 line")
                                     continue
                                 line_idx, action = output_buffer.add_or_update_line(line)
 
@@ -2497,7 +2507,7 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         if detected_prompt:
             asr_state.waiting_for_input = True
             asr_state.refresh_spaces_added = 0  # Reset refresh spaces for new prompt
-            log_message("INFO", f"Detected prompt")
+            log_message("INFO", "Detected prompt")
             check_and_enable_auto_listen(asr_mode)
     
     return line_buffer, text_buffer, prev_line, cursor_row, detected_prompt
@@ -2719,9 +2729,6 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
     if not engine:
         return 1
 
-    # Set up TTS capture if requested
-    tts_outputs = []
-
     # Parse recorded session
     entries = SessionRecorder.parse_file(replay_file)
     if not entries:
@@ -2762,7 +2769,6 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
             # Process output data like run_command does
             if handle_alternate_screen_buffer(raw_bytes):
                 in_alternate_buffer = not in_alternate_buffer
-                buffer_switch_time = time.time()
                 current_cursor_row = clear_terminal_state(output_buffer, 1)
 
             # Parse cursor movements
@@ -2879,7 +2885,7 @@ class TalkitoCore:
         Args:
             log_file_path: Optional path to log file. If provided, enables logging.
         """
-        # Use the global setup_logging function
+        # Use the imported setup_logging function
         setup_logging(log_file_path)
         self.logger = get_logger(__name__)  # Get logger using centralized function
     
