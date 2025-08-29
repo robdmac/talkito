@@ -63,6 +63,7 @@ class Profile:
     _compiled_exceptions: List[Tuple[int, Pattern]] = field(default_factory=list, init=False)  # (max_verbosity, pattern)
     _compiled_continuation: Optional[Pattern] = field(default=None, init=False)
     _compiled_question: Optional[Pattern] = field(default=None, init=False)
+    _compiled_interaction_menu: List[Pattern] = field(default_factory=list, init=False)
     
     def __post_init__(self):
         """Compile all regex patterns for efficiency"""
@@ -98,6 +99,18 @@ class Profile:
         # Compile question prefix pattern
         if self.question_prefix:
             self._compiled_question = re.compile(self.question_prefix)
+        
+        # Compile interaction menu patterns (for Claude Code interactive menus)
+        interaction_menu_patterns = [
+            r'❯\s*\d+\.',           # ❯ 1. Yes
+            r'\s*\d+\.\s*Yes',      # 1. Yes 
+            r'\s*\d+\.\s*No',       # 1. No
+            r'\(shift\+tab\)',      # (shift+tab)
+            r'\(esc\)',             # (esc)
+            r'don\'t ask again',    # don't ask again options
+            r'tell Claude what',    # tell Claude what to do differently
+        ]
+        self._compiled_interaction_menu = [re.compile(p, re.IGNORECASE) for p in interaction_menu_patterns]
 
     def should_skip_raw(self, line: str) -> bool:
         """Check if line should be skipped based on raw patterns"""
@@ -197,6 +210,10 @@ class Profile:
         if self._compiled_question:
             return self._compiled_question.search(line) is not None
         return False
+    
+    def is_interaction_menu_line(self, line: str) -> bool:
+        """Check if line is part of an interactive menu (options following a question)"""
+        return any(pattern.search(line) for pattern in self._compiled_interaction_menu)
 
     def is_input_start(self, line: str) -> bool:
         """Check if line is the start of an input block"""

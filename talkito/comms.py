@@ -508,7 +508,7 @@ class CommunicationManager:
     # Buffer-specific constants
     BUFFER_CACHE_SIZE = 100  # Cache size for buffer deduplication
     BUFFER_SIMILARITY_THRESHOLD = 0.90  # Higher threshold for buffer content
-    BUFFER_MAX_LINES = 50  # Maximum lines to keep in buffer
+    BUFFER_MAX_LINES = 100000  # Maximum lines to keep in buffer
     
     def __init__(self, config: CommsConfig):
         self.config = config
