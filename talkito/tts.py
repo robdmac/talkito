@@ -363,7 +363,7 @@ def log_message(level: str, message: str):
     _base_log_message(level, message, __name__)
 
 
-def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
+def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str, Dict[str, Any]]:
     """Check TTS provider accessibility based on API keys and environment."""
     accessible = {}
     
@@ -444,7 +444,35 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             from kittentts import KittenTTS
             import soundfile as sf
-        kittentts_available = True
+        # Check if the model is cached
+        from .models import check_model_cached, with_download_progress
+        model_name = kittentts_model  # Use the actual configured model name
+        if not check_model_cached('kittentts', model_name):
+            # Only prompt for download if this provider was specifically requested
+            if requested_provider == 'kittentts' or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER') == 'kittentts':
+                # Ask user for consent and download if approved
+                try:
+                    def create_model():
+                        return KittenTTS(model_name)
+                    
+                    decorated_func = with_download_progress('kittentts', model_name, create_model)
+                    decorated_func()  # This will ask for consent and download
+                    kittentts_available = True
+                except RuntimeError as e:
+                    if "Download cancelled" in str(e):
+                        kittentts_note = f"KittenTTS model '{model_name}' download declined by user"
+                    else:
+                        kittentts_note = f"KittenTTS model download failed: {e}"
+                    kittentts_available = False
+                except Exception as e:
+                    kittentts_note = f"KittenTTS model download failed: {e}"
+                    kittentts_available = False
+            else:
+                # Model not cached and not specifically requested - mark as unavailable  
+                kittentts_note = f"KittenTTS model '{model_name}' not cached. Will be downloaded on first use."
+                kittentts_available = False
+        else:
+            kittentts_available = True
     except ImportError:
         kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
     
@@ -452,6 +480,7 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         "available": kittentts_available,
         "note": kittentts_note
     }
+    
     
     # KokoroTTS - Check if dependencies are installed
     kokoro_available = False
@@ -463,7 +492,38 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             from kokoro import KPipeline
             import soundfile as sf
-        kokoro_available = True
+        # Check if the model is cached
+        from .models import check_model_cached, with_download_progress
+        if not check_model_cached('kokoro', 'default'):
+            # Only prompt for download if this provider was specifically requested
+            if requested_provider == 'kokoro' or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER') == 'kokoro':
+                # Ask user for consent and download if approved
+                try:
+                    repo_id = 'hexgrad/Kokoro-82M'
+                    def create_pipeline():
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+                            return KPipeline(lang_code='en-us', repo_id=repo_id)
+                    
+                    decorated_func = with_download_progress('kokoro', 'default', create_pipeline)
+                    decorated_func()  # This will ask for consent and download
+                    kokoro_available = True
+                except RuntimeError as e:
+                    if "Download cancelled" in str(e):
+                        kokoro_note = "KokoroTTS model download declined by user"
+                    else:
+                        kokoro_note = f"KokoroTTS model download failed: {e}"
+                    kokoro_available = False
+                except Exception as e:
+                    kokoro_note = f"KokoroTTS model download failed: {e}"
+                    kokoro_available = False
+            else:
+                # Model not cached and not specifically requested - mark as unavailable
+                kokoro_note = "KokoroTTS model not cached. Will be downloaded on first use."
+                kokoro_available = False
+        else:
+            kokoro_available = True
     except ImportError:
         kokoro_note = "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile)"
     
@@ -471,6 +531,7 @@ def check_tts_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         "available": kokoro_available,
         "note": kokoro_note
     }
+    
     
     return accessible
 
@@ -1014,7 +1075,8 @@ def _synthesize_kittentts(text: str) -> Optional[bytes]:
         model_name = config.get('model') or kittentts_model
         voice = config.get('voice') or kittentts_voice
         
-        # Create KittenTTS model
+        # Create KittenTTS model (should already be cached from availability check)
+        log_message("DEBUG", f"Using KittenTTS model: {model_name}")
         m = KittenTTS(model_name)
         
         # Generate audio with the specified voice
@@ -1076,6 +1138,7 @@ def _synthesize_kokoro(text: str) -> Optional[bytes]:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
             from kokoro import KPipeline
             import soundfile as sf
         import tempfile
@@ -1087,14 +1150,21 @@ def _synthesize_kokoro(text: str) -> Optional[bytes]:
         voice = config.get('voice') or kokoro_voice
         speed = float(config.get('speed') or kokoro_speed)
         
-        # Create Kokoro pipeline with explicit repo_id to suppress warning
-        pipeline = KPipeline(lang_code=language, repo_id='hexgrad/Kokoro-82M')
+        # Create Kokoro pipeline (should already be cached from availability check)
+        repo_id = 'hexgrad/Kokoro-82M'
+        log_message("DEBUG", f"Using KokoroTTS model")
         
-        # Generate audio with the specified voice and speed
-        # Kokoro returns a generator, we need to process all chunks
-        audio_chunks = []
-        for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
-            audio_chunks.append(audio)
+        # Suppress torch warnings during pipeline creation and usage
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+            pipeline = KPipeline(lang_code=language, repo_id=repo_id)
+            
+            # Generate audio with the specified voice and speed
+            # Kokoro returns a generator, we need to process all chunks
+            audio_chunks = []
+            for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
+                audio_chunks.append(audio)
         
         # Concatenate all audio chunks
         import numpy as np
@@ -1370,6 +1440,59 @@ def speak_text(text: str, engine: str) -> bool:
     return speak_with_default(text, engine)
 
 
+def save_tts_audio(text: str, filename: str, provider: str = None) -> bool:
+    """Save TTS audio to a file instead of playing it.
+    
+    Args:
+        text: Text to synthesize
+        filename: Output file path (should end with .wav)
+        provider: TTS provider to use (defaults to current tts_provider)
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if provider is None:
+        provider = tts_provider
+    
+    # Get synthesis function for the provider
+    synthesis_funcs = {
+        'kokoro': _synthesize_kokoro,
+        'kittentts': _synthesize_kittentts,
+        'openai': _synthesize_openai,
+        'elevenlabs': _synthesize_elevenlabs,
+        'aws': _synthesize_polly,  # AWS uses polly
+        'polly': _synthesize_polly,
+        'azure': _synthesize_azure,
+        'gcloud': _synthesize_gcloud,
+        'deepgram': _synthesize_deepgram
+    }
+    
+    synthesis_func = synthesis_funcs.get(provider)
+    if not synthesis_func:
+        log_message("ERROR", f"Provider {provider} not supported for audio saving")
+        return False
+    
+    try:
+        # Generate audio bytes
+        log_message("INFO", f"Generating TTS audio with {provider}: {text}")
+        audio_bytes = synthesis_func(text)
+        
+        if not audio_bytes:
+            log_message("ERROR", f"Failed to generate audio with {provider}")
+            return False
+        
+        # Save to file
+        with open(filename, 'wb') as f:
+            f.write(audio_bytes)
+        
+        log_message("INFO", f"Saved TTS audio to: {filename}")
+        return True
+        
+    except Exception as e:
+        log_message("ERROR", f"Failed to save TTS audio: {e}")
+        return False
+
+
 def speak_with_default(text, engine):
     # Handle system TTS engines
     try:
@@ -1497,14 +1620,26 @@ def tts_worker(engine: str):
                 current_speech_item = None
                 last_speech_end_time = time.time()
             
-            # Resume ASR input after speaking
+            # Resume ASR input after speaking (but only for appropriate modes)
             try:
                 from . import asr
+                from .state import get_shared_state
+                
                 if hasattr(asr, 'set_ignore_input'):
                     # Small delay to ensure TTS audio has fully finished
                     time.sleep(0.5)
-                    asr.set_ignore_input(False)
-                    log_message("DEBUG", "Resumed ASR after speaking")
+                    
+                    # Get current ASR mode from shared state
+                    shared_state = get_shared_state()
+                    asr_mode = getattr(shared_state, 'asr_mode', 'auto-input')
+                    
+                    # Only resume ASR automatically for auto-input mode
+                    # For tap-to-talk mode, ASR should only be active when key is pressed
+                    if asr_mode in ['auto-input']:
+                        asr.set_ignore_input(False)
+                        log_message("DEBUG", "Resumed ASR after speaking")
+                    else:
+                        log_message("DEBUG", f"Not resuming ASR after speaking (mode: {asr_mode})")
             except Exception as e:
                 log_message("DEBUG", f"Could not resume ASR: {e}")
 
@@ -1887,6 +2022,13 @@ def is_speaking() -> bool:
     if current_speech_item is not None:
         return True
     
+    # Check if TTS process is still running
+    with playback_control.lock:
+        if playback_control.current_process is not None:
+            if playback_control.current_process.poll() is None:
+                # Process is still running
+                return True
+    
     # Check if we recently finished speaking (audio might still be playing)
     time_since_speech = time.time() - last_speech_end_time
     return time_since_speech < SPEECH_BUFFER_TIME
@@ -2048,7 +2190,7 @@ def select_best_tts_provider() -> str:
             pass
     
     preferred = state_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
-    accessible = check_tts_provider_accessibility()
+    accessible = check_tts_provider_accessibility(requested_provider=preferred)
     
     # Check if preferred provider is accessible
     if preferred and preferred in accessible and accessible[preferred]['available']:
@@ -2082,11 +2224,26 @@ def configure_tts_from_dict(config: dict) -> bool:
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
     
     provider = config.get('provider', 'system')
+    original_provider = provider
     tts_provider = provider
     
     # Validate provider configuration
     if not validate_provider_config(provider):
-        return False
+        log_message("WARNING", f"TTS provider {provider} validation failed")
+        # Fall back to best available provider
+        fallback_provider = select_best_tts_provider()
+        if fallback_provider != provider:
+            log_message("INFO", f"Falling back to TTS provider: {fallback_provider}")
+            provider = fallback_provider
+            tts_provider = provider
+            config = dict(config)  # Make a copy
+            config['provider'] = provider
+            # Validate fallback provider
+            if not validate_provider_config(provider):
+                log_message("ERROR", f"Fallback TTS provider {fallback_provider} also failed")
+                return False
+        else:
+            return False
     
     # Get provider info
     provider_info = TTS_PROVIDERS.get(provider)
@@ -2187,6 +2344,11 @@ def configure_tts_from_dict(config: dict) -> bool:
         if config.get('model'):
             kittentts_model = config['model']
         log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
+    
+    # Update shared state with the actually working provider
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    shared_state.set_tts_config(provider=provider)
     
     return True
 

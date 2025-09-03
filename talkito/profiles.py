@@ -253,7 +253,7 @@ COMMON_SKIP_PATTERNS = [
 CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
-    continuation_prefix=r'^(\s+[-\w()\'"]|  )',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers

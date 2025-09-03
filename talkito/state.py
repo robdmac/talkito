@@ -1,9 +1,11 @@
 """Shared state manager for Talkito MCP and wrapper integration ensuring configuration changes made through MCP tools affect the wrapper runtime."""
 
 import threading
+import os
 from typing import Optional, Dict, Any, Callable, List
 from dataclasses import dataclass, field
 import json
+from .logs import log_message
 
 
 @dataclass
@@ -42,10 +44,12 @@ class TalkitoState:
     tts_language: Optional[str] = None
     tts_rate: Optional[float] = None
     tts_pitch: Optional[float] = None
+    tts_mode: str = 'auto-skip'
     
     # ASR configuration details
     asr_language: Optional[str] = None
     asr_model: Optional[str] = None
+    asr_mode: str = 'auto-input'
     
     # Communication modes
     whatsapp_mode_active: bool = False
@@ -189,22 +193,25 @@ class TalkitoState:
         self._trigger_callbacks('all_modes_off')
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert state to dictionary for serialization"""
+        """Convert state to dictionary for serialization - excluding runtime provider info"""
         with self._lock:
             return {
                 'tts_enabled': self.tts_enabled,
                 'asr_enabled': self.asr_enabled,
                 'tts_initialized': self.tts_initialized,
                 'asr_initialized': self.asr_initialized,
-                'tts_provider': self.tts_provider,
+                # Don't persist provider info - let it be determined by CLI args and runtime logic
+                # 'tts_provider': self.tts_provider,
+                # 'asr_provider': self.asr_provider,
                 'tts_voice': self.tts_voice,
                 'tts_region': self.tts_region,
                 'tts_language': self.tts_language,
                 'tts_rate': self.tts_rate,
                 'tts_pitch': self.tts_pitch,
-                'asr_provider': self.asr_provider,
+                'tts_mode': self.tts_mode,
                 'asr_language': self.asr_language,
                 'asr_model': self.asr_model,
+                'asr_mode': self.asr_mode,
                 'whatsapp_mode_active': self.whatsapp_mode_active,
                 'slack_mode_active': self.slack_mode_active,
                 'voice_mode_active': self.voice_mode_active,
@@ -293,16 +300,16 @@ class SharedStateManager:
         self._load_state()
     
     def _load_state(self):
-        """Load persisted state from file if available"""
+        """Load persisted state from file if available - only as defaults, not overriding explicit config"""
         try:
             import os
             state_file = os.path.expanduser('~/.talkito_state.json')
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
                     data = json.load(f)
-                    # Only load non-runtime state
-                    if 'tts_provider' in data:
-                        self.state.tts_provider = data['tts_provider']
+                    # Only load preferences that haven't been explicitly set
+                    # TTS and ASR providers should not be loaded from persistent state
+                    # since they should be determined by command-line args or runtime logic
                     if 'tts_voice' in data:
                         self.state.tts_voice = data['tts_voice']
                     if 'tts_region' in data:
@@ -313,13 +320,15 @@ class SharedStateManager:
                         self.state.tts_rate = data['tts_rate']
                     if 'tts_pitch' in data:
                         self.state.tts_pitch = data['tts_pitch']
-                    if 'asr_provider' in data:
-                        self.state.asr_provider = data['asr_provider']
+                    if 'tts_mode' in data:
+                        self.state.tts_mode = data['tts_mode']
                     if 'asr_language' in data:
                         self.state.asr_language = data['asr_language']
                     if 'asr_model' in data:
                         self.state.asr_model = data['asr_model']
-                    # Communication config
+                    if 'asr_mode' in data:
+                        self.state.asr_mode = data['asr_mode']
+                    # Communication config (these are persistent preferences)
                     if 'communication' in data:
                         comm = data['communication']
                         if 'whatsapp_from_number' in comm:
@@ -442,6 +451,63 @@ def save_shared_state():
     _shared_state.save_state()
 
 
+def initialize_providers_early(args):
+    """Initialize providers early to trigger availability checks and download prompts"""
+    log_message("INFO", f"initialize_providers_early called with args: {type(args)}")
+    
+    # Clear any cached provider validation results for fresh start
+    try:
+        from . import asr
+        if hasattr(asr, 'clear_provider_cache'):
+            asr.clear_provider_cache()
+    except:
+        pass
+    from . import tts
+    try:
+        from . import asr
+    except ImportError:
+        asr = None
+    
+    shared_state = get_shared_state()
+    
+    # Trigger TTS provider selection (this will run availability checks and downloads)
+    if hasattr(args, 'tts_provider') and args.tts_provider:
+        try:
+            # Set the requested provider in shared state so select_best_tts_provider knows what was requested
+            shared_state.tts_provider = args.tts_provider
+            selected_tts = tts.select_best_tts_provider()
+            shared_state.tts_provider = selected_tts
+        except Exception as e:
+            pass  # Continue even if selection fails
+    
+    # Trigger ASR provider selection (this will run availability checks and downloads)  
+    # Check both command line args and environment variable (claude command sets env var)
+    requested_asr_provider = None
+    if hasattr(args, 'asr_provider') and args.asr_provider:
+        requested_asr_provider = args.asr_provider
+        log_message("INFO", f"Found asr_provider in args: {requested_asr_provider}")
+    preferred = requested_asr_provider or os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
+    shared_state.asr_provider = asr.select_best_asr_provider(preferred)
+    
+    # Preload local whisper models if the provider is local_whisper
+    if shared_state.asr_provider == 'local_whisper':
+        try:
+            log_message("INFO", f"About to call preload_pywhisper_model()")
+            model = asr.preload_pywhisper_model()
+            log_message("INFO", f"preload_pywhisper_model() returned: {model}")
+            if model:
+                log_message("INFO", f"Successfully preloaded local whisper model in initialize_providers_early")
+            else:
+                log_message("INFO", f"Local whisper model preload returned None - may not be needed")
+        except Exception as e:
+            log_message("ERROR", f"Failed to preload local whisper model: {e}")
+            import traceback
+            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+            # Also print to stdout in case logging is not working
+            print(f"ERROR: Failed to preload local whisper model: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+
+
 def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channel=None,
                        tts_override=False, asr_override=False, 
                        configured_tts_provider=None, configured_asr_provider=None) -> str:
@@ -468,14 +534,16 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
                 "initialized": shared_state.get_tts_initialized(),
                 "enabled": shared_state.get_tts_enabled(),
                 "is_speaking": tts.is_speaking() if shared_state.get_tts_initialized() else False,
-                "provider": configured_tts_provider or shared_state.get_tts_provider() or tts.select_best_tts_provider()
+                "mode": shared_state.tts_mode,
+                "provider": configured_tts_provider or shared_state.get_tts_provider() or "system"
             },
             "asr": {
                 "available": ASR_AVAILABLE,
                 "initialized": shared_state.get_asr_initialized(),
                 "enabled": shared_state.get_asr_enabled(),
+                "mode": shared_state.asr_mode,
                 "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and shared_state.get_asr_initialized() else False,
-                "provider": configured_asr_provider or shared_state.get_asr_provider() or (asr.select_best_asr_provider() if ASR_AVAILABLE else None)
+                "provider": configured_asr_provider or shared_state.get_asr_provider() or "google"
             },
             "whatsapp": {
                 "mode_active": shared_state.get_whatsapp_mode_active(),
@@ -491,14 +559,18 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         
         # Format as a one-line summary
         # Show green only if both initialized AND enabled
-        if tts_override:
+        tts_display = f"TTS {status['tts']['mode']}"
+        if tts_override or (status["tts"]["initialized"] and status["tts"]["enabled"]):
             tts_emoji = "🟢"
+            tts_display += f" → {status['tts']['provider']}"
         else:
-            tts_emoji = "🟢" if status["tts"]["initialized"] and status["tts"]["enabled"] else "🔴"
-        if asr_override:
+            tts_emoji = "🔴"
+        asr_display = f"ASR {status['asr']['mode']}"
+        if asr_override or (status["asr"]["initialized"] and status["asr"]["enabled"]):
             asr_emoji = "🟢"
+            asr_display += f" → {status['asr']['provider'] or 'none'}"
         else:
-            asr_emoji = "🟢" if status["asr"]["initialized"] and status["asr"]["enabled"] else "🔴"
+            asr_emoji = "🔴"
         
         # Communication status - check both configuration and mode status
         comms = []
@@ -527,7 +599,7 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
             else:
                 comms.append("⚪ Slack")  # Configured but mode not active
         
-        return f"TalkiTo: {tts_emoji} TTS ({status['tts']['provider']}) | {asr_emoji} ASR ({status['asr']['provider'] or 'none'}) | Comms: {', '.join(comms) if comms else 'none'}"
+        return f"TalkiTo: {tts_emoji} {tts_display} | {asr_emoji} {asr_display} | Comms: {', '.join(comms) if comms else 'none'}"
         
     except Exception as e:
         return f"Error getting status: {str(e)}"
