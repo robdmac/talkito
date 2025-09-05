@@ -92,12 +92,7 @@ KEY_LEFT = b'\x1b[D'
 KEY_RIGHT = b'\x1b[C'
 KEY_SPACE = b' '
 # Tap-to-talk keys - multiple options for flexibility
-KEY_TAP_TO_TALK_SEQUENCES = [
-    b'\x1b',  # Escape (Right Option/Alt when pressed alone)
-    b'\xc2\xa7',  # § (section sign - common on Mac keyboards)
-    b'\x1b[2~',  # Insert key (Linux/Windows)
-    b'`',  # Backtick key as fallback
-]
+KEY_TAP_TO_TALK_SEQUENCES = [b'`']  # Backtick as mic button
 
 # Filtering Configuration
 SKIP_LINE_STARTS = ["?", "/", "cwd:", "#", "DEBUG:", "INFO:", "WARNING:"]
@@ -222,6 +217,8 @@ class ASRState:
     asr_auto_started: bool = False
     tap_to_talk_active: bool = False
     tap_to_talk_last_press: float = 0
+    tap_to_talk_last_release: float = 0
+    tap_to_talk_redraw_triggered: bool = False
     current_partial: str = ""
     last_prompt_position: int = 0
     prompt_detected: bool = False
@@ -1199,10 +1196,10 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
     current_time = time.time()
     enabled_auto_listen = False
 
-    if current_time - last_check_time > STATUS_CHECK_INTERVAL:
-        log_message("DEBUG", f"Periodic status check: ASR_AVAILABLE={ASR_AVAILABLE}, "
-                            f"asr_auto_started={asr_state.asr_auto_started}, asr_mode={asr_mode}")
-
+    # Use slower intervals for tap-to-talk since it's event-driven, not periodic
+    check_interval = STATUS_CHECK_INTERVAL * 10 if asr_mode == "tap-to-talk" else STATUS_CHECK_INTERVAL
+    
+    if current_time - last_check_time > check_interval:
         # Check shared state and stop ASR if it's been disabled
         shared_state = get_shared_state()
         if ASR_AVAILABLE and asr_state.asr_auto_started and not shared_state.asr_enabled:
@@ -1213,23 +1210,25 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
             except Exception as e:
                 log_message("ERROR", f"Failed to stop ASR after shared state disable: {e}")
 
-        if ASR_AVAILABLE and asr_state.asr_auto_started and asr_mode != "off":
-            log_message("DEBUG", "Calling show_speech_status from periodic check")
-            
-            # Check if TTS is speaking and stop ASR if needed
-            if asr.is_recognizing() and tts.is_speaking():
-                try:
-                    asr.stop_dictation()
-                    asr_state.asr_auto_started = False
-                    log_message("INFO", "Stopped ASR because TTS is speaking")
-                except Exception as e:
-                    log_message("ERROR", f"Failed to stop ASR during TTS: {e}")
-
+        # Minimal processing for tap-to-talk mode (event-driven, not periodic)
         if asr_mode == "tap-to-talk":
             check_tap_to_talk_timeout()
-
-        enabled_auto_listen = check_and_enable_auto_listen(asr_mode)
-        if enabled_auto_listen:
+            # Lightweight tap-to-talk state processing without heavy auto-listen logic
+            enabled_auto_listen = process_tap_to_talk_state()
+        else:
+            # Full processing for auto-input mode
+            if ASR_AVAILABLE and asr_state.asr_auto_started:
+                # Check if TTS is speaking and stop ASR if needed
+                if asr.is_recognizing() and tts.is_speaking():
+                    try:
+                        asr.stop_dictation()
+                        asr_state.asr_auto_started = False
+                        log_message("INFO", "Stopped ASR because TTS is speaking")
+                    except Exception as e:
+                        log_message("ERROR", f"Failed to stop ASR during TTS: {e}")
+            
+            enabled_auto_listen = check_and_enable_auto_listen(asr_mode)
+        if enabled_auto_listen and asr_mode != "tap-to-talk":
             try:
                 log_message("WARNING", "Send a non breaking space to trigger terminal activity")
                 os.write(master_fd, SPACE_THEN_BACK)
@@ -1367,19 +1366,29 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
     try:
         input_data = await async_read(sys.stdin.fileno(), 4096)
         if input_data:
-            # Check for tap-to-talk keys in tap-to-talk mode
+            # Check for tap-to-talk keys in tap-to-talk mode (optimized for minimal interference)
             if asr_mode == "tap-to-talk":
-                for tap_key in KEY_TAP_TO_TALK_SEQUENCES:
-                    if tap_key in input_data:
-                        asr_state.tap_to_talk_active = True
-                        asr_state.tap_to_talk_last_press = time.time()
-                        log_message("INFO", f"Tap-to-talk key pressed: {tap_key}")
-                        # Don't forward tap-to-talk key to PTY
-                        # Remove the tap key from input_data
-                        input_data = input_data.replace(tap_key, b'')
-                        if not input_data:
-                            return
-                        break
+                # Fast path: only process backtick, let everything else pass through immediately
+                if b'`' in input_data:
+                    # Only process backtick for tap-to-talk
+                    was_already_active = asr_state.tap_to_talk_active
+                    asr_state.tap_to_talk_active = True
+                    asr_state.tap_to_talk_last_press = time.time()
+                    
+                    # Trigger screen redraw only once when first pressed
+                    if not was_already_active and not asr_state.tap_to_talk_redraw_triggered:
+                        try:
+                            await async_write(master_fd, SPACE_THEN_BACK)
+                            asr_state.tap_to_talk_redraw_triggered = True
+                            log_message("DEBUG", "[TAP-TO-TALK] Triggered screen redraw for mic display")
+                        except Exception as e:
+                            log_message("ERROR", f"[TAP-TO-TALK] Failed to trigger screen redraw: {e}")
+                    
+                    # Remove backtick from input_data (don't forward to terminal)
+                    input_data = input_data.replace(b'`', b'')
+                    if not input_data:
+                        return
+                # All other keys (Ctrl-C, Esc, etc.) go straight through with no processing delay
 
             # Check for TTS control keys
             # control_handled = handle_tts_controls(input_data)
@@ -1664,8 +1673,15 @@ def handle_partial_transcript(text: str):
 
     if current_master_fd is not None and asr_state.waiting_for_input:
         try:
-            # os.write(current_master_fd, '>'.encode('utf-8'))
-            os.write(current_master_fd, SPACE_THEN_BACK)
+            # Use just a space if we already have a partial transcript to avoid malformation
+            if asr_state.current_partial and not asr_state.has_pending_transcript:
+                # We have a partial transcript displayed and haven't executed query yet
+                os.write(current_master_fd, b' ')
+                log_message("DEBUG", "Using SPACE for partial transcript refresh to avoid malformation")
+            else:
+                # First partial or other cases - use the original SPACE_THEN_BACK
+                os.write(current_master_fd, SPACE_THEN_BACK)
+                log_message("DEBUG", "Using SPACE_THEN_BACK for partial transcript refresh")
         except Exception as e:
             log_message("ERROR", f"Failed to trigger screen update: {e}")
 
@@ -1740,8 +1756,54 @@ def check_tap_to_talk_timeout():
     
     if asr_state.tap_to_talk_active and time.time() - asr_state.tap_to_talk_last_press > TAP_TO_TALK_TIMEOUT:
         asr_state.tap_to_talk_active = False
+        asr_state.tap_to_talk_last_release = time.time()
+        asr_state.tap_to_talk_redraw_triggered = False  # Reset for next session
         log_message("INFO", "Tap-to-talk timeout - considering key released")
+        # Trigger screen redraw to hide microphone immediately
+        global current_master_fd
+        if current_master_fd is not None:
+            try:
+                os.write(current_master_fd, SPACE_THEN_BACK)
+                log_message("DEBUG", "[TAP-TO-TALK] Triggered screen redraw for mic hide")
+            except Exception as e:
+                log_message("ERROR", f"[TAP-TO-TALK] Failed to trigger screen redraw on timeout: {e}")
         return True
+    return False
+
+
+def process_tap_to_talk_state():
+    """Lightweight tap-to-talk state processing (extracted from check_and_enable_auto_listen for performance)"""
+    if not ASR_AVAILABLE:
+        return False
+        
+    # Tap-to-talk mode: keep streaming session alive but pause/unpause processing
+    if not asr_state.asr_auto_started:
+        # Initialize ASR streaming session once (stays running)
+        try:
+            log_message("INFO", "Starting ASR streaming session for tap-to-talk mode...")
+            asr.start_dictation(handle_dictated_text, handle_partial_transcript)
+            asr_state.asr_auto_started = True
+            # Start paused - will unpause when key is pressed
+            asr.set_ignore_input(True)
+            log_message("INFO", "ASR streaming started and paused (waiting for tap-to-talk)")
+            return True
+        except Exception as e:
+            log_message("ERROR", f"Failed to start ASR streaming (tap-to-talk): {e}")
+    
+    # Control audio processing based on key state
+    if asr_state.tap_to_talk_active:
+        # Key pressed - unpause audio processing
+        if asr.is_ignoring_input():
+            # Reset counter for new tap-to-talk session
+            asr.set_ignore_input(False)
+            log_message("INFO", "ASR activated (tap-to-talk key pressed)")
+    else:
+        # Key released - pause audio processing and clear any pending audio chunks
+        if not asr.is_ignoring_input():
+            asr_state.tap_to_talk_last_release = time.time()
+            asr.set_ignore_input(True)
+            log_message("INFO", "ASR paused (tap-to-talk key released)")
+    
     return False
 
 
@@ -1787,25 +1849,38 @@ def ensure_asr_initialized():
         log_message("INFO", "ASR enabled but not initialized - initializing now")
         
         try:
-            # Get the configured provider if available, otherwise select the best
-            if hasattr(asr, '_stored_config') and asr._stored_config:
-                asr_provider = asr._stored_config.provider
-                log_message("INFO", f"Using configured ASR provider: {asr_provider}")
-            else:
-                asr_provider = asr.select_best_asr_provider()
-                log_message("INFO", f"Selected best ASR provider: {asr_provider}")
+            # Use the provider determined by early initialization
+            asr_provider = shared_state.asr_provider
             
+            # If no provider is set, select the best available one
+            if asr_provider is None:
+                log_message("WARNING", "ASR provider is None, selecting best available provider")
+                asr_provider = asr.select_best_asr_provider()
+                if asr_provider:
+                    shared_state.asr_provider = asr_provider
+                    log_message("INFO", f"Selected ASR provider: {asr_provider}")
+                else:
+                    log_message("ERROR", "No ASR provider available")
+                    return False
+
             log_message("INFO", f"Initializing ASR with provider: {asr_provider}")
             
+            # Create config for the selected provider
+            from .asr import ASRConfig
+            asr_config = ASRConfig(provider=asr_provider)
+            
             # Start ASR with the standard callbacks
-            asr.start_dictation(handle_dictated_text, handle_partial_transcript)
+            engine = asr.start_dictation(handle_dictated_text, handle_partial_transcript, config=asr_config)
+            
+            # Get the actual provider that was initialized
+            actual_provider = engine.provider_config.provider if engine and engine.provider_config else asr_provider
             
             # Start in paused state so auto-input logic can manage it
             asr.set_ignore_input(True)
-            log_message("INFO", "ASR initialized and paused for auto-input management")
+            log_message("INFO", f"ASR initialized and paused for auto-input management with provider: {actual_provider}")
             
-            # Update shared state
-            shared_state.set_asr_initialized(True, provider=asr_provider)
+            # Update shared state with the actual provider that was successfully initialized
+            shared_state.set_asr_initialized(True, provider=actual_provider)
             
             # Reset ASR state for clean startup
             if asr_state:
@@ -1814,8 +1889,42 @@ def ensure_asr_initialized():
             return True
             
         except Exception as e:
-            log_message("ERROR", f"Failed to initialize ASR: {e}")
-            # Mark as not initialized so we can retry later
+            error_msg = str(e)
+            log_message("ERROR", f"Failed to initialize ASR: {error_msg}")
+            
+            # Print error to user (consistent with other error handling in codebase)
+            print(f"ASR Error: {error_msg}")
+            
+            # If this was a validation failure, try falling back to best available provider
+            if "validation failed" in error_msg.lower():
+                try:
+                    fallback_provider = asr.select_best_asr_provider()
+                    if fallback_provider and fallback_provider != asr_provider:
+                        print(f"Falling back to ASR provider: {fallback_provider}")
+                        log_message("INFO", f"Falling back to ASR provider: {fallback_provider}")
+                        
+                        # Update environment and shared state to use fallback
+                        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = fallback_provider
+                        shared_state.asr_provider = fallback_provider
+                        
+                        # Try initializing with fallback provider
+                        fallback_config = ASRConfig(provider=fallback_provider)  
+                        engine = asr.start_dictation(handle_dictated_text, handle_partial_transcript, config=fallback_config)
+                        
+                        actual_provider = engine.provider_config.provider if engine and engine.provider_config else fallback_provider
+                        asr.set_ignore_input(True)
+                        log_message("INFO", f"ASR initialized and paused for auto-input management with provider: {actual_provider}")
+                        shared_state.set_asr_initialized(True, provider=actual_provider)
+                        
+                        if asr_state:
+                            asr_state.asr_auto_started = False
+                        return True
+                        
+                except Exception as fallback_error:
+                    log_message("ERROR", f"Fallback ASR initialization failed: {fallback_error}")
+                    print(f"ASR fallback failed: {fallback_error}")
+            
+            # Mark as not initialized
             shared_state.set_asr_initialized(False)
             return False
             
@@ -1965,24 +2074,9 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
                 log_message("ERROR", f"Failed to pause ASR: {e}")
                 
     elif asr_mode == "tap-to-talk":
-        # Tap-to-talk mode: only enable when key is held
-        if asr_state.tap_to_talk_active and not is_asr_recognizing:
-            if not asr_state.asr_auto_started:
-                try:
-                    log_message("INFO", "Starting ASR dictation (tap-to-talk mode)...")
-                    asr.start_dictation(handle_dictated_text, handle_partial_transcript)
-                    asr_state.asr_auto_started = True
-                    return True
-                except Exception as e:
-                    log_message("ERROR", f"Failed to start ASR (tap-to-talk): {e}")
-        elif not asr_state.tap_to_talk_active and asr_state.asr_auto_started:
-            # Stop ASR when key is released
-            try:
-                asr.stop_dictation()
-                asr_state.asr_auto_started = False
-                log_message("INFO", "Stopped ASR: tap-to-talk key released")
-            except Exception as e:
-                log_message("ERROR", f"Failed to stop ASR (tap-to-talk): {e}")
+        # Tap-to-talk logic moved to process_tap_to_talk_state() for performance
+        # This function is now called only from non-periodic events
+        return False
     
     return False
 
@@ -2142,13 +2236,29 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             # Check for auto-submit of dictated text after 3 seconds of silence
             if asr_state.has_pending_transcript and current_master_fd:
                 current_time = time.time()
-                time_since_last_finalized = current_time - asr_state.last_finalized_transcript_time
-                time_since_last_partial = current_time - asr_state.last_partial_transcript_time
+                time_since_finalized = current_time - asr_state.last_finalized_transcript_time
+                time_since_partial = current_time - asr_state.last_partial_transcript_time
+                
+                # Check if we need to wait for tap-to-talk completion
+                shared_state = get_shared_state()
+                tap_to_talk_complete = False
+                if shared_state.asr_mode == "tap-to-talk":
+                    # In tap-to-talk mode, wait until key is released AND all outstanding frames are processed
+                    key_released = not asr_state.tap_to_talk_active
+                    outstanding_frames = asr.get_tap_to_talk_outstanding_frames() if asr else 0
+                    all_frames_processed = outstanding_frames == 0
+                    time_since_release = current_time - asr_state.tap_to_talk_last_release if asr_state.tap_to_talk_last_release > 0 else 0
+                    min_wait_satisfied = time_since_release >= 0.1  # 100ms minimum wait after key release
+                    
+                    tap_to_talk_complete = key_released and all_frames_processed and min_wait_satisfied
+                    log_message("DEBUG", f"[AUTO-SUBMIT] Tap-to-talk completion check: key_released={key_released}, outstanding_frames={outstanding_frames}, all_frames_processed={all_frames_processed}, time_since_release={time_since_release:.3f}s, min_wait_satisfied={min_wait_satisfied}")
                 
                 # Auto-submit if:
-                # - It's been at least 3 seconds since the last finalized transcript
-                # - No partial transcripts have been received in the last 3 seconds
-                if time_since_last_finalized >= 0.2 and time_since_last_partial >= 1.0:
+                # - It's been at least 2.5 seconds since the last finalized transcript OR
+                # - It's been at least 200ms since the last finalized transcript AND no partial transcripts in 3 seconds
+                # - In tap-to-talk mode: key is released AND all outstanding frames are processed
+                silence_threshold = 2.5  # 2.5 seconds of actual silence
+                if tap_to_talk_complete or (time_since_finalized >= silence_threshold or (time_since_finalized >= 0.2 and time_since_partial >= silence_threshold)):
                     try:
                         await async_write(current_master_fd, RETURN)
                         asr_state.has_pending_transcript = False
@@ -2238,9 +2348,10 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     output_data = output_data.replace(SPACE_THEN_BACK, b'')
 
                     # Show microphone emoji if ASR is active
-                    if asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input():
-                        if is_logging_enabled():
-                            log_message("DEBUG", f"ASR mic conditions met - asr_auto_started={asr_state.asr_auto_started}, waiting_for_input={asr_state.waiting_for_input}, asr_mode={asr_mode}")
+                    show_mic_for_auto = asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input()
+                    show_mic_for_tap_to_talk = asr_mode == "tap-to-talk" and asr_state.tap_to_talk_active
+                    
+                    if show_mic_for_auto or show_mic_for_tap_to_talk:
                         output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
 
                     # Try direct write first
@@ -2584,6 +2695,14 @@ def signal_handler(signum, frame=None):
             stop_tts_immediately()
         except Exception as e:
             log_message("ERROR", f"Failed to stop TTS immediately: {e}")
+        
+        # Quick ASR cleanup to prevent model destructor errors
+        if ASR_AVAILABLE:
+            try:
+                from . import asr
+                asr.stop_dictation()  # This will call _cleanup_whisper_model()
+            except Exception:
+                pass
         
         # Quick terminal cleanup
         cleanup_terminal()
@@ -2999,6 +3118,10 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     
     # Set ASR state based on mode
     asr_mode = kwargs.get('asr_mode', 'auto-input')
+    
+    # Store ASR mode in shared state for other components to access
+    shared_state.asr_mode = asr_mode
+    
     if ASR_AVAILABLE:
         if asr_mode != 'off':
             # Enable ASR in shared state - centralized functions will handle initialization

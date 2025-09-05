@@ -31,7 +31,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import run_with_talkito
-from .state import get_status_summary
+from .state import get_status_summary, initialize_providers_early
 
 
 TALKITO_PERMISSIONS = [
@@ -68,7 +68,9 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__disable_asr",
     "mcp__talkito__list_tts_voices",
     "mcp__talkito__randomize_tts_voice",
-    "mcp__talkito__cycle_tts_voice"
+    "mcp__talkito__cycle_tts_voice",
+    "mcp__talkito__set_asr_mode",
+    "mcp__talkito__set_tts_mode",
 ]
 
 
@@ -400,6 +402,11 @@ async def run_claude_hybrid(args) -> int:
     # API port will be port + 1
     api_port = port + 1
     
+    # Set up logging early if log file specified
+    if args.log_file:
+        from .logs import setup_logging
+        setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
+    
     # Set environment variables for provider preferences
     # Check if the TTS provider is valid first, fall back to system on macOS if not
     if args.tts_provider:
@@ -417,7 +424,23 @@ async def run_claude_hybrid(args) -> int:
             os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
     if args.asr_provider:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
+
+    # Initialize providers early (triggers availability checks and download prompts)
+    initialize_providers_early(args)
     
+    # Handle backwards compatibility for TTS mode
+    tts_mode = args.tts_mode
+    if args.disable_tts:
+        tts_mode = 'off'
+    elif args.dont_auto_skip_tts:
+        tts_mode = 'full'
+    
+    # Set ASR and TTS modes in shared state so they're available for status display
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    shared_state.asr_mode = args.asr_mode
+    shared_state.tts_mode = tts_mode
+
     # Start MCP server in background thread
     server_ready = threading.Event()
     server_thread = None
@@ -627,7 +650,7 @@ async def run_claude_hybrid(args) -> int:
         if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
             print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
         
-        # Show configuration status
+        # Show configuration status (now reflects actual providers after fallback)
         print_configuration_status(args)
         
         # Re-install our signal handler right before running Claude
@@ -682,7 +705,16 @@ def build_tts_config(args) -> dict:
     """Build TTS configuration from command line arguments"""
     config = {}
     
-    if args.tts_provider:
+    # Use the actually selected provider from shared state (after consent/validation)
+    # instead of the originally requested provider
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    selected_provider = shared_state.get_tts_provider()
+    
+    if selected_provider and selected_provider != 'system':
+        config['provider'] = selected_provider
+    elif args.tts_provider:
+        # Fallback to requested provider if no provider was selected yet
         config['provider'] = args.tts_provider
     else:
         # If no provider specified, use the best available one
@@ -709,7 +741,16 @@ def build_asr_config(args) -> dict:
     """Build ASR configuration from command line arguments"""
     config = {}
     
-    if args.asr_provider:
+    # Use the actually selected provider from shared state (after consent/validation)
+    # instead of the originally requested provider
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    selected_provider = shared_state.get_asr_provider()
+    
+    if selected_provider and selected_provider != 'google':  # 'google' is the free fallback
+        config['provider'] = selected_provider
+    elif args.asr_provider:
+        # Fallback to requested provider if no provider was selected yet
         config['provider'] = args.asr_provider
     else:
         # If no provider specified, use the best available one
@@ -759,6 +800,8 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     return config
 
 
+
+
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
@@ -790,11 +833,10 @@ def print_configuration_status(args):
     configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
     configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
     
+    # Don't pass configured providers to allow showing actual working providers after fallback
     status = get_status_summary(
         tts_override=True, 
-        asr_override=(args.asr_mode != "off"),
-        configured_tts_provider=configured_tts_provider,
-        configured_asr_provider=configured_asr_provider
+        asr_override=(args.asr_mode != "off")
     )
 
     # Print with the same format but add the note about .talkito.env

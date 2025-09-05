@@ -47,7 +47,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import TalkitoCore
-from .state import get_status_summary
+from .state import get_status_summary, initialize_providers_early
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -135,15 +135,19 @@ def parse_arguments():
                            help='Speech pitch (provider-specific)')
     tts_group.add_argument('--capture-tts-output', type=str, metavar='FILE',
                            help='Capture TTS output to file instead of playing')
+    tts_group.add_argument('--tts-mode', type=str, 
+                           choices=['off', 'full', 'auto-skip'],
+                           default='auto-skip',
+                           help='TTS mode (default: auto-skip)')
     
     # ASR options
     asr_group = parser.add_argument_group('ASR options')
     asr_group.add_argument('--asr-mode', type=str, 
-                           choices=['off', 'auto-input', 'continuous', 'tap-to-talk'],
+                           choices=['off', 'auto-input', 'tap-to-talk'],
                            default='auto-input',
                            help='ASR mode (default: auto-input)')
     asr_group.add_argument('--asr-provider', type=str,
-                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing'],
+                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
                            help='ASR provider to use')
     asr_group.add_argument('--asr-language', type=str, default='en-US',
                            help='Language code for ASR (default: en-US)')
@@ -234,7 +238,7 @@ def parse_arguments():
     if args.command and args.arguments:
         talkito_options = {
             '--log-file', '--tts-provider', '--asr-provider', '--tts-voice', '--tts-region', '--tts-language',
-            '--tts-rate', '--tts-pitch', '--capture-tts-output', '--asr-mode', '--asr-language', '--asr-model',
+            '--tts-rate', '--tts-pitch', '--tts-mode', '--capture-tts-output', '--asr-mode', '--asr-language', '--asr-model',
             '--sms-recipients', '--whatsapp-recipients', '--slack-channel', '--webhook-port', '--record', '--replay',
             '--no-output', '--port', '--disable-mcp', '--dont-auto-skip-tts', '--disable-tts', '--profile', '--verbosity',
             '-v', '--verbose', '--mcp-server', '--mcp-sse-server', '--setup-slack', '--setup-whatsapp'
@@ -330,6 +334,7 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     return config
 
 
+
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
@@ -363,18 +368,33 @@ def print_configuration_status(args):
     configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
     configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
     
+    # Initialize providers early (triggers availability checks and download prompts)
+    initialize_providers_early(args)
+    
+    # Handle backwards compatibility for TTS mode
+    tts_mode = args.tts_mode
+    if args.disable_tts:
+        tts_mode = 'off'
+    elif args.dont_auto_skip_tts:
+        tts_mode = 'full'
+    
+    # Set ASR and TTS modes in shared state so they're available for status display
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    shared_state.asr_mode = args.asr_mode
+    shared_state.tts_mode = tts_mode
+    
+    # Don't pass configured providers to allow showing actual working providers after fallback
     status = get_status_summary(
         tts_override=True, 
-        asr_override=(args.asr_mode != "off"),
-        configured_tts_provider=configured_tts_provider,
-        configured_asr_provider=configured_asr_provider
+        asr_override=(args.asr_mode != "off")
     )
 
     # Print with the same format but add the note about .talkito.env
     print(f"╭ {status}")
 
 
-# Claude-specific functions moved to claude_init.py
+# Claude-specific functions moved to claude.py
 
 
 
@@ -387,7 +407,7 @@ async def run_talkito_command(args) -> int:
     # Special handling for 'claude' command
     if args.command == 'claude':
         # Import Claude-specific functions
-        from .claude_init import run_claude_wrapper, run_claude_hybrid
+        from .claude import run_claude_wrapper, run_claude_hybrid
         
         # Check if MCP is disabled
         if args.disable_mcp:
@@ -714,7 +734,7 @@ def main():
     
     # Handle special commands that don't need async
     if hasattr(args, 'init_claude') and args.init_claude:
-        from .claude_init import init_claude
+        from .claude import init_claude
         success = init_claude()
         sys.exit(0 if success else 1)
     

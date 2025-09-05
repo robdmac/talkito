@@ -33,14 +33,20 @@ import speech_recognition as sr
 import threading
 import queue
 import argparse
+import io
+import numpy as np
+import platform
+import pyaudio
+import math
 import time
 import tempfile
+import wave
+import atexit
 from typing import Optional, Callable, Dict, Any, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import importlib
-from contextlib import contextmanager
-from pathlib import Path
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
 
 from .logs import log_message as _base_log_message
 
@@ -120,7 +126,7 @@ CREDENTIAL_ENV_VARS = {
 def check_api_credentials(provider: str, config: ASRConfig) -> Tuple[bool, Optional[str]]:
     """Unified credential checking for all providers"""
     # Providers that don't need credentials
-    if provider == 'google_free':
+    if provider in ['google_free', 'local_whisper']:
         return True, None
     
     # Special case: Whisper local mode
@@ -187,14 +193,87 @@ REQUIRED_IMPORTS = {
     'azure': ('azure.cognitiveservices.speech', 'pip install azure-cognitiveservices-speech'),
     'deepgram': ('deepgram', 'pip install deepgram-sdk'),
     'whisper': ('whisper', 'pip install openai-whisper'),
+    'local_whisper': ('faster_whisper', 'pip install faster-whisper'),
 }
 
 
-def check_provider_imports(provider: str) -> Tuple[bool, Optional[str]]:
+# Cache for provider validation results to avoid repeated prompts
+_provider_validation_cache = {}
+
+def clear_provider_cache():
+    """Clear the provider validation cache"""
+    global _provider_validation_cache
+    _provider_validation_cache = {}
+
+def check_provider_imports(provider: str, requested_provider: str = None) -> Tuple[bool, Optional[str]]:
     """Unified import checking for all providers"""
+    
+    # Check cache to avoid repeated prompts for the same provider
+    # For offline providers like local_whisper, cache by provider name only to avoid repeated download prompts
+    cache_key = provider if provider in ['local_whisper'] else f"{provider}_{requested_provider or 'none'}"
+    if cache_key in _provider_validation_cache:
+        result = _provider_validation_cache[cache_key]
+        return result
+    
+    def cache_and_return(success: bool, message: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """Cache the result and return it"""
+        result = (success, message)
+        _provider_validation_cache[cache_key] = result
+        return result
     # Providers that use built-in speech_recognition
     if provider in ['google_free']:
-        return True, None
+        return cache_and_return(True, None)
+    
+    # Special case: local_whisper offline provider (try pywhispercpp first on Apple Silicon, then faster-whisper)
+    if provider == 'local_whisper':
+        # Try pywhispercpp first on Apple Silicon
+        if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+            try:
+                from pywhispercpp.model import Model as PyWhisperModel
+                return cache_and_return(True, "PyWhisperCpp CoreML available")
+            except ImportError:
+                pass  # Fall through to faster-whisper
+        
+        # Fall back to faster-whisper
+        try:
+            from faster_whisper import WhisperModel
+            # Check if the model is cached
+            from .models import check_model_cached, with_download_progress
+            # Use the actual model that will be used (check environment variable)
+            model_name = os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+            if not check_model_cached('local_whisper', model_name):
+                # Only prompt for download if this provider was specifically requested
+                if (requested_provider == 'local_whisper' or provider == requested_provider or 
+                    os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER') == 'local_whisper'):
+                    # Ask user for consent and download if approved
+                    try:
+                        def create_model():
+                            # Use int8 for better compatibility, especially on macOS
+                            compute_type = 'int8' if platform.system() == 'Darwin' else 'float16'
+                            from faster_whisper import WhisperModel
+                            return WhisperModel(model_name, device='cpu', compute_type=compute_type)
+                        
+                        decorated_func = with_download_progress('local_whisper', model_name, create_model)
+                        decorated_func()  # This will ask for consent and download
+                        return cache_and_return(True, None)
+                    except RuntimeError as e:
+                        if "Download cancelled" in str(e):
+                            return cache_and_return(False, f"faster-whisper model '{model_name}' download declined by user")
+                        return cache_and_return(False, f"faster-whisper model download failed: {e}")
+                    except Exception as e:
+                        return cache_and_return(False, f"faster-whisper model download failed: {e}")
+                else:
+                    # Model not cached and not specifically requested - mark as unavailable
+                    return cache_and_return(False, f"faster-whisper model '{model_name}' not cached. Will be downloaded on first use.")
+            return cache_and_return(True, None)
+        except ImportError:
+            # Neither pywhispercpp nor faster-whisper available
+            if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+                return cache_and_return(False, "Local Whisper requires pywhispercpp (or faster-whisper which would be CPU limited): WHISPER_COREML=1 pip install pywhispercpp")
+            else:
+                return cache_and_return(False, "faster-whisper library not installed. Run: pip install faster-whisper")
+        except Exception as e:
+            return cache_and_return(False, f"faster-whisper library error: {e}")
     
     # Special case: Whisper can use either local or API mode
     if provider == 'whisper':
@@ -202,40 +281,40 @@ def check_provider_imports(provider: str) -> Tuple[bool, Optional[str]]:
         try:
             import whisper
             whisper.available_models()
-            return True, None
+            return cache_and_return(True, None)
         except ImportError:
             # Try OpenAI API
             try:
                 import openai
-                return True, None
+                return cache_and_return(True, None)
             except ImportError:
-                return False, "Neither local Whisper nor OpenAI library installed. Run: pip install openai-whisper or pip install openai"
+                return cache_and_return(False, "Neither local Whisper nor OpenAI library installed. Run: pip install openai-whisper or pip install openai")
         except Exception as e:
             # Whisper is installed but has issues
-            return False, f"Whisper library error: {e}"
+            return cache_and_return(False, f"Whisper library error: {e}")
     
     # Special case: Google Cloud - verify client creation works
     if provider == 'gcloud':
         try:
             from google.cloud import speech
             client = speech.SpeechClient()
-            return True, None
+            return cache_and_return(True, None)
         except ImportError:
-            return False, "Google Cloud Speech library not installed. Run: pip install google-cloud-speech"
+            return cache_and_return(False, "Google Cloud Speech library not installed. Run: pip install google-cloud-speech")
         except Exception as e:
-            return False, f"Google Cloud credentials invalid: {e}"
+            return cache_and_return(False, f"Google Cloud credentials invalid: {e}")
     
     # Standard import check for remaining providers
     module_info = REQUIRED_IMPORTS.get(provider)
     if not module_info:
-        return True, None
+        return cache_and_return(True, None)
     
     module_name, install_cmd = module_info
     try:
         importlib.import_module(module_name.split('.')[0])
-        return True, None
+        return cache_and_return(True, None)
     except ImportError:
-        return False, f"{module_name} library not installed. Run: {install_cmd}"
+        return cache_and_return(False, f"{module_name} library not installed. Run: {install_cmd}")
 
 
 class AudioCaptureThread:
@@ -1147,7 +1226,7 @@ class DeepgramProvider(ASRProvider):
                 def on_error(self, error, **kwargs):
                     log_message("ERROR", f"Deepgram error: {error}")
                     if "401" in str(error) or "Unauthorized" in str(error):
-                        print(f"\nDeepgram API key error. Please check your DEEPGRAM_API_KEY.")
+                        print("\nDeepgram API key error. Please check your DEEPGRAM_API_KEY.")
                     engine.is_active = False
                     engine.stop_event.set()
 
@@ -1262,6 +1341,522 @@ class WhisperProvider(ASRProvider):
         raise NotImplementedError("Whisper doesn't support streaming")
 
 
+class FasterWhisperProvider(ASRProvider):
+    """faster-whisper provider - offline local ASR with distil-large-v3 using chunked processing"""
+    
+    @property
+    def supports_streaming(self) -> bool:
+        """Supports chunked real-time streaming with faster-whisper"""
+        return True
+    
+    def check_credentials(self) -> Tuple[bool, Optional[str]]:
+        return check_api_credentials('local_whisper', self.config)
+    
+    def check_imports(self) -> Tuple[bool, Optional[str]]:
+        return check_provider_imports('local_whisper')
+    
+    def recognize(self, audio) -> str:
+        """Recognize using faster-whisper offline model"""
+        from faster_whisper import WhisperModel
+
+        # Get configuration - model defaults to distil-large-v3 
+        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+        device = os.environ.get('WHISPER_DEVICE', 'cpu')
+        compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
+        
+        log_message("DEBUG", f"Using faster-whisper model: {model_name}, device: {device}, compute_type: {compute_type}")
+        
+        # Initialize model (should already be cached from availability check)
+        log_message("DEBUG", f"Using faster-whisper model: {model_name}")
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        
+        # Get audio data as numpy array
+        wav_data = audio.get_wav_data()
+        
+        # Convert WAV data to numpy array
+        # The audio from speech_recognition is in 16-bit PCM format at 16kHz
+        with temp_audio_file(wav_data) as tmp_path:
+            # Load audio using faster-whisper's method
+            # faster-whisper expects audio as float32 array
+            try:
+                import soundfile as sf
+                # Try to read with soundfile first
+                audio_array, sample_rate = sf.read(tmp_path, dtype='float32')
+            except ImportError:
+                log_message("DEBUG", "soundfile not available, using numpy fallback")
+                # Fallback: convert from bytes directly
+                # WAV data from speech_recognition is 16-bit PCM at 16kHz
+                audio_array = np.frombuffer(wav_data[44:], dtype=np.int16).astype(np.float32) / 32768.0
+                sample_rate = 16000
+            except Exception:
+                # Fallback: convert from bytes directly
+                # WAV data from speech_recognition is 16-bit PCM at 16kHz
+                audio_array = np.frombuffer(wav_data[44:], dtype=np.int16).astype(np.float32) / 32768.0
+                sample_rate = 16000
+            
+            # Ensure mono audio
+            if len(audio_array.shape) > 1:
+                audio_array = audio_array.mean(axis=1)
+            
+            # Convert language format: 'en-US' -> 'en'  
+            language = self.config.language.split('-')[0] if self.config.language else 'en'
+            
+            # Transcribe
+            segments, info = model.transcribe(
+                audio_array,
+                language=language,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
+                condition_on_previous_text=False,
+                initial_prompt=None,
+                word_timestamps=False
+            )
+            
+            # Collect all text from segments
+            transcript_parts = []
+            for segment in segments:
+                transcript_parts.append(segment.text)
+            
+            result = ' '.join(transcript_parts).strip()
+            log_message("INFO", f"faster-whisper transcribed: '{result}' (language: {info.language}, probability: {info.language_probability:.2f})")
+            
+            return result
+    
+    def stream(self, engine, microphone) -> None:
+        """Stream audio using faster-whisper with chunked processing and separate transcription thread"""
+        import queue
+        global _tap_to_talk_outstanding_frames
+        
+        # Get configuration
+        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+        device = os.environ.get('WHISPER_DEVICE', 'cpu')
+        compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
+        
+        log_message("INFO", f"[LOCAL_WHISPER] Initializing model: {model_name}, device: {device}, compute_type: {compute_type}")
+        
+        # Get optimal backend configuration
+        backend_info = _get_local_whisper_backend_info()
+        use_pywhispercpp = backend_info["use_pywhispercpp"]
+
+        try:
+            # Always use the pre-loaded model
+            if _local_whisper_model is None:
+                raise ValueError("Pre-loaded model is required for streaming. Use preload_pywhisper_model() first.")
+
+            model = _local_whisper_model
+
+            if use_pywhispercpp:
+                coreml_model_name = 'small.en' if model_name in ['distil-large-v3', 'large-v3', 'large-v2'] else model_name
+                log_message("INFO", f"[LOCAL_WHISPER] Using pre-loaded PyWhisperCpp CoreML model: {coreml_model_name}")
+            else:
+                log_message("INFO", f"[LOCAL_WHISPER] Using pre-loaded faster-whisper model: {model_name}")
+            
+            # Audio configuration optimized for real-time processing
+            CHUNK = 2048    # Larger PyAudio buffer reduces context switching overhead
+            FORMAT = pyaudio.paFloat32
+            CHANNELS = 1
+            RATE = 16000
+            
+            # Optimize transcription window duration based on model size for faster response
+            TRANSCRIPTION_WINDOW_DURATION = 1.1    # 750ms for larger models
+                
+            # Calculate how many PyAudio frames to accumulate before transcribing
+            FRAMES_TO_ACCUMULATE = int(RATE * TRANSCRIPTION_WINDOW_DURATION / CHUNK)
+            
+            log_message("INFO", f"[LOCAL_WHISPER] Audio config - pyaudio_frame_size: {CHUNK} samples (~{CHUNK/RATE*1000:.0f}ms), transcription_window: {TRANSCRIPTION_WINDOW_DURATION}s, frames_to_accumulate: {FRAMES_TO_ACCUMULATE}")
+            
+            # Initialize PyAudio
+            p = pyaudio.PyAudio()
+            
+            # Open stream with optimized buffer size
+            stream = p.open(format=FORMAT,
+                          channels=CHANNELS,
+                          rate=RATE,
+                          input=True,
+                          frames_per_buffer=CHUNK)
+            
+            audio_queue = queue.Queue(maxsize=10)
+
+            def transcription_worker():
+                """Worker thread that handles transcription without blocking audio capture"""
+                global _tap_to_talk_outstanding_frames
+                
+                # Set high thread priority for better responsiveness
+                try:
+                    if hasattr(os, 'nice'):
+                        # On Unix systems, lower nice value = higher priority
+                        current_nice = os.nice(0)
+                        os.nice(-5)  # Increase priority (requires permissions)
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Set thread priority: nice {current_nice} -> {current_nice - 5}")
+                except (OSError, PermissionError) as e:
+                    log_message("DEBUG", f"[LOCAL_WHISPER] Could not set thread priority: {e}")
+                
+                # Log model reference to monitor if it's shared
+                log_message("DEBUG", f"[LOCAL_WHISPER] Starting transcription worker thread (model id: {id(model)})")
+                log_message("DEBUG", "[LOCAL_WHISPER] Starting transcription worker thread")
+                while True:
+                    try:
+                        # Get audio segment from queue (non-blocking)
+                        audio_segment_data = audio_queue.get_nowait()
+                        
+                        # Check for shutdown signal
+                        if audio_segment_data is None:
+                            log_message("DEBUG", "[LOCAL_WHISPER] Transcription worker shutting down")
+                            break
+                            
+                        audio_np, energy_level, frames_in_segment = audio_segment_data
+                        
+                        # Check if we should ignore input (e.g., during TTS) before processing
+                        # But don't ignore if we still have outstanding chunks to process
+                        with _ignore_input_lock:
+                            should_ignore = _ignore_input
+                        
+                        with _tap_to_talk_counter_lock:
+                            has_outstanding_frames = _tap_to_talk_outstanding_frames > 0
+                        
+                        if should_ignore and not has_outstanding_frames:
+                            log_message("DEBUG", f"[LOCAL_WHISPER] Discarding audio segment due to ignore_input flag: energy={energy_level:.4f}")
+                            continue
+                        
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Processing audio segment in worker thread: energy={energy_level:.4f}")
+                        
+                        # Transcribe using the appropriate backend
+                        try:
+                            start_time = time.time()
+                            
+                            # Check if we're using PyWhisperCpp or faster-whisper
+                            if hasattr(model, '__class__') and 'pywhispercpp' in str(type(model)):
+                                # PyWhisperCpp CoreML backend - direct transcription
+                                raw_result = model.transcribe(audio_np, print_progress=False, print_realtime=False, print_timestamps=False, print_special=False)
+                                transcription_time = time.time() - start_time
+                                log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp transcription took {transcription_time:.3f}s for {len(audio_np)/RATE:.3f}s audio (real-time factor: {transcription_time/(len(audio_np)/RATE):.2f}x)")
+                                log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp raw result type: {type(raw_result)}, content: '{raw_result}'")
+                                
+                                # Handle both string and list results from PyWhisperCpp
+                                if isinstance(raw_result, list):
+                                    # If it's a list of segments, extract text
+                                    text_result = ""
+                                    segment_count = len(raw_result)
+                                    for segment in raw_result:
+                                        if hasattr(segment, 'text'):
+                                            text_result += segment.text
+                                        elif isinstance(segment, str):
+                                            text_result += segment
+                                        else:
+                                            text_result += str(segment)
+                                elif isinstance(raw_result, str):
+                                    # If it's already a string, use it directly
+                                    text_result = raw_result
+                                    segment_count = 1 if text_result.strip() else 0
+                                else:
+                                    # Fallback: convert to string
+                                    text_result = str(raw_result)
+                                    segment_count = 1 if text_result.strip() else 0
+
+                                while "[BLANK_AUDIO]" in text_result:
+                                    text_result = text_result.replace("[BLANK_AUDIO]", "").strip()
+                                
+                                log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp final result: text_length={len(text_result)}, segments={segment_count}, content='{text_result}'")
+                                
+                            else:
+                                # faster-whisper backend with optimized settings
+                                segments_generator, info = model.transcribe(
+                                    audio_np,
+                                    beam_size=1,                       # Minimum beam size for fastest decoding
+                                    best_of=1,                         # No multiple passes
+                                    temperature=0.0,                   # Deterministic output, no sampling
+                                    language="en",                     # Force English to skip language detection  
+                                    condition_on_previous_text=False,  # Don't use context for speed
+                                    vad_filter=False,                  # Disable VAD for tap-to-talk mode
+                                    compression_ratio_threshold=2.4,   # Skip overly repetitive text
+                                    log_prob_threshold=-1.0,          # Skip low confidence text
+                                    no_speech_threshold=0.6,          # Skip segments with no speech
+                                    initial_prompt=None,              # No context prompt
+                                    suppress_blank=True,              # Don't output blank tokens
+                                    suppress_tokens=[-1],             # Suppress special tokens
+                                    without_timestamps=True           # Skip timestamp calculation for speed
+                                )
+                                
+                                # Force generator evaluation to get actual transcription time
+                                segments = list(segments_generator)
+                                transcription_time = time.time() - start_time
+                                log_message("DEBUG", f"[LOCAL_WHISPER] faster-whisper transcription took {transcription_time:.3f}s for {len(audio_np)/RATE:.3f}s audio (real-time factor: {transcription_time/(len(audio_np)/RATE):.2f}x)")
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Model response: language={info.language}, language_probability={info.language_probability:.2f}")
+                                
+                                # Extract text from segments
+                                text_result = ""
+                                segment_count = 0
+                                for segment in segments:
+                                    segment_count += 1
+                                    log_message("DEBUG", f"[LOCAL_WHISPER] Segment {segment_count}: '{segment.text}' (start={segment.start:.2f}s, end={segment.end:.2f}s)")
+                                    text_result += segment.text
+                                
+                                log_message("DEBUG", f"[LOCAL_WHISPER] faster-whisper total segments: {segment_count}, combined_text: '{text_result}'")
+                            
+                            if text_result.strip():
+                                log_message("INFO", f"[LOCAL_WHISPER] Transcribed: '{text_result.strip()}'")
+                                
+                                # Check if we should ignore this transcription (tap-to-talk session may have ended)
+                                # But don't ignore if we still have outstanding chunks to process
+                                waiting_for_lock_start_time = time.time()
+                                with _ignore_input_lock:
+                                    should_ignore = _ignore_input
+                                
+                                with _tap_to_talk_counter_lock:
+                                    has_outstanding_frames = _tap_to_talk_outstanding_frames > 0
+                                waiting_for_lock_duration = time.time() - waiting_for_lock_start_time
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Waiting for lock took: {waiting_for_lock_duration:.3f}s")
+                                
+                                if should_ignore and not has_outstanding_frames:
+                                    log_message("DEBUG", f"[LOCAL_WHISPER] Discarding transcription due to ignore_input flag: '{text_result.strip()}'")
+                                else:
+                                    # Process and callback
+                                    processing_start_time = time.time()
+                                    processed = engine._process_dictation_text(text_result.strip())
+                                    processing_duration = time.time() - processing_start_time
+                                    log_message("DEBUG", f"[LOCAL_WHISPER] Processing took {processing_duration:.3f}s")
+                                    if processed and engine.text_callback:
+                                        callback_start_time = time.time()
+                                        engine.text_callback(processed)
+                                        callback_duration = time.time() - callback_start_time
+                                        log_message("DEBUG", f"[LOCAL_WHISPER] Callback execution took {callback_duration:.3f}s")
+                            else:
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Model returned empty text (segments={segment_count})")
+                                
+                        except Exception as model_error:
+                            log_message("ERROR", f"[LOCAL_WHISPER] Model transcription failed: {model_error}")
+                        
+                        # Mark task done
+                        audio_queue.task_done()
+                        
+                        # Decrement outstanding frames counter for tap-to-talk tracking
+                        with _tap_to_talk_counter_lock:
+                            if _tap_to_talk_outstanding_frames > 0:
+                                # Decrement by the number of frames that were processed in this segment
+                                frames_to_decrement = min(frames_in_segment, _tap_to_talk_outstanding_frames)
+                                _tap_to_talk_outstanding_frames -= frames_to_decrement
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Tap-to-talk outstanding frames (-{frames_to_decrement}): {_tap_to_talk_outstanding_frames} (decremented by {frames_to_decrement})")
+                        
+                    except queue.Empty:
+                        # No audio available - check if engine is still active
+                        if not engine.is_active or engine.stop_event.is_set():
+                            log_message("DEBUG", "[LOCAL_WHISPER] Transcription worker detected shutdown")
+                            break
+                        # Brief sleep to prevent busy-waiting
+                        time.sleep(0.001)  # 1ms
+                    except Exception as e:
+                        log_message("ERROR", f"[LOCAL_WHISPER] Transcription worker error: {e}")
+                        
+                log_message("DEBUG", "[LOCAL_WHISPER] Transcription worker thread ended")
+            
+            # Start transcription worker thread
+            transcription_thread = threading.Thread(target=transcription_worker, daemon=True)
+            transcription_thread.start()
+            
+            # Warm up the model with a short test audio chunk to avoid first-call delays
+            # log_message("INFO", "[LOCAL_WHISPER] Warming up model with test audio...")
+            # test_audio = np.zeros(int(RATE * 1.2), dtype=np.float32)  # 0.5 seconds of silence
+            # try:
+            #     if use_pywhispercpp:
+            #         # PyWhisperCpp warm-up
+            #         model.transcribe(test_audio, print_progress=False, print_realtime=False, print_timestamps=False, print_special=False)
+            #     else:
+            #         # faster-whisper warm-up
+            #         segments, _ = model.transcribe(test_audio, language="en", task="transcribe")
+            #         list(segments)  # Force evaluation to ensure model is loaded
+            #     log_message("INFO", "[LOCAL_WHISPER] Model warm-up completed")
+            # except Exception as e:
+            #     log_message("WARNING", f"[LOCAL_WHISPER] Model warm-up failed (non-critical): {e}")
+            
+            log_message("INFO", "[LOCAL_WHISPER] Starting segmented audio capture with separate transcription thread")
+            
+            audio_buffer = []
+            frame_count = 0
+            
+            # Pre-fill audio buffer before marking as ready for tap-to-talk
+            log_message("DEBUG", "[LOCAL_WHISPER] Pre-filling audio buffer...")
+            warmup_frames = 0
+            while warmup_frames < 3 and engine.is_active:  # Collect 3 frames (~384ms) to prime the buffer
+                try:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    warmup_frames += 1
+                    log_message("DEBUG", f"[LOCAL_WHISPER] Pre-filled frame {warmup_frames}/3")
+                except Exception as e:
+                    log_message("WARNING", f"[LOCAL_WHISPER] Buffer pre-fill warning: {e}")
+                    break
+            log_message("INFO", "[LOCAL_WHISPER] Audio stream fully warmed up and ready")
+            
+            # Track ignore_input state to detect tap-to-talk key release
+            with _ignore_input_lock:
+                previous_ignore_input = _ignore_input
+
+            process_remaining_frames = False
+            
+            # Streaming loop with chunked processing
+            while engine.is_active and not engine.stop_event.is_set():
+                try:
+                    # Check if we should ignore input (e.g., during TTS)
+                    with _ignore_input_lock:
+                        current_ignore_input = _ignore_input
+                    
+                    # Detect transition from pressed (False) to released (True)
+                    transitioned_to_released = not previous_ignore_input and current_ignore_input
+                    if transitioned_to_released:
+                        # Check if we have outstanding frames or partial buffer
+                        with _tap_to_talk_counter_lock:
+                            outstanding_frames = _tap_to_talk_outstanding_frames
+                        
+                        if outstanding_frames > 0 or (audio_buffer and frame_count > 0):
+                            process_remaining_frames = True
+                            log_message("DEBUG", f"[LOCAL_WHISPER] Key released with {frame_count} buffered frames and {outstanding_frames} outstanding frames - will process them")
+                        else:
+                            log_message("DEBUG", "[LOCAL_WHISPER] Key released with no remaining frames to process")
+                    previous_ignore_input = current_ignore_input
+                    
+                    if current_ignore_input and not process_remaining_frames:
+                        # Skip audio processing but keep reading to prevent buffer overflow
+                        stream.read(CHUNK, exception_on_overflow=False)
+                        audio_buffer = []  # Clear buffer when ignoring
+                        frame_count = 0
+                        time.sleep(0.01)
+                        continue
+                    
+                    # Read audio data
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    audio_array = np.frombuffer(data, dtype=np.float32)
+                    
+                    # Debug raw audio data occasionally
+                    if frame_count == 0:  # Log first frame details
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Raw audio: bytes={len(data)}, samples={len(audio_array)}, dtype={audio_array.dtype}")
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Sample values: min={np.min(audio_array):.6f}, max={np.max(audio_array):.6f}, mean={np.mean(audio_array):.6f}")
+                    
+                    audio_buffer.extend(audio_array)
+                    frame_count += 1
+                    
+                    # Check if we're in tap-to-talk mode and if tap-to-talk is currently active
+                    from .state import get_shared_state
+                    shared_state = get_shared_state()
+                    asr_mode = getattr(shared_state, 'asr_mode', 'auto-input')
+                    
+                    if asr_mode == 'tap-to-talk':
+                        # In tap-to-talk mode, active when ignore_input is False
+                        with _ignore_input_lock:
+                            is_tap_to_talk_active = not _ignore_input
+                    else:
+                        # In continuous/auto-input modes, never use tap-to-talk logic
+                        is_tap_to_talk_active = False
+                    
+                    # Increment outstanding frames counter for each PyAudio frame during active tap-to-talk
+                    if is_tap_to_talk_active and not process_remaining_frames:
+                        with _tap_to_talk_counter_lock:
+                            _tap_to_talk_outstanding_frames += 1
+                            log_message("DEBUG", f"[LOCAL_WHISPER] Tap-to-talk outstanding frames (+1): {_tap_to_talk_outstanding_frames}")
+                    
+                    # Process when we have enough audio accumulated for transcription window
+                    if transitioned_to_released and frame_count < FRAMES_TO_ACCUMULATE:
+                        # Tap-to-talk key released - pad partial frames to minimum processing size
+                        if audio_buffer:
+                            log_message("INFO", f"[LOCAL_WHISPER] Tap-to-talk released - processing partial segment ({frame_count}/{FRAMES_TO_ACCUMULATE} frames)")
+                            
+                            # Pad to at least 1 second of audio to ensure PyWhisperCpp compatibility  
+                            current_samples = len(audio_buffer)
+                            min_samples = int(RATE * 1.0)  # 1 second minimum for PyWhisperCpp
+                            if current_samples < min_samples:
+                                padding_needed = min_samples - current_samples
+                                audio_buffer.extend([0.0] * padding_needed)
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Padded {current_samples} samples to {len(audio_buffer)} samples ({len(audio_buffer)/RATE:.1f}s)")
+                            
+                            # Force processing by setting frame_count to threshold
+                            frame_count = FRAMES_TO_ACCUMULATE
+                    
+                    if frame_count >= FRAMES_TO_ACCUMULATE:
+                        # Convert to numpy array and normalize
+                        audio_np = np.array(audio_buffer, dtype=np.float32)
+                        
+                        # Calculate energy level for debugging
+                        energy_level = np.sqrt(np.mean(audio_np ** 2))  # RMS energy
+                        max_amplitude = np.max(np.abs(audio_np))  # Peak amplitude
+                        
+                        # Debug audio format
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Audio format: dtype={audio_np.dtype}, shape={audio_np.shape}, min={np.min(audio_np):.4f}, max={np.max(audio_np):.4f}")
+                        log_message("DEBUG", f"[LOCAL_WHISPER] Audio segment: energy={energy_level:.4f}, peak={max_amplitude:.4f}, samples={len(audio_np)}")
+                        
+                        # Whisper expects 16kHz mono float32 with values roughly in [-1, 1] range
+                        # Let's verify and potentially normalize
+                        if np.max(np.abs(audio_np)) > 1.0:
+                            log_message("WARNING", "[LOCAL_WHISPER] Audio clipping detected, normalizing...")
+                            audio_np = audio_np / np.max(np.abs(audio_np))
+                        
+                        # Check if this is tap-to-talk mode and microphone is active
+                        # In tap-to-talk, transcribe everything since user is intentionally speaking  
+                        with _ignore_input_lock:
+                            current_ignore_state = _ignore_input
+                        log_message("DEBUG", f"[LOCAL_WHISPER] ignore_input={current_ignore_state}, is_tap_to_talk_active={is_tap_to_talk_active}, energy={energy_level:.4f}")
+                        
+                        # Convert speech_recognition energy threshold (for 16-bit audio) to RMS energy threshold (for float32 audio)
+                        # speech_recognition uses energy = sum(audio²) for 16-bit integers (-32768 to 32767)
+                        # We use RMS energy = sqrt(mean(audio²)) for float32 (-1.0 to 1.0) 
+                        # Rough conversion: RMS threshold ≈ sqrt(sr_threshold / (32768² * samples_per_frame))
+                        sr_energy_threshold = engine.recognizer.energy_threshold
+                        samples_per_transcription_window = int(RATE * TRANSCRIPTION_WINDOW_DURATION)  
+                        rms_energy_threshold = math.sqrt(sr_energy_threshold / (32768.0 ** 2 * samples_per_transcription_window))
+                        
+                        if is_tap_to_talk_active or process_remaining_frames or energy_level > rms_energy_threshold:
+                            if is_tap_to_talk_active:
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Queueing audio segment (tap-to-talk active): shape={audio_np.shape}, energy={energy_level:.4f}")
+                            elif process_remaining_frames:
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Queueing audio segment (remaining frames): shape={audio_np.shape}, energy={energy_level:.4f}")
+                            else:
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Queueing audio segment (energy threshold): shape={audio_np.shape}, energy={energy_level:.4f}")
+                            try:
+                                # Queue audio for transcription (non-blocking) - include frame count for outstanding frames tracking
+                                audio_queue.put_nowait((audio_np, energy_level, frame_count))
+                                
+                                # Note: Outstanding frames are tracked per individual PyAudio frame, not per segment
+                            except queue.Full:
+                                log_message("WARNING", "[LOCAL_WHISPER] Transcription queue full, dropping audio segment")
+                        else:
+                            log_message("DEBUG", f"[LOCAL_WHISPER] Skipping transcription - energy too low ({energy_level:.4f})")
+                        
+                        # Reset buffer for next segment
+                        audio_buffer = []
+                        frame_count = 0
+                        
+                        # Clear the remaining frames flag after processing
+                        if process_remaining_frames:
+                            process_remaining_frames = False
+                            log_message("DEBUG", "[LOCAL_WHISPER] Finished processing remaining frames")
+                    
+                except Exception as e:
+                    if engine.is_active:
+                        log_message("ERROR", f"[LOCAL_WHISPER] Chunk processing error: {e}")
+                    time.sleep(0.01)
+                    
+        except Exception as e:
+            log_message("ERROR", f"[LOCAL_WHISPER] Streaming error: {e}")
+        finally:
+            try:
+                # Signal transcription worker to stop
+                audio_queue.put_nowait(None)  # Shutdown signal
+                
+                # Wait for transcription thread to finish (with timeout)
+                if transcription_thread.is_alive():
+                    transcription_thread.join(timeout=2.0)
+                    if transcription_thread.is_alive():
+                        log_message("WARNING", "[LOCAL_WHISPER] Transcription thread did not shut down gracefully")
+                
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+                log_message("INFO", "[LOCAL_WHISPER] Stopped streaming audio capture and transcription thread")
+            except:
+                pass
+
+
 def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     """Check which ASR providers are accessible based on API keys and environment"""
     accessible = {}
@@ -1323,18 +1918,95 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         "note": "Requires BING_KEY environment variable"
     }
     
+    # local_whisper - Smart backend selection (PyWhisperCpp CoreML on Apple Silicon, faster-whisper elsewhere)
+    whisper_backend_info = _get_local_whisper_backend_info()
+    
+    accessible["local_whisper"] = {
+        "available": whisper_backend_info["available"],
+        "note": whisper_backend_info["note"]
+    }
+    
     return accessible
 
 
-def select_best_asr_provider() -> str:
-    """Select the best available ASR provider based on accessibility and preferences with order: preferred env var, accessible non-google providers, then Google free fallback."""
-    preferred = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
-    accessible = check_asr_provider_accessibility()
+def _get_local_whisper_backend_info():
+    """Centralized function to determine optimal local whisper backend and availability."""
+    import platform
     
-    # Check if preferred provider is accessible
-    if preferred and preferred in accessible and accessible[preferred]['available']:
-        log_message("INFO", f"Using preferred ASR provider: {preferred}")
-        return preferred
+    # Detect Apple Silicon specifically
+    is_apple_silicon = (
+        platform.system() == 'Darwin' and 
+        platform.machine() == 'arm64'
+    )
+    
+    # Check PyWhisperCpp CoreML availability on Apple Silicon
+    has_pywhispercpp = False
+    if is_apple_silicon:
+        try:
+            from pywhispercpp.model import Model
+            has_pywhispercpp = True
+        except ImportError:
+            pass
+    
+    # Check faster-whisper availability (fallback)
+    has_faster_whisper = False
+    try:
+        from faster_whisper import WhisperModel
+        has_faster_whisper = True
+    except ImportError:
+        pass
+    
+    # Determine best backend and create info
+    if is_apple_silicon and has_pywhispercpp:
+        return {
+            "available": True,
+            "note": None,
+            "use_pywhispercpp": True,
+            "is_apple_silicon": is_apple_silicon
+        }
+    elif has_faster_whisper:
+        note = None
+        if is_apple_silicon and not has_pywhispercpp:
+            note = "On Apple Silicon consider pywhispercpp for CoreML support: WHISPER_COREML=1 pip install pywhispercpp"
+
+        return {
+            "available": True,
+            "note": note,
+            "use_pywhispercpp": False,
+            "is_apple_silicon": is_apple_silicon
+        }
+    else:
+        if is_apple_silicon:
+            note = "Local Whisper requires pywhispercpp (or faster-whisper which would be CPU limited): WHISPER_COREML=1 pip install pywhispercpp"
+        else:
+            note = "Local Whisper requires faster-whisper: pip install faster-whisper)"
+            
+        return {
+            "available": False,
+            "note": note,
+            "use_pywhispercpp": False,
+            "is_apple_silicon": is_apple_silicon
+        }
+
+
+def select_best_asr_provider(preferred=None) -> str:
+    """Select the best available ASR provider based on accessibility and preferences with order: preferred env var, accessible non-google providers, then Google free fallback."""
+    accessible = check_asr_provider_accessibility()
+
+    log_message("DEBUG", f"### {preferred=} {accessible=}")
+    # Check if preferred provider is accessible and imports work
+    if preferred and preferred in accessible:
+        if accessible[preferred]["note"]:
+            print(accessible[preferred]["note"])
+        if accessible[preferred]['available']:
+            # Actually validate the provider including imports and model cache
+            imports_ok, import_error = check_provider_imports(preferred, requested_provider=preferred)
+            if imports_ok:
+                log_message("INFO", f"Using preferred ASR provider: {preferred}")
+                return preferred
+            else:
+                log_message("WARNING", f"ASR provider {preferred} validation failed: {import_error}")
+                # Continue to fallback logic
     
     # Get all accessible providers except google (free)
     available_providers = [
@@ -1364,6 +2036,7 @@ PROVIDERS = {
     'aws': AWSTranscribeProvider,
     'azure': AzureSpeechProvider,
     'deepgram': DeepgramProvider,
+    'local_whisper': FasterWhisperProvider,
     'gcloud': GoogleCloudProvider,
     'google': GoogleCloudProvider,
     'google_free': GoogleFreeProvider,
@@ -1562,13 +2235,27 @@ class DictationEngine:
         with self.microphone as source:
             while self.is_active and not self.stop_event.is_set():
                 try:
+                    # Check ignore status before capture
+                    with _ignore_input_lock:
+                        ignore_status = _ignore_input
+                    
+                    log_message("DEBUG", f"[ASR PHRASE] About to listen, ignore_input={ignore_status}")
                     audio = self.recognizer.listen(
                         source,
                         timeout=0.5,
                         phrase_time_limit=self.phrase_time_limit
                     )
+                    
+                    # Check ignore status after capture (might have changed during listen)
+                    with _ignore_input_lock:
+                        ignore_status_after = _ignore_input
+                    
+                    if ignore_status_after:
+                        log_message("DEBUG", "[ASR PHRASE] Audio captured but ignoring due to ignore_input=True - discarding")
+                        continue
+                    
                     self.audio_queue.put(audio)
-                    log_message("DEBUG", "Captured audio phrase")
+                    log_message("DEBUG", f"[ASR PHRASE] Captured and queued audio phrase (queue size: {self.audio_queue.qsize()})")
                 except sr.WaitTimeoutError:
                     continue
                 except Exception as e:
@@ -1580,27 +2267,38 @@ class DictationEngine:
         """Process audio from queue"""
         while self.is_active and not self.stop_event.is_set():
             try:
+                log_message("DEBUG", f"[ASR PROCESS] Waiting for audio from queue (current size: {self.audio_queue.qsize()})")
                 audio = self.audio_queue.get(timeout=0.5)
+                log_message("DEBUG", f"[ASR PROCESS] Got audio from queue (remaining size: {self.audio_queue.qsize()})")
                 
                 # Skip processing if paused
                 with self.pause_lock:
                     if self.is_paused:
-                        log_message("DEBUG", "Skipping audio processing - ASR is paused")
+                        log_message("DEBUG", "[ASR PROCESS] Skipping audio processing - ASR is paused")
+                        continue
+                
+                # Skip processing if ignoring input (e.g., during TTS)
+                with _ignore_input_lock:
+                    if _ignore_input:
+                        log_message("DEBUG", "[ASR PROCESS] Skipping audio processing - ASR is ignoring input")
                         continue
                 
                 # Set recognition active
                 self.recognition_active = True
+                log_message("DEBUG", "[ASR PROCESS] Starting recognition...")
                 
                 # Recognize using provider
                 try:
                     text = self.provider.recognize(audio)
+                    log_message("DEBUG", f"[ASR PROCESS] Recognition completed, text: '{text}'")
                     
                     # Process and callback
                     processed = self._process_dictation_text(text)
                     if processed and self.text_callback:
+                        log_message("DEBUG", f"[ASR PROCESS] Calling text callback with: '{processed}'")
                         self.text_callback(processed)
                     
-                    log_message("INFO", f"Recognized: '{text}'")
+                    log_message("INFO", f"[ASR] Recognized: '{text}'")
                     self.last_recognition_time = time.time()
                     
                 except sr.UnknownValueError:
@@ -1676,7 +2374,7 @@ class DictationEngine:
                 return False
         
         result = self.recognition_active and (time.time() - self.last_recognition_time < 2.0)
-        log_message("DEBUG", f"is_recognizing: recognition_active={self.recognition_active}, time_since_last={time.time() - self.last_recognition_time:.1f}s, result={result}")
+        # log_message("DEBUG", f"is_recognizing: recognition_active={self.recognition_active}, time_since_last={time.time() - self.last_recognition_time:.1f}s, result={result}")
         return result
 
 
@@ -1712,6 +2410,8 @@ def create_config_from_args(args) -> ASRConfig:
     elif provider == 'deepgram':
         config.api_key = args.deepgram_api_key
         config.model = args.deepgram_model
+    elif provider == 'local_whisper':
+        config.model = args.whisper_model
     
     return config
 
@@ -1734,6 +2434,8 @@ def create_config_from_dict(data: dict) -> ASRConfig:
 _engine: Optional[DictationEngine] = None
 _ignore_input: bool = False  # Flag to temporarily ignore ASR input
 _ignore_input_lock = threading.Lock()  # Thread safety for _ignore_input
+_tap_to_talk_outstanding_frames: int = 0  # Counter for outstanding audio frames during tap-to-talk
+_tap_to_talk_counter_lock = threading.Lock()  # Thread safety for frames counter
 
 
 def start_dictation(text_callback, partial_callback=None, config: Optional[ASRConfig] = None):
@@ -1767,6 +2469,10 @@ def stop_dictation():
             log_message("ERROR", f"Error stopping engine: {e}")
         finally:
             _engine = None
+    
+    # Clean up the preloaded model to prevent destructor issues
+    _cleanup_whisper_model()
+    
     # Don't clear stored config - it should persist for the session
 
 
@@ -1785,7 +2491,7 @@ def resume_dictation():
 def is_recognizing() -> bool:
     """Check if actively recognizing speech"""
     result = _engine is not None and _engine.is_recognizing()
-    log_message("DEBUG", f"Module is_recognizing: engine exists={_engine is not None}, result={result}")
+    # log_message("DEBUG", f"Module is_recognizing: engine exists={_engine is not None}, result={result}")
     return result
 
 
@@ -1797,25 +2503,104 @@ def configure_asr_from_dict(config_dict: dict) -> bool:
         # Validate the configuration
         provider_class = PROVIDERS.get(config.provider)
         if not provider_class:
-            return False
+            log_message("WARNING", f"Unknown ASR provider: {config.provider}, falling back to best available")
+            # Fall back to best available provider
+            fallback_provider = select_best_asr_provider()
+            config.provider = fallback_provider
+            provider_class = PROVIDERS.get(fallback_provider)
+            if not provider_class:
+                return False
         
         provider = provider_class(config)
         success, error = provider.validate()
         if not success:
+            log_message("WARNING", f"ASR provider {config.provider} validation failed: {error}")
             print(error)
-            return False
+            # Fall back to best available provider
+            fallback_provider = select_best_asr_provider()
+            if fallback_provider != config.provider:
+                log_message("INFO", f"Falling back to ASR provider: {fallback_provider}")
+                config.provider = fallback_provider
+                provider_class = PROVIDERS.get(fallback_provider)
+                if not provider_class:
+                    return False
+                provider = provider_class(config)
+                success, error = provider.validate()
+                if not success:
+                    log_message("ERROR", f"Fallback ASR provider {fallback_provider} also failed: {error}")
+                    return False
+            else:
+                return False
             
         # Store config for later use
         global _stored_config
         _stored_config = config
+        
+        # Update shared state with the actually working provider
+        from .state import get_shared_state
+        shared_state = get_shared_state()
+        shared_state.set_asr_config(provider=config.provider, language=config.language, model=config.model)
+        
         return True
     except Exception as e:
+        log_message("ERROR", f"Error configuring ASR: {e}")
         print(f"Error configuring ASR: {e}")
         return False
 
 
 # Global stored config for backward compatibility
 _stored_config: Optional[ASRConfig] = None
+
+# Global storage for preloaded local whisper model
+_local_whisper_model = None
+
+# Monkey patch PyWhisperCpp Model to prevent destructor errors during shutdown
+try:
+    import pywhispercpp.model
+    original_del = getattr(pywhispercpp.model.Model, '__del__', None)
+    
+    def safe_del(self):
+        try:
+            if original_del:
+                original_del(self)
+        except (TypeError, AttributeError):
+            # Silently ignore destructor errors during shutdown when C++ cleanup functions become None
+            pass
+    
+    pywhispercpp.model.Model.__del__ = safe_del
+except ImportError:
+    # PyWhisperCpp not installed, skip monkey patch
+    pass
+
+
+def _cleanup_whisper_model():
+    """Cleanup function to prevent PyWhisperCpp destructor errors on shutdown"""
+    global _local_whisper_model
+    if _local_whisper_model is not None:
+        try:
+            # For PyWhisperCpp models, suppress any destructor errors
+            if hasattr(_local_whisper_model, '__class__') and 'pywhispercpp' in str(type(_local_whisper_model)):
+                # Redirect stderr to suppress destructor errors
+                import sys
+                import os
+                stderr_fd = sys.stderr.fileno()
+                with open(os.devnull, 'w') as devnull:
+                    old_stderr = os.dup(stderr_fd)
+                    try:
+                        os.dup2(devnull.fileno(), stderr_fd)
+                        _local_whisper_model = None
+                    finally:
+                        os.dup2(old_stderr, stderr_fd)
+                        os.close(old_stderr)
+            else:
+                _local_whisper_model = None
+        except Exception:
+            # Ignore any cleanup errors
+            pass
+
+
+# Register cleanup function to run on exit
+atexit.register(_cleanup_whisper_model)
 
 
 # Override the original start_dictation to handle backward compatibility
@@ -1833,9 +2618,26 @@ def start_dictation(text_callback, partial_callback=None, config: Optional[ASRCo
 
 def set_ignore_input(ignore: bool):
     """Set whether to temporarily ignore ASR input"""
-    global _ignore_input
+    global _ignore_input, _engine
     with _ignore_input_lock:
         _ignore_input = ignore
+    
+    # Clear the audio queue when starting to ignore input to prevent processing old audio
+    if ignore and _engine and hasattr(_engine, 'audio_queue'):
+        try:
+            queue_size_before = _engine.audio_queue.qsize()
+            cleared_count = 0
+            # Drain the audio queue
+            while not _engine.audio_queue.empty():
+                try:
+                    _engine.audio_queue.get_nowait()
+                    cleared_count += 1
+                except:
+                    break
+            log_message("DEBUG", f"[ASR IGNORE] Cleared {cleared_count} items from audio queue (was {queue_size_before}, now {_engine.audio_queue.qsize()})")
+        except Exception as e:
+            log_message("DEBUG", f"[ASR IGNORE] Could not clear ASR audio queue: {e}")
+    
     log_message("DEBUG", f"ASR ignore_input set to: {ignore}")
 
 
@@ -1848,6 +2650,13 @@ def is_ignoring_input() -> bool:
 def is_dictation_active() -> bool:
     """Check if dictation engine is active"""
     return _engine is not None and _engine.is_active
+
+
+def get_tap_to_talk_outstanding_frames() -> int:
+    """Get count of outstanding audio frames during tap-to-talk session"""
+    global _tap_to_talk_outstanding_frames
+    with _tap_to_talk_counter_lock:
+        return _tap_to_talk_outstanding_frames
 
 
 def main():
@@ -1870,6 +2679,11 @@ def main():
     parser.add_argument('--deepgram-api-key', help='Deepgram API key')
     parser.add_argument('--deepgram-model', default='nova-2',
                        help='Deepgram model name (e.g., nova-2, nova, base)')
+    parser.add_argument('--whisper-model', default='distil-large-v3',
+                       help='whisper model name for streaming ASR (e.g., distil-large-v3, large-v3, medium)')
+    # Legacy compatibility
+    parser.add_argument('--faster-whisper-model', dest='whisper_model', 
+                       help='(deprecated) use --whisper-model instead')
 
     # Logging options
     parser.add_argument('--log-file', type=str, default=None,
@@ -1915,6 +2729,126 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping...")
         stop_dictation()
+
+
+def preload_pywhisper_model(model_name: str = None):
+    """Preload PyWhisper model early to avoid initialization delays during streaming"""
+    import threading
+    global _local_whisper_model
+    
+    log_message("INFO", "[PYWHISPER_PRELOAD] Starting preload function")
+    try:
+        # Use default model if none specified
+        if not model_name:
+            model_name = os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+        
+        # Get backend information
+        backend_info = _get_local_whisper_backend_info()
+        if not backend_info["available"]:
+            log_message("INFO", f"[PYWHISPER_PRELOAD] Local whisper not available: {backend_info.get('note', 'Unknown reason')}")
+            return None
+        
+        use_pywhispercpp = backend_info["use_pywhispercpp"]
+        
+        if use_pywhispercpp:
+            # Preload PyWhisperCpp CoreML model
+            from .models import check_model_cached, ask_user_consent, show_download_progress
+            from pywhispercpp.model import Model as PyWhisperModel
+            
+            # Use small.en for best balance of speed/accuracy with CoreML
+            coreml_model_name = 'small.en' if model_name in ['distil-large-v3', 'large-v3', 'large-v2'] else model_name
+            
+            # Check if model is cached and ask for consent if needed
+            if not check_model_cached('pywhispercpp', coreml_model_name):
+                if not ask_user_consent('PyWhisperCpp', coreml_model_name):
+                    log_message("INFO", f"[PYWHISPER_PRELOAD] Download cancelled: PyWhisperCpp/{coreml_model_name}")
+                    return None
+                show_download_progress('PyWhisperCpp', coreml_model_name)
+            
+            # Initialize the model using the same threading pattern as in stream()
+            model_ready_event = threading.Event()
+            model_init_error = None
+            initialized_model = None
+            
+            def init_model():
+                nonlocal initialized_model, model_init_error
+                try:
+                    # Redirect stderr to suppress ggml_metal_free messages
+                    with open(os.devnull, 'w') as devnull:
+                        old_stderr = os.dup(2)
+                        os.dup2(devnull.fileno(), 2)
+                        try:
+                            initialized_model = PyWhisperModel(
+                                coreml_model_name,
+                                n_threads=4,
+                                print_progress=False,
+                                print_realtime=False,
+                                print_timestamps=False,
+                                print_special=False,
+                            )
+                        finally:
+                            os.dup2(old_stderr, 2)
+                            os.close(old_stderr)
+                except Exception as e:
+                    model_init_error = e
+                finally:
+                    model_ready_event.set()
+            
+            # Start initialization in a separate thread
+            init_thread = threading.Thread(target=init_model, daemon=False)
+            init_thread.start()
+            
+            # Block until model initialization is complete
+            model_ready_event.wait()
+            
+            if model_init_error:
+                log_message("ERROR", f"[PYWHISPER_PRELOAD] Model initialization failed: {model_init_error}")
+                return None
+            
+            # Store the initialized model
+            global _local_whisper_model
+            _local_whisper_model = initialized_model
+            
+            # Register cleanup handler to suppress Metal deallocation messages
+            def cleanup_model():
+                global _local_whisper_model
+                if _local_whisper_model:
+                    # Redirect stderr to suppress ggml_metal_free messages
+                    with open(os.devnull, 'w') as devnull:
+                        old_stderr = os.dup(2)
+                        os.dup2(devnull.fileno(), 2)
+                        try:
+                            _local_whisper_model = None
+                        finally:
+                            os.dup2(old_stderr, 2)
+                            os.close(old_stderr)
+            atexit.register(cleanup_model)
+            
+            log_message("INFO", f"[PYWHISPER_PRELOAD] Successfully preloaded PyWhisperCpp CoreML model: {coreml_model_name}")
+            return initialized_model
+            
+        else:
+            # Preload faster-whisper model
+            from faster_whisper import WhisperModel
+            
+            device = os.environ.get('WHISPER_DEVICE', 'cpu')
+            compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
+            
+            try:
+                model = WhisperModel(model_name, device=device, compute_type=compute_type)
+                
+                # Store the initialized model
+                _local_whisper_model = model
+                
+                log_message("INFO", f"[PYWHISPER_PRELOAD] Successfully preloaded faster-whisper model: {model_name}")
+                return model
+            except Exception as e:
+                log_message("ERROR", f"[PYWHISPER_PRELOAD] faster-whisper initialization failed: {e}")
+                return None
+                
+    except Exception as e:
+        log_message("ERROR", f"[PYWHISPER_PRELOAD] Preload failed: {e}")
+        return None
 
 
 if __name__ == "__main__":

@@ -16,10 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-MCP Talk Server - Model Context Protocol server for TTS/ASR functionality
-Supports both stdio and SSE transports with optional HTTP API
-"""
+"""MCP Talk Server - Model Context Protocol server for TTS/ASR functionality"""
 
 import sys
 import time
@@ -1437,6 +1434,129 @@ async def configure_asr(provider: str = None, language: str = "en-US", model: st
     return await _change_asr_internal(provider, language, model)
 
 @app.tool()
+async def set_asr_mode(mode: str) -> str:
+    """
+    Set ASR (speech recognition) mode
+    
+    Args:
+        mode: ASR mode ('off', 'auto-input', 'tap-to-talk')
+              - 'off': No speech recognition
+              - 'auto-input': Start listening when waiting for input (default)
+              - 'tap-to-talk': Only listen when backtick key is held
+
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+
+    try:
+        await _init_processor_if_needed()
+        log_message("INFO", f"set_asr_mode called with mode: {mode}")
+
+        # Validate mode
+        valid_modes = ['off', 'auto-input', 'tap-to-talk']
+        if mode not in valid_modes:
+            error_msg = f"Invalid ASR mode '{mode}'. Valid modes: {', '.join(valid_modes)}"
+            log_message("ERROR", f"set_asr_mode error: {error_msg}")
+            return error_msg
+
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.asr_mode = mode
+        log_message("INFO", f"ASR mode set to: {mode}")
+
+        # Handle mode-specific logic
+        if mode == 'off':
+            # Disable ASR
+            if shared_state.asr_enabled:
+                await _disable_asr_internal()
+                log_message("INFO", "ASR disabled due to 'off' mode")
+        else:
+            # Enable ASR if not already enabled
+            if not shared_state.asr_enabled:
+                await _enable_asr_internal()
+                log_message("INFO", f"ASR enabled for '{mode}' mode")
+
+        # Generate status message
+        mode_descriptions = {
+            'off': 'Speech recognition disabled',
+            'auto-input': 'Speech recognition enabled (auto-input mode)',
+            'tap-to-talk': 'Speech recognition enabled (tap-to-talk mode - hold backtick key)'
+        }
+
+        # Return current status
+        status = get_status_summary()
+        return status
+
+    except Exception as e:
+        error_msg = f"Error setting ASR mode: {str(e)}"
+        log_message("ERROR", f"set_asr_mode error: {error_msg}")
+        return error_msg
+
+
+@app.tool()
+async def set_tts_mode(mode: str) -> str:
+    """Set TTS mode
+    
+    Args:
+        mode: TTS mode ('off', 'full', 'auto-skip')
+              - 'off': TTS disabled
+              - 'full': TTS enabled, no auto-skipping (wait for all content to be spoken)  
+              - 'auto-skip': TTS enabled with auto-skipping (default behavior)
+
+    CRITICAL INSTRUCTIONS:
+    1. The tool result will be displayed automatically - DO NOT repeat it
+    2. DO NOT speak, summarize, or comment on the status
+    3. DO NOT use talkito:speak_text after this tool
+    4. Simply return to waiting for user input after the tool result is shown
+
+    Returns:
+        One-line formatted status summary (already visible in tool output - no need to repeat)
+    """
+    try:
+        valid_modes = ['off', 'full', 'auto-skip']
+        if mode not in valid_modes:
+            return f"Invalid TTS mode '{mode}'. Valid modes: {', '.join(valid_modes)}"
+
+        # Update shared state
+        shared_state = get_shared_state()
+        shared_state.tts_mode = mode
+        log_message("INFO", f"TTS mode set to: {mode}")
+
+        # Handle mode-specific logic
+        if mode == 'off':
+            # Disable TTS
+            if shared_state.tts_enabled:
+                await _disable_tts_internal()
+                log_message("INFO", "TTS disabled due to 'off' mode")
+        else:
+            # Enable TTS if not already enabled
+            if not shared_state.tts_enabled:
+                await _enable_tts_internal()
+                log_message("INFO", f"TTS enabled for '{mode}' mode")
+
+        # Generate status message
+        mode_descriptions = {
+            'off': 'Text-to-speech disabled',
+            'full': 'Text-to-speech enabled (full mode - no auto-skipping)',
+            'auto-skip': 'Text-to-speech enabled (auto-skip mode)'
+        }
+
+        # Return current status
+        status = get_status_summary()
+        return status
+
+    except Exception as e:
+        error_msg = f"Error setting TTS mode: {str(e)}"
+        log_message("ERROR", f"set_tts_mode error: {error_msg}")
+        return error_msg
+
+
 async def start_voice_input(language: str = "en-US", provider: str = None) -> str:
     """
     Start voice input/dictation using ASR
@@ -3072,7 +3192,7 @@ def main():
                         choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
                         help='TTS provider to use')
     parser.add_argument('--asr-provider', type=str,
-                        choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing'],
+                        choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
                         help='ASR provider to use')
     parser.add_argument('--client-command', type=str,
                         help='The command that is using this MCP server (e.g., claude)')
