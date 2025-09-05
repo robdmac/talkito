@@ -261,3 +261,6 @@ $RECYCLE.BIN/
 
 # PyPI configuration
 .pypirc
+
+# Claude IDE settings
+.claude/
