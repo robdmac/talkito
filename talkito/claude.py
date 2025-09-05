@@ -31,7 +31,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import run_with_talkito
-from .state import get_status_summary, initialize_providers_early
+from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
 
 
 TALKITO_PERMISSIONS = [
@@ -832,6 +832,9 @@ def print_configuration_status(args):
     # Pass the configured providers from args if available
     configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
     configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
+    
+    # Show one-time notification about tap-to-talk change if needed
+    show_tap_to_talk_notification_once()
     
     # Don't pass configured providers to allow showing actual working providers after fallback
     status = get_status_summary(

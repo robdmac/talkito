@@ -1441,8 +1441,8 @@ async def set_asr_mode(mode: str) -> str:
     Args:
         mode: ASR mode ('off', 'auto-input', 'tap-to-talk')
               - 'off': No speech recognition
-              - 'auto-input': Start listening when waiting for input (default)
-              - 'tap-to-talk': Only listen when backtick key is held
+              - 'auto-input': Start listening when waiting for input. This could also be referred to as always on.
+              - 'tap-to-talk': Only listen when backtick key is held (default). This could also be referred to as push to talk.
 
     CRITICAL INSTRUCTIONS:
     1. The tool result will be displayed automatically - DO NOT repeat it

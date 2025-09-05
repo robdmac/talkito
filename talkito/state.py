@@ -64,6 +64,9 @@ class TalkitoState:
     # Hook tracking
     in_tool_use: bool = False  # True between PreToolUse and PostToolUse hooks
     
+    # One-time notifications
+    tap_to_talk_notification_shown: bool = False
+    
     # Callbacks for state changes
     _callbacks: Dict[str, List[Callable]] = field(default_factory=dict)
     
@@ -215,6 +218,7 @@ class TalkitoState:
                 'whatsapp_mode_active': self.whatsapp_mode_active,
                 'slack_mode_active': self.slack_mode_active,
                 'voice_mode_active': self.voice_mode_active,
+                'tap_to_talk_notification_shown': self.tap_to_talk_notification_shown,
                 'communication': {
                     'whatsapp_enabled': self.communication.whatsapp_enabled,
                     'whatsapp_from_number': self.communication.whatsapp_from_number,
@@ -328,6 +332,9 @@ class SharedStateManager:
                         self.state.asr_model = data['asr_model']
                     if 'asr_mode' in data:
                         self.state.asr_mode = data['asr_mode']
+                    # One-time notification flags
+                    if 'tap_to_talk_notification_shown' in data:
+                        self.state.tap_to_talk_notification_shown = data['tap_to_talk_notification_shown']
                     # Communication config (these are persistent preferences)
                     if 'communication' in data:
                         comm = data['communication']
@@ -375,6 +382,8 @@ class SharedStateManager:
                         self.state.whatsapp_mode_active = data['whatsapp_mode_active']
                     if 'slack_mode_active' in data:
                         self.state.slack_mode_active = data['slack_mode_active']
+                    if 'tap_to_talk_notification_shown' in data:
+                        self.state.tap_to_talk_notification_shown = data['tap_to_talk_notification_shown']
         except Exception:
             # Ignore errors reloading state
             pass
@@ -569,6 +578,9 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         if asr_override or (status["asr"]["initialized"] and status["asr"]["enabled"]):
             asr_emoji = "🟢"
             asr_display += f" → {status['asr']['provider'] or 'none'}"
+            # Add tap-to-talk button indicator for supported modes
+            if status['asr']['mode'] in ['tap-to-talk', 'push-to-talk']:
+                asr_display += " (`)"
         else:
             asr_emoji = "🔴"
         
@@ -603,6 +615,29 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         
     except Exception as e:
         return f"Error getting status: {str(e)}"
+
+
+def show_tap_to_talk_notification_once():
+    """Show one-time notification about tap-to-talk mode change, if not already shown."""
+    shared_state = get_shared_state()
+    
+    # Check if we've already shown this notification
+    with shared_state._lock:
+        if shared_state.tap_to_talk_notification_shown:
+            return
+        
+        # Mark as shown and persist
+        shared_state.tap_to_talk_notification_shown = True
+    
+    # Show the notification
+    print("""
+TALKITO DEFAULT ASR MODE HAS CHANGED
+* The default ASR mode has changed to 'tap-to-talk' for better control.
+* Hold the backtick key (`) to toggle voice input.
+* You can change this back with: talkito --asr-mode auto-input or typing \"Switch to always on voice mode\"
+""")
+
+    save_shared_state()
 
 
 def set_tts_config_thread_safe(provider: Optional[str] = None, voice: Optional[str] = None,
