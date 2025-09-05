@@ -47,7 +47,7 @@ from . import tts
 from . import asr
 from . import comms
 from .core import TalkitoCore
-from .state import get_status_summary, initialize_providers_early
+from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -383,6 +383,9 @@ def print_configuration_status(args):
     shared_state = get_shared_state()
     shared_state.asr_mode = args.asr_mode
     shared_state.tts_mode = tts_mode
+    
+    # Show one-time notification about tap-to-talk change if needed
+    show_tap_to_talk_notification_once()
     
     # Don't pass configured providers to allow showing actual working providers after fallback
     status = get_status_summary(
