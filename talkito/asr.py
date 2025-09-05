@@ -240,7 +240,7 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
             # Check if the model is cached
             from .models import check_model_cached, with_download_progress
             # Use the actual model that will be used (check environment variable)
-            model_name = os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+            model_name = os.environ.get('WHISPER_MODEL', 'small')
             if not check_model_cached('local_whisper', model_name):
                 # Only prompt for download if this provider was specifically requested
                 if (requested_provider == 'local_whisper' or provider == requested_provider or 
@@ -1342,8 +1342,8 @@ class WhisperProvider(ASRProvider):
 
 
 class FasterWhisperProvider(ASRProvider):
-    """faster-whisper provider - offline local ASR with distil-large-v3 using chunked processing"""
-    
+    """faster-whisper provider - offline local ASR using chunked processing"""
+
     @property
     def supports_streaming(self) -> bool:
         """Supports chunked real-time streaming with faster-whisper"""
@@ -1359,8 +1359,8 @@ class FasterWhisperProvider(ASRProvider):
         """Recognize using faster-whisper offline model"""
         from faster_whisper import WhisperModel
 
-        # Get configuration - model defaults to distil-large-v3 
-        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+        # Get configuration - model defaults to small
+        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'small')
         device = os.environ.get('WHISPER_DEVICE', 'cpu')
         compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
         
@@ -1432,7 +1432,7 @@ class FasterWhisperProvider(ASRProvider):
         global _tap_to_talk_outstanding_frames
         
         # Get configuration
-        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+        model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'small')
         device = os.environ.get('WHISPER_DEVICE', 'cpu')
         compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
         
@@ -1450,7 +1450,7 @@ class FasterWhisperProvider(ASRProvider):
             model = _local_whisper_model
 
             if use_pywhispercpp:
-                coreml_model_name = 'small.en' if model_name in ['distil-large-v3', 'large-v3', 'large-v2'] else model_name
+                coreml_model_name =  model_name
                 log_message("INFO", f"[LOCAL_WHISPER] Using pre-loaded PyWhisperCpp CoreML model: {coreml_model_name}")
             else:
                 log_message("INFO", f"[LOCAL_WHISPER] Using pre-loaded faster-whisper model: {model_name}")
@@ -2679,8 +2679,8 @@ def main():
     parser.add_argument('--deepgram-api-key', help='Deepgram API key')
     parser.add_argument('--deepgram-model', default='nova-2',
                        help='Deepgram model name (e.g., nova-2, nova, base)')
-    parser.add_argument('--whisper-model', default='distil-large-v3',
-                       help='whisper model name for streaming ASR (e.g., distil-large-v3, large-v3, medium)')
+    parser.add_argument('--whisper-model', default='small',
+                       help='whisper model name for streaming ASR (e.g., medium, small, base, tiny)')
     # Legacy compatibility
     parser.add_argument('--faster-whisper-model', dest='whisper_model', 
                        help='(deprecated) use --whisper-model instead')
@@ -2740,7 +2740,7 @@ def preload_pywhisper_model(model_name: str = None):
     try:
         # Use default model if none specified
         if not model_name:
-            model_name = os.environ.get('WHISPER_MODEL', 'distil-large-v3')
+            model_name = os.environ.get('WHISPER_MODEL', 'small')
         
         # Get backend information
         backend_info = _get_local_whisper_backend_info()
@@ -2755,8 +2755,8 @@ def preload_pywhisper_model(model_name: str = None):
             from .models import check_model_cached, ask_user_consent, show_download_progress
             from pywhispercpp.model import Model as PyWhisperModel
             
-            # Use small.en for best balance of speed/accuracy with CoreML
-            coreml_model_name = 'small.en' if model_name in ['distil-large-v3', 'large-v3', 'large-v2'] else model_name
+            # Use small for best balance of speed/accuracy with CoreML
+            coreml_model_name = model_name
             
             # Check if model is cached and ask for consent if needed
             if not check_model_cached('pywhispercpp', coreml_model_name):
