@@ -121,6 +121,7 @@ celerybeat.pid
 
 # Environments
 .env
+.talkito.env
 .venv
 env/
 venv/

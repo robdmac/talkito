@@ -48,7 +48,7 @@ except ImportError:
 # Import talkito functionality
 from . import tts
 from . import comms
-from .comms import SlackProvider, TwilioWhatsAppProvider, TwilioSMSProvider
+from .comms import SlackProvider, TwilioWhatsAppProvider
 from .core import TalkitoCore, ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
@@ -84,7 +84,7 @@ def log_message(level: str, message: str):
     # Always try to log, even if logging might be disabled
     try:
         _base_log_message(level, f"[MCP-SSE] {message}", __name__)
-    except Exception as e:
+    except Exception:
         pass
 
 # Server configuration - Changed to include server name
@@ -690,7 +690,7 @@ async def turn_on() -> str:
         shared_state = get_shared_state()
         shared_state.set_voice_mode(True)
 
-        log_message("INFO", f"turn_on completed: Voice mode activated")
+        log_message("INFO", "turn_on completed: Voice mode activated")
         return _get_status_summary()
         
     except Exception as e:
@@ -740,7 +740,7 @@ async def turn_off() -> str:
         shared_state = get_shared_state()
         shared_state.turn_off_all()
         
-        log_message("INFO", f"turn_off completed: Voice mode deactivated")
+        log_message("INFO", "turn_off completed: Voice mode deactivated")
         return _get_status_summary()
         
     except Exception as e:
@@ -889,11 +889,16 @@ async def _change_tts_internal(provider: str = "system", voice: str = None, regi
         tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
 
         config_parts = [f"provider={provider}"]
-        if voice: config_parts.append(f"voice={voice}")
-        if region: config_parts.append(f"region={region}")
-        if language: config_parts.append(f"language={language}")
-        if rate is not None: config_parts.append(f"rate={rate}")
-        if pitch is not None: config_parts.append(f"pitch={pitch}")
+        if voice:
+            config_parts.append(f"voice={voice}")
+        if region:
+            config_parts.append(f"region={region}")
+        if language:
+            config_parts.append(f"language={language}")
+        if rate is not None:
+            config_parts.append(f"rate={rate}")
+        if pitch is not None:
+            config_parts.append(f"pitch={pitch}")
 
         result = f"Configured TTS: {', '.join(config_parts)}"
         log_message("INFO", f"configure_tts result: {result}")
@@ -1215,11 +1220,11 @@ async def randomize_tts_voice(provider: str = None) -> str:
         # Handle ElevenLabs special case
         if provider == 'elevenlabs':
             voice_id, voice_name = random.choice(voices)
-            result = await _change_tts_internal(provider, voice_id)
+            await _change_tts_internal(provider, voice_id)
             return f"Selected random voice: {voice_name} (ID: {voice_id})"
         else:
             selected_voice = random.choice(voices)
-            result = await _change_tts_internal(provider, selected_voice)
+            await _change_tts_internal(provider, selected_voice)
             return f"Selected random voice: {selected_voice}"
             
     except Exception as e:
@@ -1282,11 +1287,11 @@ async def cycle_tts_voice(direction: str = "next") -> str:
         # Set the new voice
         if provider == 'elevenlabs':
             voice_id, voice_name = voices[current_idx]
-            result = await _change_tts_internal(provider, voice_id)
+            await _change_tts_internal(provider, voice_id)
             return f"Cycled to voice: {voice_name} (ID: {voice_id}) [{current_idx + 1}/{len(voices)}]"
         else:
             selected_voice = voices[current_idx]
-            result = await _change_tts_internal(provider, selected_voice)
+            await _change_tts_internal(provider, selected_voice)
             return f"Cycled to voice: {selected_voice} [{current_idx + 1}/{len(voices)}]"
             
     except Exception as e:
@@ -1380,8 +1385,10 @@ async def _change_asr_internal(provider: str = None, language: str = "en-US", mo
                 ensure_asr_initialized()
         
         config_parts = [f"provider={provider}"]
-        if language: config_parts.append(f"language={language}")
-        if model: config_parts.append(f"model={model}")
+        if language:
+            config_parts.append(f"language={language}")
+        if model:
+            config_parts.append(f"model={model}")
         
         success_msg = f"ASR configuration updated: {', '.join(config_parts)}"
         log_message("INFO", success_msg)
@@ -1482,13 +1489,6 @@ async def set_asr_mode(mode: str) -> str:
                 await _enable_asr_internal()
                 log_message("INFO", f"ASR enabled for '{mode}' mode")
 
-        # Generate status message
-        mode_descriptions = {
-            'off': 'Speech recognition disabled',
-            'auto-input': 'Speech recognition enabled (auto-input mode)',
-            'tap-to-talk': 'Speech recognition enabled (tap-to-talk mode - hold backtick key)'
-        }
-
         # Return current status
         status = get_status_summary()
         return status
@@ -1539,13 +1539,6 @@ async def set_tts_mode(mode: str) -> str:
             if not shared_state.tts_enabled:
                 await _enable_tts_internal()
                 log_message("INFO", f"TTS enabled for '{mode}' mode")
-
-        # Generate status message
-        mode_descriptions = {
-            'off': 'Text-to-speech disabled',
-            'full': 'Text-to-speech enabled (full mode - no auto-skipping)',
-            'auto-skip': 'Text-to-speech enabled (auto-skip mode)'
-        }
 
         # Return current status
         status = get_status_summary()
@@ -1604,7 +1597,8 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
         partial_callback = None
         if provider in ['assemblyai', 'deepgram', 'gcloud', 'azure', 'aws']:
             # These providers work better with streaming, so provide a dummy partial callback
-            partial_callback = lambda text: log_message("DEBUG", f"Partial transcript: {text}")
+            def partial_callback(text):
+                log_message("DEBUG", f"Partial transcript: {text}")
         
         log_message("INFO", f"Starting dictation with callback: {_dictation_callback_with_notification}")
         asr.start_dictation(_dictation_callback_with_notification, partial_callback=partial_callback)
@@ -1693,7 +1687,7 @@ async def get_dictated_text(clear_after_read: bool = True) -> dict[str, Any]:
                 "timestamp": None,
                 "message": "No dictated text available"
             }
-            log_message("INFO", f"get_dictated_text returning: No dictated text available")
+            log_message("INFO", "get_dictated_text returning: No dictated text available")
             return result
         
         # Get the most recent result
@@ -1919,7 +1913,7 @@ async def _send_whatsapp_internal(message: str, to_number: str = None, with_tts:
         if get_shared_state().tts_initialized:
             tts.queue_for_speech(message, None)
         else:
-            log_message("ERROR", f"[DEBUG] TTS not initialized, skipping speech")
+            log_message("ERROR", "[DEBUG] TTS not initialized, skipping speech")
 
     if success:
         result_msg = f"WhatsApp message sent: '{message[:50]}...' to {to_number}"
@@ -2156,7 +2150,7 @@ async def _start_whatsapp_mode_internal(phone_number: str = None) -> str:
                     return error_msg
             
             # Send confirmation
-            await _send_whatsapp_internal(f"WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
+            await _send_whatsapp_internal("WhatsApp mode activated! I'll send all my responses here.", to_number=_whatsapp_recipient)
             log_message("INFO", f"WhatsApp mode enabled for {_whatsapp_recipient} (standalone mode)")
         else:
             log_message("INFO", f"WhatsApp mode enabled for {_whatsapp_recipient} (core will handle initialization)")
@@ -2213,7 +2207,7 @@ async def stop_whatsapp_mode() -> str:
         shared_state = get_shared_state()
         
         if not shared_state.whatsapp_mode_active:
-            log_message("INFO", f"stop_whatsapp_mode: WhatsApp mode is not active")
+            log_message("INFO", "stop_whatsapp_mode: WhatsApp mode is not active")
             return _get_status_summary()
         
         # Send farewell message
@@ -2226,7 +2220,7 @@ async def stop_whatsapp_mode() -> str:
         from .state import _shared_state
         _shared_state.set_whatsapp_mode(False)
         
-        log_message("INFO", f"stop_whatsapp_mode completed: WhatsApp mode deactivated")
+        log_message("INFO", "stop_whatsapp_mode completed: WhatsApp mode deactivated")
         return _get_status_summary()
         
     except Exception as e:
@@ -2308,7 +2302,7 @@ async def _start_slack_mode_internal(channel: str = None) -> str:
                     log_message("INFO", "Slack connection established")
             
             # Send confirmation
-            await _send_slack_internal(f"Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
+            await _send_slack_internal("Slack mode activated! I'll send all my responses here.", channel=_slack_channel)
             log_message("INFO", f"Slack mode enabled for {_slack_channel} (standalone mode)")
         else:
             log_message("INFO", f"Slack mode enabled for {_slack_channel} (core will handle initialization)")
@@ -2359,7 +2353,7 @@ async def stop_slack_mode() -> str:
         global _slack_mode, _slack_channel
         
         if not _slack_mode:
-            log_message("INFO", f"stop_slack_mode: Slack mode is not active")
+            log_message("INFO", "stop_slack_mode: Slack mode is not active")
             return _get_status_summary()
         
         # Send farewell message
@@ -2373,7 +2367,7 @@ async def stop_slack_mode() -> str:
         shared_state = get_shared_state()
         shared_state.set_slack_mode(False)
         
-        log_message("INFO", f"stop_slack_mode completed: Slack mode deactivated")
+        log_message("INFO", "stop_slack_mode completed: Slack mode deactivated")
         return _get_status_summary()
         
     except Exception as e:
@@ -2426,7 +2420,7 @@ async def get_messages() -> dict[str, Any]:
         
         # Get messages from communication manager
         if _comms_manager:
-            log_message("DEBUG", f"Checking for messages from communication manager")
+            log_message("DEBUG", "Checking for messages from communication manager")
             messages = []
             # Collect all available messages
             while True:
@@ -3270,7 +3264,7 @@ def main():
         
         # Handle transport-specific setup
         if args.transport == 'stdio':
-            print(f"\nStarting stdio server...", file=sys.stderr)
+            print("\nStarting stdio server...", file=sys.stderr)
             print("This process communicates via stdin/stdout", file=sys.stderr)
             print("=" * 60, file=sys.stderr)
         else:  # SSE transport
@@ -3278,14 +3272,14 @@ def main():
             if not args.no_http_api:
                 api_port = start_http_api_server(port + 1)
                 
-                print(f"\nStarting servers...", file=sys.stderr)
+                print("\nStarting servers...", file=sys.stderr)
                 print(f"  MCP SSE server on port {port}", file=sys.stderr)
                 print(f"  HTTP API server on port {api_port}", file=sys.stderr)
-                print(f"\nConnect with the TalkiTo chrome extension", file=sys.stderr)
+                print("\nConnect with the TalkiTo chrome extension", file=sys.stderr)
                 print("=" * 60, file=sys.stderr)
             else:
                 print(f"\nStarting SSE server on port {port}...", file=sys.stderr)
-                print(f"Connect with:", file=sys.stderr)
+                print("Connect with:", file=sys.stderr)
                 print(f"  claude mcp add talkito http://127.0.0.1:{port} --transport sse", file=sys.stderr)
                 print("=" * 60, file=sys.stderr)
         
@@ -3308,7 +3302,7 @@ def main():
         except TypeError as e:
             # Fall back to old API if parameters aren't supported
             log_message("WARNING", f"New API not supported: {e}")
-            print(f"[WARNING] FastMCP new API not supported, using defaults", file=sys.stderr)
+            print("[WARNING] FastMCP new API not supported, using defaults", file=sys.stderr)
             
             # Run with default settings
             app.run(transport=args.transport)

@@ -239,7 +239,7 @@ def find_talkito_command():
         result = subprocess.run(['which', 'talkito'], capture_output=True, text=True)
         if result.returncode == 0:
             return result.stdout.strip()
-    except:
+    except Exception:
         pass
     
     # Fall back to Python's shutil.which
@@ -398,10 +398,7 @@ async def run_claude_hybrid(args) -> int:
     if not port:
         print("Error: Could not find an available port", file=sys.stderr)
         return 1
-    
-    # API port will be port + 1
-    api_port = port + 1
-    
+
     # Set up logging early if log file specified
     if args.log_file:
         from .logs import setup_logging
@@ -469,7 +466,7 @@ async def run_claude_hybrid(args) -> int:
             result = sock.connect_ex((host, check_port))
             sock.close()
             return result == 0
-        except:
+        except Exception:
             return False
     
     def run_mcp_server():
@@ -519,7 +516,7 @@ async def run_claude_hybrid(args) -> int:
                     try:
                         # Just try a simple GET request to see if server responds
                         req = urllib.request.Request(f'http://127.0.0.1:{port}/')
-                        with urllib.request.urlopen(req, timeout=1) as response:
+                        with urllib.request.urlopen(req, timeout=1):
                             # Server is responding
                             # Give FastMCP a bit more time to fully initialize its internals
                             # This is the key - even when responding, it needs more time
@@ -561,7 +558,7 @@ async def run_claude_hybrid(args) -> int:
                 sys.stderr = old_stderr
                 
                 # Get captured stderr content
-                stderr_content = stderr_capture.getvalue()
+                # stderr_content = stderr_capture.getvalue()  # Captured but not used
                 print(f"MCP server error: {e}", file=sys.stderr)
                 import traceback
                 traceback.print_exc(file=sys.stderr)
@@ -759,7 +756,7 @@ def build_asr_config(args) -> dict:
                 best_provider = asr.select_best_asr_provider()
                 if best_provider != 'google':  # 'google' is the free fallback
                     config['provider'] = best_provider
-            except:
+            except Exception:
                 pass
     if args.asr_language:
         config['language'] = args.asr_language
@@ -827,11 +824,6 @@ def print_configuration_status(args):
             shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
         if has_slack and comms_config.slack_channel:
             shared_state.communication.slack_channel = comms_config.slack_channel
-    
-    # Get the status summary using the shared function
-    # Pass the configured providers from args if available
-    configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
-    configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
     
     # Show one-time notification about tap-to-talk change if needed
     show_tap_to_talk_notification_once()

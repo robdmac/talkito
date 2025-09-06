@@ -561,7 +561,7 @@ def modify_prompt_for_asr(data: bytes, input_prompt, input_mic_replace) -> bytes
             return text.encode('utf-8')
         log_message("WARNING", f"input prompt {input_prompt} not found in text {text}")
         return data
-    except:
+    except Exception:
         # If any error occurs, return original data
         return data
 
@@ -614,7 +614,7 @@ def get_terminal_size() -> Tuple[int, int]:
             terminal.terminal_rows = rows
             terminal.terminal_cols = cols
             return rows, cols
-    except:
+    except Exception:
         pass
     return terminal.terminal_rows, terminal.terminal_cols
 
@@ -1180,12 +1180,12 @@ async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int, int, asy
         if slave_fd is not None:
             try:
                 os.close(slave_fd)
-            except:
+            except Exception:
                 pass
         if master_fd is not None:
             try:
                 os.close(master_fd)
-            except:
+            except Exception:
                 pass
         raise
 
@@ -1232,7 +1232,7 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
             try:
                 log_message("WARNING", "Send a non breaking space to trigger terminal activity")
                 os.write(master_fd, SPACE_THEN_BACK)
-            except:
+            except Exception:
                 pass
         return enabled_auto_listen, current_time
 
@@ -1301,7 +1301,7 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
                 for i, line in enumerate(lines):
                     if '⏺' in line:
                         log_message("DEBUG", f"  Response line {i}: '{line[:100]}...'")
-        except:
+        except Exception:
             pass
 
     cursor_delta, did_scroll = parse_cursor_movements(data)
@@ -2111,7 +2111,7 @@ async def drain_pty_output(master_fd: int, line_buffer: bytes):
                 break
             await async_stdout_write(data)
             line_buffer += data
-    except:
+    except Exception:
         pass
 
 
@@ -2296,7 +2296,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
                     if handle_alternate_screen_buffer(data):
                         in_alternate_buffer = not in_alternate_buffer
-                        buffer_switch_time = time.time()
                         # Always process lines before clearing on buffer switch
                         current_cursor_row = clear_terminal_state(output_buffer, 1)
 
@@ -2440,7 +2439,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                     buffer, prev_line, _ = process_line(
                                         line, buffer, prev_line, False, line_idx, asr_mode
                                     )
-                    except:
+                    except Exception:
                         pass
                 else:
                     await drain_pty_output(master_fd, line_buffer)
@@ -2576,7 +2575,7 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
                     log_message("DEBUG", f"  Buffer line {i}: '{line[:80]}...'")
                 else:
                     log_message("DEBUG", f"  Buffer line {i}: (empty)")
-        except:
+        except Exception:
             pass
     
     while b'\n' in line_buffer and not detected_prompt:
