@@ -24,7 +24,7 @@ import threading
 import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from typing import Dict, Callable, Optional, Any
+from typing import Dict, Callable, Optional
 from dataclasses import dataclass
 
 from .logs import log_message as _base_log_message

@@ -33,7 +33,7 @@ def ask_user_consent(provider: str, model_name: str) -> bool:
     # Auto-decline in non-interactive environments to prevent hanging
     if not sys.stdin.isatty():
         print(f"Non-interactive environment detected. Declining download of {provider} model '{model_name}'.")
-        print(f"Set TALKITO_AUTO_APPROVE_DOWNLOADS=1 to enable automatic downloads.")
+        print("Set TALKITO_AUTO_APPROVE_DOWNLOADS=1 to enable automatic downloads.")
         return False
     
     try:
@@ -81,6 +81,6 @@ def check_model_cached(provider: str, model_name: str) -> bool:
             # Kokoro uses HuggingFace cache for the hexgrad/Kokoro-82M model
             cache_dir = Path.home() / '.cache' / 'huggingface' / 'hub' / 'models--hexgrad--Kokoro-82M'
             return cache_dir.exists() and any(cache_dir.iterdir())
-    except:
+    except Exception:
         pass
     return False

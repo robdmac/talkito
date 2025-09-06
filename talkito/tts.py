@@ -18,20 +18,22 @@
 
 """Text-to-Speech engine and text processing utilities with TTS engine detection, symbol conversion, and speech synthesis support."""
 
-import subprocess
-import shutil
-import re
-import time
-import threading
+import argparse
 import queue
 import os
-import argparse
-import tempfile
-import sys
 import random
+import re
+import requests
+import shutil
 import signal
+import soundfile as sf
+import subprocess
+import tempfile
+import threading
+import time
+import warnings
 from collections import deque
-from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
+from typing import Optional, List, Tuple, Deque, Dict, Any
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
@@ -255,7 +257,7 @@ class PlaybackControl:
             if self.current_process:
                 try:
                     self.current_process.terminate()
-                except:
+                except Exception:
                     pass
                     
     def resume(self):
@@ -270,7 +272,7 @@ class PlaybackControl:
             if self.current_process:
                 try:
                     self.current_process.terminate()
-                except:
+                except Exception:
                     pass
                     
     def skip_all_items(self):
@@ -280,7 +282,7 @@ class PlaybackControl:
             if self.current_process:
                 try:
                     self.current_process.terminate()
-                except:
+                except Exception:
                     pass
                     
     def reset_skip_flags(self):
@@ -438,12 +440,10 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     kittentts_available = False
     kittentts_note = "Ultra-lightweight TTS that runs without GPU (no API key required)"
     try:
-        import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             from kittentts import KittenTTS
-            import soundfile as sf
         # Check if the model is cached
         from .models import check_model_cached, with_download_progress
         model_name = kittentts_model  # Use the actual configured model name
@@ -486,12 +486,10 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     kokoro_available = False
     kokoro_note = "High-quality 82M parameter TTS model (no API key required)"
     try:
-        import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             from kokoro import KPipeline
-            import soundfile as sf
         # Check if the model is cached
         from .models import check_model_cached, with_download_progress
         if not check_model_cached('kokoro', 'default'):
@@ -501,7 +499,6 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
                 try:
                     repo_id = 'hexgrad/Kokoro-82M'
                     def create_pipeline():
-                        import warnings
                         with warnings.catch_warnings():
                             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
                             return KPipeline(lang_code='en-us', repo_id=repo_id)
@@ -595,7 +592,7 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
             time.sleep(0.01)  # Small sleep to avoid busy waiting
         
         return process.returncode == 0
-    except:
+    except Exception:
         return False
     finally:
         if use_process_control:
@@ -663,19 +660,17 @@ def validate_provider_config(provider: str) -> bool:
     if provider == 'kittentts':
         global _kittentts_warning_shown
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-                from kittentts import KittenTTS
-                import soundfile as sf
+                from kittentts import KittenTTS  # noqa: F401
         except ImportError:
             # Only print the installation message once
             if not _kittentts_warning_shown:
-                print(f"Error: KittenTTS dependencies not installed")
-                print(f"Please install with:")
-                print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-                print(f"  pip install soundfile")
+                print("Error: KittenTTS dependencies not installed")
+                print("Please install with:")
+                print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+                print("  pip install soundfile")
                 _kittentts_warning_shown = True
             log_message("DEBUG", "KittenTTS dependencies not installed")
             return False
@@ -683,16 +678,14 @@ def validate_provider_config(provider: str) -> bool:
     # Special case for KokoroTTS - check if package is installed
     if provider == 'kokoro':
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-                from kokoro import KPipeline
-                import soundfile as sf
+                from kokoro import KPipeline  # noqa: F401
         except ImportError:
-            print(f"Error: KokoroTTS dependencies not installed")
-            print(f"Please install with:")
-            print(f"  pip install kokoro>=0.9.4 soundfile")
+            print("Error: KokoroTTS dependencies not installed")
+            print("Please install with:")
+            print("  pip install kokoro>=0.9.4 soundfile")
             log_message("DEBUG", "KokoroTTS dependencies not installed")
             return False
     
@@ -779,7 +772,7 @@ def _synthesize_openai(text: str) -> Optional[bytes]:
 def speak_with_openai(text: str) -> bool:
     """Speak text using OpenAI TTS API."""
     try:
-        import openai
+        import openai  # noqa: F401
         # Check for API key is now done by validate_provider_config
         api_key = os.environ.get('OPENAI_API_KEY')
         if not api_key:
@@ -820,7 +813,7 @@ def _synthesize_polly(text: str) -> Optional[bytes]:
 def speak_with_polly(text: str) -> bool:
     """Speak text using AWS Polly TTS API."""
     try:
-        import boto3
+        import boto3  # noqa: F401
         return synthesize_and_play(_synthesize_polly, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("boto3", "pip install boto3")
@@ -873,7 +866,7 @@ def _synthesize_azure(text: str) -> Optional[bytes]:
 def speak_with_azure(text: str) -> bool:
     """Speak text using Microsoft Azure TTS API."""
     try:
-        import azure.cognitiveservices.speech as speechsdk
+        import azure.cognitiveservices.speech as speechsdk  # noqa: F401
         return synthesize_and_play(_synthesize_azure, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("Azure Speech SDK", "pip install azure-cognitiveservices-speech")
@@ -929,7 +922,7 @@ def _synthesize_gcloud(text: str) -> Optional[bytes]:
 def speak_with_gcloud(text: str) -> bool:
     """Speak text using Google Cloud Text-to-Speech API."""
     try:
-        from google.cloud import texttospeech
+        from google.cloud import texttospeech  # noqa: F401
         return synthesize_and_play(_synthesize_gcloud, text, use_process_control=True)
     except ImportError:
         return _handle_import_error("Google Cloud Text-to-Speech", "pip install google-cloud-texttospeech")
@@ -939,8 +932,6 @@ def speak_with_gcloud(text: str) -> bool:
 
 def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
     """Synthesize speech using ElevenLabs TTS API."""
-    import requests
-    
     # Get configuration from shared state
     config = get_tts_config()
     voice_id = config.get('voice') or elevenlabs_voice_id
@@ -980,8 +971,6 @@ def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
 def speak_with_elevenlabs(text: str) -> bool:
     """Speak text using ElevenLabs TTS API."""
     try:
-        import requests
-        
         # Check for API key
         api_key = os.environ.get('ELEVENLABS_API_KEY')
         if not api_key:
@@ -998,8 +987,6 @@ def speak_with_elevenlabs(text: str) -> bool:
 def _synthesize_deepgram(text: str) -> Optional[bytes]:
     """Synthesize speech using Deepgram TTS API."""
     from deepgram import DeepgramClient, SpeakOptions
-    import tempfile
-    import os
     
     # Get configuration from shared state
     config = get_tts_config()
@@ -1024,7 +1011,7 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
             tmp_filename = tmp_file.name
         
         # Use the save method as shown in the reference
-        response = deepgram.speak.rest.v("1").save(tmp_filename, {"text": text}, options)
+        deepgram.speak.rest.v("1").save(tmp_filename, {"text": text}, options)
         
         # Read the audio file
         with open(tmp_filename, 'rb') as f:
@@ -1043,7 +1030,7 @@ def _synthesize_deepgram(text: str) -> Optional[bytes]:
 def speak_with_deepgram(text: str) -> bool:
     """Speak text using Deepgram TTS API."""
     try:
-        from deepgram import DeepgramClient
+        from deepgram import DeepgramClient  # noqa: F401
         
         # Check for API key
         api_key = os.environ.get('DEEPGRAM_API_KEY')
@@ -1061,14 +1048,10 @@ def speak_with_deepgram(text: str) -> bool:
 def _synthesize_kittentts(text: str) -> Optional[bytes]:
     """Synthesize speech using KittenTTS."""
     try:
-        import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             from kittentts import KittenTTS
-            import soundfile as sf
-        import tempfile
-        import os
         
         # Get configuration from shared state
         config = get_tts_config()
@@ -1134,15 +1117,11 @@ def speak_with_kittentts(text: str) -> bool:
 def _synthesize_kokoro(text: str) -> Optional[bytes]:
     """Synthesize speech using KokoroTTS."""
     try:
-        import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
             from kokoro import KPipeline
-            import soundfile as sf
-        import tempfile
-        import os
         
         # Get configuration from shared state
         config = get_tts_config()
@@ -1152,10 +1131,9 @@ def _synthesize_kokoro(text: str) -> Optional[bytes]:
         
         # Create Kokoro pipeline (should already be cached from availability check)
         repo_id = 'hexgrad/Kokoro-82M'
-        log_message("DEBUG", f"Using KokoroTTS model")
+        log_message("DEBUG", "Using KokoroTTS model")
         
         # Suppress torch warnings during pipeline creation and usage
-        import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
             pipeline = KPipeline(lang_code=language, repo_id=repo_id)
@@ -1542,7 +1520,7 @@ def speak_with_default(text, engine):
                     time.sleep(0.01)  # Small sleep to avoid busy waiting
             
             return process.returncode == 0
-        except:
+        except Exception:
             return False
         finally:
             with playback_control.lock:
@@ -1566,7 +1544,7 @@ def tts_worker(engine: str):
                 while not tts_queue.empty():
                     try:
                         tts_queue.get_nowait()
-                    except:
+                    except queue.Empty:
                         break
                 playback_control.reset_skip_flags()
                 continue
@@ -1725,7 +1703,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         while not tts_queue.empty():
             try:
                 tts_queue.get_nowait()
-            except:
+            except queue.Empty:
                 break
 
         # Only skip current item if something is actually playing
@@ -1806,7 +1784,7 @@ def reset_tts_cache():
     while not tts_queue.empty():
         try:
             tts_queue.get_nowait()
-        except:
+        except queue.Empty:
             break
     
     log_message("INFO", "TTS cache reset")
@@ -1819,7 +1797,7 @@ def clear_speech_queue():
         try:
             tts_queue.get_nowait()
             items_cleared += 1
-        except:
+        except queue.Empty:
             break
     
     if items_cleared > 0:
@@ -1921,14 +1899,14 @@ def stop_tts_immediately():
                             try:
                                 playback_control.current_process.kill()
                                 log_message("INFO", "Used fallback kill method")
-                            except:
+                            except Exception:
                                 pass
                     else:
                         # No pgid, try regular kill
                         try:
                             playback_control.current_process.kill()
                             log_message("INFO", "Killed process directly (no pgid)")
-                        except:
+                        except Exception:
                             pass
                 else:
                     # For other platforms, use terminate then kill
@@ -1969,7 +1947,7 @@ def skip_all():
     while not tts_queue.empty():
         try:
             tts_queue.get_nowait()
-        except:
+        except queue.Empty:
             break
     log_message("INFO", "Skipped all items")
 
@@ -2095,7 +2073,7 @@ def configure_tts_provider(args):
     elif tts_provider == 'azure':
         # Additional Azure-specific validation
         try:
-            import azure.cognitiveservices.speech as speechsdk
+            import azure.cognitiveservices.speech as speechsdk  # noqa: F401
         except ImportError:
             print(f"Error: {provider_info['install']} required")
             return False
@@ -2109,7 +2087,7 @@ def configure_tts_provider(args):
         # Additional Google Cloud validation
         try:
             from google.cloud import texttospeech
-            client = texttospeech.TextToSpeechClient()
+            texttospeech.TextToSpeechClient()  # Test instantiation to verify availability
         except ImportError:
             print(f"Error: {provider_info['install']} required")
             print("Note: On macOS, grpcio may require a clean reinstall:")
@@ -2138,17 +2116,15 @@ def configure_tts_provider(args):
     elif tts_provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-                from kittentts import KittenTTS
-                import soundfile as sf
+                from kittentts import KittenTTS  # noqa: F401
         except ImportError:
-            print(f"Error: KittenTTS dependencies not installed")
-            print(f"Please install with:")
-            print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-            print(f"  pip install soundfile")
+            print("Error: KittenTTS dependencies not installed")
+            print("Please install with:")
+            print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+            print("  pip install soundfile")
             return False
         
         if args.voice:
@@ -2158,16 +2134,14 @@ def configure_tts_provider(args):
     elif tts_provider == 'kokoro':
         # Additional KokoroTTS validation
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-                from kokoro import KPipeline
-                import soundfile as sf
+                from kokoro import KPipeline  # noqa: F401
         except ImportError:
-            print(f"Error: KokoroTTS dependencies not installed")
-            print(f"Please install with:")
-            print(f"  pip install kokoro>=0.9.4 soundfile")
+            print("Error: KokoroTTS dependencies not installed")
+            print("Please install with:")
+            print("  pip install kokoro>=0.9.4 soundfile")
             return False
         
         kokoro_language = args.language if hasattr(args, 'language') else 'a'
@@ -2186,7 +2160,7 @@ def select_best_tts_provider() -> str:
         try:
             state = get_shared_state()
             state_provider = state.tts_provider
-        except:
+        except Exception:
             pass
     
     preferred = state_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
@@ -2224,7 +2198,6 @@ def configure_tts_from_dict(config: dict) -> bool:
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
     
     provider = config.get('provider', 'system')
-    original_provider = provider
     tts_provider = provider
     
     # Validate provider configuration
@@ -2281,7 +2254,7 @@ def configure_tts_from_dict(config: dict) -> bool:
     elif provider == 'azure':
         # Additional Azure validation
         try:
-            import azure.cognitiveservices.speech as speechsdk
+            import azure.cognitiveservices.speech as speechsdk  # noqa: F401
         except ImportError:
             print(f"Error: {provider_info['install']} required")
             return False
@@ -2294,8 +2267,8 @@ def configure_tts_from_dict(config: dict) -> bool:
     elif provider == 'gcloud':
         # Additional Google Cloud validation
         try:
-            from google.cloud import texttospeech
-            client = texttospeech.TextToSpeechClient()
+            from google.cloud import texttospeech  # noqa: F401
+            texttospeech.TextToSpeechClient()  # Test instantiation to verify availability
         except ImportError:
             print(f"Error: {provider_info['install']} required")
             print("Note: On macOS, grpcio may require a clean reinstall:")
@@ -2326,17 +2299,15 @@ def configure_tts_from_dict(config: dict) -> bool:
     elif provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
                 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-                from kittentts import KittenTTS
-                import soundfile as sf
+                from kittentts import KittenTTS  # noqa: F401
         except ImportError:
-            print(f"Error: KittenTTS dependencies not installed")
-            print(f"Please install with:")
-            print(f"  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-            print(f"  pip install soundfile")
+            print("Error: KittenTTS dependencies not installed")
+            print("Please install with:")
+            print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+            print("  pip install soundfile")
             return False
         
         if config.get('voice'):

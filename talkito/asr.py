@@ -33,20 +33,19 @@ import speech_recognition as sr
 import threading
 import queue
 import argparse
-import io
 import numpy as np
 import platform
 import pyaudio
 import math
+import soundfile as sf
 import time
 import tempfile
-import wave
 import atexit
 from typing import Optional, Callable, Dict, Any, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import importlib
-from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from contextlib import contextmanager
 
 from .logs import log_message as _base_log_message
 
@@ -229,14 +228,14 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
         # Try pywhispercpp first on Apple Silicon
         if platform.system() == 'Darwin' and platform.machine() == 'arm64':
             try:
-                from pywhispercpp.model import Model as PyWhisperModel
+                from pywhispercpp.model import Model as PyWhisperModel  # noqa: F401
                 return cache_and_return(True, "PyWhisperCpp CoreML available")
             except ImportError:
                 pass  # Fall through to faster-whisper
         
         # Fall back to faster-whisper
         try:
-            from faster_whisper import WhisperModel
+            from faster_whisper import WhisperModel  # noqa: F401
             # Check if the model is cached
             from .models import check_model_cached, with_download_progress
             # Use the actual model that will be used (check environment variable)
@@ -250,7 +249,6 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
                         def create_model():
                             # Use int8 for better compatibility, especially on macOS
                             compute_type = 'int8' if platform.system() == 'Darwin' else 'float16'
-                            from faster_whisper import WhisperModel
                             return WhisperModel(model_name, device='cpu', compute_type=compute_type)
                         
                         decorated_func = with_download_progress('local_whisper', model_name, create_model)
@@ -285,7 +283,7 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
         except ImportError:
             # Try OpenAI API
             try:
-                import openai
+                import openai  # noqa: F401
                 return cache_and_return(True, None)
             except ImportError:
                 return cache_and_return(False, "Neither local Whisper nor OpenAI library installed. Run: pip install openai-whisper or pip install openai")
@@ -296,8 +294,8 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
     # Special case: Google Cloud - verify client creation works
     if provider == 'gcloud':
         try:
-            from google.cloud import speech
-            client = speech.SpeechClient()
+            from google.cloud import speech  # noqa: F401
+            speech.SpeechClient()  # Test instantiation to verify availability
             return cache_and_return(True, None)
         except ImportError:
             return cache_and_return(False, "Google Cloud Speech library not installed. Run: pip install google-cloud-speech")
@@ -813,7 +811,7 @@ class AssemblyAIProvider(ASRProvider):
                     try:
                         client.disconnect(terminate=True)
                         log_message("INFO", "AssemblyAI v3 disconnected")
-                    except:
+                    except Exception:
                         pass
         
         common_stream_loop("AssemblyAI", engine, microphone, process_audio)
@@ -951,7 +949,7 @@ class HoundifyProvider(ASRProvider):
             if client:
                 try:
                     client.finish()
-                except:
+                except Exception:
                     pass
 
 
@@ -971,7 +969,7 @@ class AWSTranscribeProvider(ASRProvider):
         """Stream using AWS Transcribe"""
         # Try new SDK first
         try:
-            from amazon_transcribe.client import TranscribeStreamingClient
+            from amazon_transcribe.client import TranscribeStreamingClient  # noqa: F401
             log_message("INFO", "Using amazon-transcribe SDK for streaming")
             self._stream_with_sdk(engine, microphone)
         except ImportError as e:
@@ -1195,7 +1193,7 @@ class DeepgramProvider(ASRProvider):
     def stream(self, engine, microphone) -> None:
         """Stream using Deepgram SDK"""
         try:
-            from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
+            from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents  # noqa: F401
         except ImportError:
             log_message("ERROR", "Deepgram SDK not found. Please install: pip install deepgram-sdk")
             raise ImportError("Deepgram SDK required: pip install deepgram-sdk")
@@ -1357,7 +1355,7 @@ class FasterWhisperProvider(ASRProvider):
     
     def recognize(self, audio) -> str:
         """Recognize using faster-whisper offline model"""
-        from faster_whisper import WhisperModel
+        from faster_whisper import WhisperModel  # noqa: F401
 
         # Get configuration - model defaults to small
         model_name = self.config.model or os.environ.get('WHISPER_MODEL', 'small')
@@ -1379,7 +1377,6 @@ class FasterWhisperProvider(ASRProvider):
             # Load audio using faster-whisper's method
             # faster-whisper expects audio as float32 array
             try:
-                import soundfile as sf
                 # Try to read with soundfile first
                 audio_array, sample_rate = sf.read(tmp_path, dtype='float32')
             except ImportError:
@@ -1387,12 +1384,12 @@ class FasterWhisperProvider(ASRProvider):
                 # Fallback: convert from bytes directly
                 # WAV data from speech_recognition is 16-bit PCM at 16kHz
                 audio_array = np.frombuffer(wav_data[44:], dtype=np.int16).astype(np.float32) / 32768.0
-                sample_rate = 16000
+                # sample_rate = 16000  # Known constant, no need to assign
             except Exception:
                 # Fallback: convert from bytes directly
                 # WAV data from speech_recognition is 16-bit PCM at 16kHz
                 audio_array = np.frombuffer(wav_data[44:], dtype=np.int16).astype(np.float32) / 32768.0
-                sample_rate = 16000
+                # sample_rate = 16000  # Known constant, no need to assign
             
             # Ensure mono audio
             if len(audio_array.shape) > 1:
@@ -1853,7 +1850,7 @@ class FasterWhisperProvider(ASRProvider):
                 stream.close()
                 p.terminate()
                 log_message("INFO", "[LOCAL_WHISPER] Stopped streaming audio capture and transcription thread")
-            except:
+            except Exception:
                 pass
 
 
@@ -1943,7 +1940,7 @@ def _get_local_whisper_backend_info():
     has_pywhispercpp = False
     if is_apple_silicon:
         try:
-            from pywhispercpp.model import Model
+            from pywhispercpp.model import Model  # noqa: F401
             has_pywhispercpp = True
         except ImportError:
             pass
@@ -1951,7 +1948,7 @@ def _get_local_whisper_backend_info():
     # Check faster-whisper availability (fallback)
     has_faster_whisper = False
     try:
-        from faster_whisper import WhisperModel
+        from faster_whisper import WhisperModel  # noqa: F401
         has_faster_whisper = True
     except ImportError:
         pass
@@ -2632,7 +2629,7 @@ def set_ignore_input(ignore: bool):
                 try:
                     _engine.audio_queue.get_nowait()
                     cleared_count += 1
-                except:
+                except queue.Empty:
                     break
             log_message("DEBUG", f"[ASR IGNORE] Cleared {cleared_count} items from audio queue (was {queue_size_before}, now {_engine.audio_queue.qsize()})")
         except Exception as e:
@@ -2829,7 +2826,7 @@ def preload_pywhisper_model(model_name: str = None):
             
         else:
             # Preload faster-whisper model
-            from faster_whisper import WhisperModel
+            from faster_whisper import WhisperModel  # noqa: F401
             
             device = os.environ.get('WHISPER_DEVICE', 'cpu')
             compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')

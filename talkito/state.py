@@ -469,7 +469,7 @@ def initialize_providers_early(args):
         from . import asr
         if hasattr(asr, 'clear_provider_cache'):
             asr.clear_provider_cache()
-    except:
+    except Exception:
         pass
     from . import tts
     try:
@@ -486,7 +486,7 @@ def initialize_providers_early(args):
             shared_state.tts_provider = args.tts_provider
             selected_tts = tts.select_best_tts_provider()
             shared_state.tts_provider = selected_tts
-        except Exception as e:
+        except Exception:
             pass  # Continue even if selection fails
     
     # Trigger ASR provider selection (this will run availability checks and downloads)  
@@ -501,13 +501,13 @@ def initialize_providers_early(args):
     # Preload local whisper models if the provider is local_whisper
     if shared_state.asr_provider == 'local_whisper':
         try:
-            log_message("INFO", f"About to call preload_pywhisper_model()")
+            log_message("INFO", "About to call preload_pywhisper_model()")
             model = asr.preload_pywhisper_model()
             log_message("INFO", f"preload_pywhisper_model() returned: {model}")
             if model:
-                log_message("INFO", f"Successfully preloaded local whisper model in initialize_providers_early")
+                log_message("INFO", "Successfully preloaded local whisper model in initialize_providers_early")
             else:
-                log_message("INFO", f"Local whisper model preload returned None - may not be needed")
+                log_message("INFO", "Local whisper model preload returned None - may not be needed")
         except Exception as e:
             log_message("ERROR", f"Failed to preload local whisper model: {e}")
             import traceback

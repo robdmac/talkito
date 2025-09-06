@@ -71,25 +71,25 @@ def signal_handler(signum, frame):
     if asr:
         try:
             asr.stop_dictation()
-        except:
+        except Exception:
             pass
     
     # For interrupt signals, shutdown immediately without waiting
     if signum in (signal.SIGINT, signal.SIGTERM):
         try:
             tts.shutdown_tts()  # Shutdown immediately
-        except:
+        except Exception:
             pass
     else:
         # For other signals, wait for TTS to finish
         try:
             tts.wait_for_tts_to_finish()
             tts.shutdown_tts()
-        except:
+        except Exception:
             # If interrupted during cleanup, just shutdown
             try:
                 tts.shutdown_tts()
-            except:
+            except Exception:
                 pass
     
     # Exit with proper code for signal termination
@@ -144,8 +144,8 @@ def parse_arguments():
     asr_group = parser.add_argument_group('ASR options')
     asr_group.add_argument('--asr-mode', type=str, 
                            choices=['off', 'auto-input', 'tap-to-talk'],
-                           default='auto-input',
-                           help='ASR mode (default: auto-input)')
+                           default='tap-to-talk',
+                           help='ASR mode (default: tap-to-talk)')
     asr_group.add_argument('--asr-provider', type=str,
                            choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
                            help='ASR provider to use')
@@ -293,7 +293,7 @@ def build_asr_config(args) -> dict:
                 best_provider = asr.select_best_asr_provider()
                 if best_provider != 'google':  # 'google' is the free fallback
                     config['provider'] = best_provider
-            except:
+            except Exception:
                 pass
     if args.asr_language:
         config['language'] = args.asr_language
@@ -362,11 +362,6 @@ def print_configuration_status(args):
             shared_state.communication.slack_channel = comms_config.slack_channel
             # Automatically activate slack mode when --slack-channel is provided
             shared_state.set_slack_mode(True)
-    
-    # Get the status summary using the shared function
-    # Pass the configured providers from args if available
-    configured_tts_provider = args.tts_provider if hasattr(args, 'tts_provider') and args.tts_provider else None
-    configured_asr_provider = args.asr_provider if hasattr(args, 'asr_provider') and args.asr_provider else None
     
     # Initialize providers early (triggers availability checks and download prompts)
     initialize_providers_early(args)
@@ -517,7 +512,6 @@ def run_mcp_server():
         from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
         # but remove the --mcp-server argument itself
-        original_argv = sys.argv[:]
         sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-server']
         mcp_main()
     except ImportError:
@@ -531,7 +525,6 @@ def run_mcp_sse_server():
         from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
         # but remove the --mcp-sse-server argument and add --transport sse
-        original_argv = sys.argv[:]
         sys.argv = [sys.argv[0]] + ['--transport', 'sse'] + [arg for arg in sys.argv[1:] if arg != '--mcp-sse-server']
         print(f"[DEBUG] Running MCP server with SSE transport, args: {sys.argv}", file=sys.stderr)
         mcp_main()
@@ -594,7 +587,7 @@ def show_slack_setup():
         manifest_dict = json.loads(SLACK_BOT_MANIFEST)
         manifest_pretty = json.dumps(manifest_dict, indent=2)
         print(manifest_pretty)
-    except:
+    except Exception:
         print(SLACK_BOT_MANIFEST)
     
     print()
@@ -606,7 +599,7 @@ def show_slack_setup():
             import subprocess
             subprocess.run(['pbcopy'], input=SLACK_BOT_MANIFEST.encode(), check=True)
             print("✅ Manifest copied to clipboard! (macOS)")
-        except:
+        except Exception:
             pass
     #
     # print()
@@ -696,11 +689,11 @@ async def main_async() -> int:
         if asr:
             try:
                 asr.stop_dictation()
-            except:
+            except Exception:
                 pass
         try:
             tts.shutdown_tts()  # Shutdown immediately without waiting
-        except:
+        except Exception:
             pass
         return 130  # Standard exit code for Ctrl+C
     except Exception as e:
@@ -712,7 +705,7 @@ async def main_async() -> int:
             if asr:
                 try:
                     asr.stop_dictation()
-                except:
+                except Exception:
                     pass
             # Wait for TTS to finish before shutting down
             try:
@@ -722,7 +715,7 @@ async def main_async() -> int:
                 # If interrupted during cleanup, just shutdown immediately
                 try:
                     tts.shutdown_tts()
-                except:
+                except Exception:
                     pass
 
 

@@ -26,7 +26,6 @@ import shutil
 import json
 import time
 import threading
-from datetime import datetime, timedelta
 from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
@@ -86,7 +85,7 @@ class TalkitoUpdater:
                 elif p1 < p2:
                     return -1
             return 0
-        except:
+        except Exception:
             # Fallback to string comparison
             return 1 if v1 > v2 else (-1 if v1 < v2 else 0)
     
