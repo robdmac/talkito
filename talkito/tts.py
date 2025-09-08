@@ -38,6 +38,7 @@ from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 # Import centralized logging utilities
 try:
@@ -359,6 +360,17 @@ _state_lock = threading.RLock()  # Reentrant lock for nested access
 _cache_lock = threading.Lock()  # Separate lock for cache operations
 
 
+@contextmanager
+def suppress_ai_warnings():
+    """Context manager to suppress common AI package warnings."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        yield
+
+
 # Wrapper for module-specific logging
 def log_message(level: str, message: str):
     """Log message with module name using centralized logger."""
@@ -440,9 +452,7 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     kittentts_available = False
     kittentts_note = "Ultra-lightweight TTS that runs without GPU (no API key required)"
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+        with suppress_ai_warnings():
             from kittentts import KittenTTS
         # Check if the model is cached
         from .models import check_model_cached, with_download_progress
@@ -486,10 +496,15 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     kokoro_available = False
     kokoro_note = "High-quality 82M parameter TTS model (no API key required)"
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-            from kokoro import KPipeline
+        # Check if spaCy model is available (kokoro's dependency chain includes spacy-curated-transformers)
+        from .models import check_spacy_model_consent
+        if not check_spacy_model_consent('kokoro'):
+            kokoro_note = "spaCy language model required but download was declined"
+            kokoro_available = False
+        else:
+            # Only import kokoro if spaCy model is available
+            with suppress_ai_warnings():
+                from kokoro import KPipeline
         # Check if the model is cached
         from .models import check_model_cached, with_download_progress
         if not check_model_cached('kokoro', 'default'):
@@ -660,9 +675,7 @@ def validate_provider_config(provider: str) -> bool:
     if provider == 'kittentts':
         global _kittentts_warning_shown
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            with suppress_ai_warnings():
                 from kittentts import KittenTTS  # noqa: F401
         except ImportError:
             # Only print the installation message once
@@ -678,9 +691,7 @@ def validate_provider_config(provider: str) -> bool:
     # Special case for KokoroTTS - check if package is installed
     if provider == 'kokoro':
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            with suppress_ai_warnings():
                 from kokoro import KPipeline  # noqa: F401
         except ImportError:
             print("Error: KokoroTTS dependencies not installed")
@@ -1048,9 +1059,7 @@ def speak_with_deepgram(text: str) -> bool:
 def _synthesize_kittentts(text: str) -> Optional[bytes]:
     """Synthesize speech using KittenTTS."""
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+        with suppress_ai_warnings():
             from kittentts import KittenTTS
         
         # Get configuration from shared state
@@ -1117,10 +1126,12 @@ def speak_with_kittentts(text: str) -> bool:
 def _synthesize_kokoro(text: str) -> Optional[bytes]:
     """Synthesize speech using KokoroTTS."""
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
-            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        # Check if spaCy model is available (kokoro's dependency chain includes spacy-curated-transformers)
+        from .models import check_spacy_model_consent
+        if not check_spacy_model_consent('kokoro'):
+            raise RuntimeError("spaCy language model required for kokoro but download was declined")
+        
+        with suppress_ai_warnings():
             from kokoro import KPipeline
         
         # Get configuration from shared state
@@ -2116,9 +2127,7 @@ def configure_tts_provider(args):
     elif tts_provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            with suppress_ai_warnings():
                 from kittentts import KittenTTS  # noqa: F401
         except ImportError:
             print("Error: KittenTTS dependencies not installed")
@@ -2134,9 +2143,7 @@ def configure_tts_provider(args):
     elif tts_provider == 'kokoro':
         # Additional KokoroTTS validation
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            with suppress_ai_warnings():
                 from kokoro import KPipeline  # noqa: F401
         except ImportError:
             print("Error: KokoroTTS dependencies not installed")
@@ -2299,9 +2306,7 @@ def configure_tts_from_dict(config: dict) -> bool:
     elif provider == 'kittentts':
         # Additional KittenTTS validation
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
-                warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+            with suppress_ai_warnings():
                 from kittentts import KittenTTS  # noqa: F401
         except ImportError:
             print("Error: KittenTTS dependencies not installed")

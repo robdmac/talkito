@@ -22,6 +22,11 @@ import warnings
 warnings.filterwarnings("ignore", message=r".*in sys\.modules.*talkito\.(asr|tts|mcp|comms|profiles).*", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+# Suppress AI package warnings to prevent startup noise
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
 from . import asr, comms, profiles, tts
 

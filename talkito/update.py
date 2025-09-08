@@ -30,9 +30,13 @@ from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
 from . import __version__
-from .logs import get_logger
+from .logs import log_message as _base_log_message
 
-logger = get_logger(__name__)
+
+# Wrapper for module-specific logging
+def log_message(level: str, message: str):
+    """Log message with module name using centralized logger."""
+    _base_log_message(level, message, __name__)
 
 
 class TalkitoUpdater:
@@ -65,7 +69,7 @@ class TalkitoUpdater:
                 latest_version = data['tag_name'].lstrip('v')
                 return latest_version, self._compare_versions(latest_version, self.current_version) > 0
         except (URLError, json.JSONDecodeError, KeyError) as e:
-            logger.error(f"Failed to check for updates: {e}")
+            log_message("ERROR", f"Failed to check for updates: {e}")
             return None, False
     
     def _compare_versions(self, v1, v2):
@@ -121,7 +125,7 @@ class TalkitoUpdater:
                                     capture_output=True, text=True)
             
             if result.returncode != 0:
-                logger.error(f"Git pull failed: {result.stderr}")
+                log_message("ERROR", f"Git pull failed: {result.stderr}")
                 # Try to pop stash
                 subprocess.run(['git', 'stash', 'pop'], capture_output=True)
                 return False
@@ -133,7 +137,7 @@ class TalkitoUpdater:
             return True
             
         except Exception as e:
-            logger.error(f"Git update failed: {e}")
+            log_message("ERROR", f"Git update failed: {e}")
             return False
     
     def update_via_pip(self):
@@ -145,13 +149,13 @@ class TalkitoUpdater:
                                     capture_output=True, text=True)
             
             if result.returncode != 0:
-                logger.error(f"Pip upgrade failed: {result.stderr}")
+                log_message("ERROR", f"Pip upgrade failed: {result.stderr}")
                 return False
             
             return True
             
         except Exception as e:
-            logger.error(f"Pip update failed: {e}")
+            log_message("ERROR", f"Pip update failed: {e}")
             return False
     
     def download_and_replace(self):
@@ -168,7 +172,7 @@ class TalkitoUpdater:
                                         capture_output=True, text=True)
                 
                 if result.returncode != 0:
-                    logger.error(f"Failed to clone repository: {result.stderr}")
+                    log_message("ERROR", f"Failed to clone repository: {result.stderr}")
                     return False
                 
                 # Copy new files over old ones
@@ -180,17 +184,17 @@ class TalkitoUpdater:
                     
                     return True
                 else:
-                    logger.error("Downloaded repository structure unexpected")
+                    log_message("ERROR", "Downloaded repository structure unexpected")
                     return False
                     
         except Exception as e:
-            logger.error(f"Download and replace failed: {e}")
+            log_message("ERROR", f"Download and replace failed: {e}")
             return False
     
     def perform_update(self):
         """Perform the update based on installation method"""
         method = self.get_update_method()
-        logger.info(f"Update method: {method}")
+        log_message("INFO", f"Update method: {method}")
         
         if method == 'git':
             return self.update_via_git()
@@ -240,7 +244,7 @@ class TalkitoUpdater:
                 with open(self.state_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            logger.debug(f"Failed to load update state: {e}")
+            log_message("DEBUG", f"Failed to load update state: {e}")
         return {}
     
     def _save_state(self, state):
@@ -249,7 +253,7 @@ class TalkitoUpdater:
             with open(self.state_file, 'w') as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
-            logger.error(f"Failed to save update state: {e}")
+            log_message("ERROR", f"Failed to save update state: {e}")
     
     def should_check_for_updates(self):
         """Check if enough time has passed since last update check"""
@@ -265,7 +269,7 @@ class TalkitoUpdater:
     def stage_update(self, version):
         """Download and stage an update for next restart"""
         try:
-            logger.info(f"Staging update to version {version}")
+            log_message("INFO", f"Staging update to version {version}")
             
             # Create staging directory
             self.staging_dir.mkdir(exist_ok=True)
@@ -282,7 +286,7 @@ class TalkitoUpdater:
                                   capture_output=True, text=True)
             
             if result.returncode != 0:
-                logger.error(f"Failed to clone repository: {result.stderr}")
+                log_message("ERROR", f"Failed to clone repository: {result.stderr}")
                 return False
             
             # Save staged version info
@@ -291,11 +295,11 @@ class TalkitoUpdater:
             state['staged_at'] = time.time()
             self._save_state(state)
             
-            logger.info(f"Successfully staged version {version}")
+            log_message("INFO", f"Successfully staged version {version}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to stage update: {e}")
+            log_message("ERROR", f"Failed to stage update: {e}")
             return False
     
     def apply_staged_update(self):
@@ -311,7 +315,7 @@ class TalkitoUpdater:
             return False
             
         try:
-            logger.info(f"Applying staged update to version {staged_version}")
+            log_message("INFO", f"Applying staged update to version {staged_version}")
             
             # Copy files from staging to install directory
             source_dir = staging_repo / 'talkito'
@@ -331,14 +335,14 @@ class TalkitoUpdater:
                 state['updated_to'] = staged_version
                 self._save_state(state)
                 
-                logger.info(f"Successfully applied update to version {staged_version}")
+                log_message("INFO", f"Successfully applied update to version {staged_version}")
                 return True
             else:
-                logger.error("Staged repository structure unexpected")
+                log_message("ERROR", "Staged repository structure unexpected")
                 return False
                 
         except Exception as e:
-            logger.error(f"Failed to apply staged update: {e}")
+            log_message("ERROR", f"Failed to apply staged update: {e}")
             return False
     
     def _background_check_loop(self):
@@ -349,10 +353,10 @@ class TalkitoUpdater:
                     latest_version, update_available = self.check_for_updates()
                     
                     if update_available:
-                        logger.info(f"Update available: {latest_version}")
+                        log_message("INFO", f"Update available: {latest_version}")
                         # Stage the update in background
                         if self.stage_update(latest_version):
-                            logger.info(f"Update {latest_version} staged for next restart")
+                            log_message("INFO", f"Update {latest_version} staged for next restart")
                     
                     # Update last check time
                     state = self._load_state()
@@ -360,7 +364,7 @@ class TalkitoUpdater:
                     self._save_state(state)
                     
             except Exception as e:
-                logger.error(f"Error in background update check: {e}")
+                log_message("ERROR", f"Error in background update check: {e}")
             
             # Sleep for a while, but check stop event regularly
             for _ in range(60):  # Check every minute
@@ -370,7 +374,7 @@ class TalkitoUpdater:
     def start_background_updates(self):
         """Start background update checking"""
         if os.environ.get('TALKITO_AUTO_UPDATE', 'true').lower() == 'false':
-            logger.info("Auto-updates disabled by environment variable")
+            log_message("INFO", "Auto-updates disabled by environment variable")
             return
             
         if self._background_thread is None or not self._background_thread.is_alive():
@@ -380,14 +384,14 @@ class TalkitoUpdater:
                 name="TalkitoUpdateChecker"
             )
             self._background_thread.start()
-            logger.info("Started background update checker")
+            log_message("INFO", "Started background update checker")
     
     def stop_background_updates(self):
         """Stop background update checking"""
         if self._background_thread and self._background_thread.is_alive():
             self._stop_event.set()
             self._background_thread.join(timeout=5)
-            logger.info("Stopped background update checker")
+            log_message("INFO", "Stopped background update checker")
 
 
 def check_and_apply_staged_update():
@@ -398,7 +402,7 @@ def check_and_apply_staged_update():
             print("Applied staged update. Talkito has been updated to the latest version.")
             return True
     except Exception as e:
-        logger.error(f"Failed to apply staged update: {e}")
+        log_message("ERROR", f"Failed to apply staged update: {e}")
     return False
 
 
@@ -408,7 +412,7 @@ def start_background_update_checker():
         updater = TalkitoUpdater()
         updater.start_background_updates()
     except Exception as e:
-        logger.error(f"Failed to start background update checker: {e}")
+        log_message("ERROR", f"Failed to start background update checker: {e}")
 
 
 def main():
