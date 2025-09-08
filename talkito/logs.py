@@ -145,15 +145,41 @@ def log_message(level: str, message: str, logger_name: Optional[str] = None) -> 
         
     logger = get_logger(logger_name or __name__)
     
-    # Map custom levels to standard ones
-    if level == "BUFFER":
-        logger.info(f"[BUFFER] {message}")
-    elif level == "FILTER":
-        logger.debug(f"[FILTER] {message}")
-    elif level.upper() == "DEBUG":
-        logger.debug(message)
-    else:
-        getattr(logger, level.lower(), logger.info)(message)
+    # Get caller information
+    import inspect
+    frame = inspect.currentframe()
+    try:
+        # Go up the call stack to find the actual caller
+        caller_frame = frame.f_back
+        
+        # If the caller is a wrapper function (like in update.py), go one more level up
+        if caller_frame and caller_frame.f_code.co_name == 'log_message':
+            caller_frame = caller_frame.f_back
+        
+        if caller_frame:
+            filename = caller_frame.f_code.co_filename
+            line_number = caller_frame.f_lineno
+            # Get just the filename without the full path
+            filename = filename.split('/')[-1]
+            caller_info = f"{filename}:{line_number}"
+            
+            # Format message with caller info
+            formatted_message = f"[{caller_info}] {message}"
+        else:
+            # Fallback if we can't get caller info
+            formatted_message = message
+        
+        # Map custom levels to standard ones
+        if level == "BUFFER":
+            logger.info(f"[BUFFER] {formatted_message}")
+        elif level == "FILTER":
+            logger.debug(f"[FILTER] {formatted_message}")
+        elif level.upper() == "DEBUG":
+            logger.debug(formatted_message)
+        else:
+            getattr(logger, level.lower(), logger.info)(formatted_message)
+    finally:
+        del frame
 
 def is_logging_enabled() -> bool:
     """Check if logging is enabled."""

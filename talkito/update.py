@@ -44,7 +44,6 @@ class TalkitoUpdater:
     
     GITHUB_REPO_URL = "https://github.com/robdmac/talkito"
     UPDATE_CHECK_URL = "https://talkito-app-updates.robbomacrae.workers.dev/check-update"
-    UPDATE_CHECK_INTERVAL = 3600*24  # Check every day
     
     def __init__(self):
         self.current_version = __version__
@@ -255,16 +254,6 @@ class TalkitoUpdater:
         except Exception as e:
             log_message("ERROR", f"Failed to save update state: {e}")
     
-    def should_check_for_updates(self):
-        """Check if enough time has passed since last update check"""
-        if os.environ.get('TALKITO_AUTO_UPDATE', 'true').lower() == 'false':
-            return False
-            
-        state = self._load_state()
-        last_check = state.get('last_check', 0)
-        now = time.time()
-        
-        return (now - last_check) > self.UPDATE_CHECK_INTERVAL
     
     def stage_update(self, version):
         """Download and stage an update for next restart"""
@@ -345,31 +334,28 @@ class TalkitoUpdater:
             log_message("ERROR", f"Failed to apply staged update: {e}")
             return False
     
-    def _background_check_loop(self):
-        """Background thread that periodically checks for updates"""
-        while not self._stop_event.is_set():
-            try:
-                if self.should_check_for_updates():
-                    latest_version, update_available = self.check_for_updates()
-                    
-                    if update_available:
-                        log_message("INFO", f"Update available: {latest_version}")
-                        # Stage the update in background
-                        if self.stage_update(latest_version):
-                            log_message("INFO", f"Update {latest_version} staged for next restart")
-                    
-                    # Update last check time
-                    state = self._load_state()
-                    state['last_check'] = time.time()
-                    self._save_state(state)
-                    
-            except Exception as e:
-                log_message("ERROR", f"Error in background update check: {e}")
+    def _background_check_once(self):
+        """Background thread that checks for updates once on startup"""
+        try:
+            log_message("INFO", f"Checking for updates (current: {self.current_version}, method: {self.get_update_method()})")
+            latest_version, update_available = self.check_for_updates()
             
-            # Sleep for a while, but check stop event regularly
-            for _ in range(60):  # Check every minute
-                if self._stop_event.wait(60):
-                    break
+            if latest_version:
+                if update_available:
+                    log_message("INFO", f"Update available: {self.current_version} -> {latest_version}")
+                    # Stage the update in background
+                    if self.stage_update(latest_version):
+                        log_message("INFO", f"Update {latest_version} staged for next restart")
+                else:
+                    log_message("INFO", f"Up to date (current: {self.current_version}, latest: {latest_version})")
+            
+            # Update last check time
+            state = self._load_state()
+            state['last_check'] = time.time()
+            self._save_state(state)
+            
+        except Exception as e:
+            log_message("ERROR", f"Error in background update check: {e}")
     
     def start_background_updates(self):
         """Start background update checking"""
@@ -379,7 +365,7 @@ class TalkitoUpdater:
             
         if self._background_thread is None or not self._background_thread.is_alive():
             self._background_thread = threading.Thread(
-                target=self._background_check_loop,
+                target=self._background_check_once,
                 daemon=True,
                 name="TalkitoUpdateChecker"
             )
@@ -404,6 +390,25 @@ def check_and_apply_staged_update():
     except Exception as e:
         log_message("ERROR", f"Failed to apply staged update: {e}")
     return False
+
+
+def check_for_updates_now():
+    """Do an immediate update check and log the result"""
+    try:
+        updater = TalkitoUpdater()
+        log_message("INFO", f"Immediate update check (current: {updater.current_version}, method: {updater.get_update_method()})")
+        latest_version, update_available = updater.check_for_updates()
+        
+        if latest_version:
+            if update_available:
+                log_message("INFO", f"Update available: {updater.current_version} -> {latest_version}")
+            else:
+                log_message("INFO", f"Up to date (current: {updater.current_version}, latest: {latest_version})")
+        
+        return latest_version, update_available
+    except Exception as e:
+        log_message("ERROR", f"Failed immediate update check: {e}")
+        return None, False
 
 
 def start_background_update_checker():
