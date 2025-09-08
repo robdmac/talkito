@@ -48,6 +48,38 @@ def show_download_progress(provider: str, model_name: str):
     print(f"Downloading {provider} model '{model_name}'...")
 
 
+def check_spacy_model_consent(provider: str, spacy_model: str = "en_core_web_sm") -> bool:
+    """Check if spaCy language model needs consent and handle download."""
+    try:
+        import spacy
+        # Try to load the model without downloading
+        try:
+            spacy.load(spacy_model, disable=[])
+            return True  # Model already available
+        except OSError:
+            # Model not available, ask for consent
+            if not ask_user_consent(f"{provider} (spaCy dependency)", f"language model '{spacy_model}'"):
+                return False
+            
+            # Download the model
+            show_download_progress(f"{provider} (spaCy dependency)", f"language model '{spacy_model}'")
+            import subprocess
+            import sys
+            result = subprocess.run([
+                sys.executable, '-m', 'spacy', 'download', spacy_model
+            ], capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"Failed to download spaCy model: {result.stderr}")
+                return False
+            
+            print("Download complete")
+            return True
+    except ImportError:
+        # spaCy not available, no consent needed
+        return True
+
+
 def with_download_progress(provider: str, model_name: str, download_func: Callable):
     """Wrapper that adds download progress and user consent."""
     def wrapper(*args, **kwargs):

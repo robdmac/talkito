@@ -25,10 +25,14 @@ import signal
 import sys
 from typing import List, Optional, Union, Tuple
 
-# Suppress websockets deprecation warnings early
+# Suppress deprecation warnings early
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
 # Try to load .env files if available
 try:
