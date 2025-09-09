@@ -18,14 +18,15 @@
 
 """Self-update functionality for talkito"""
 
+import json
 import os
+import pkg_resources
+import shutil
 import sys
 import subprocess
 import tempfile
-import shutil
-import json
-import time
 import threading
+import time
 from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
@@ -94,16 +95,30 @@ class TalkitoUpdater:
     
     def get_update_method(self):
         """Determine how talkito was installed"""
-        # Check if we're in a git repository
+
+        try:
+            # Check if talkito is installed via pip (look at pip metadata)
+            dist = pkg_resources.get_distribution('talkito')
+            
+            # If we find the distribution, check if it's an editable install
+            if hasattr(dist, 'location') and dist.location:
+                # Editable installs have location pointing to source directory
+                if dist.location == str(self.install_dir.parent):
+                    return 'editable'
+                # Regular pip installs point to site-packages
+                elif 'site-packages' in str(dist.location):
+                    return 'pip'
+                    
+        except pkg_resources.DistributionNotFound:
+            # Not installed via pip, check other methods
+            pass
+        
+        # Check if we're in a git repository (direct git clone usage)
         git_dir = self.install_dir / '.git'
         if git_dir.exists():
             return 'git'
         
-        # Check if installed via pip (in site-packages)
-        if 'site-packages' in str(self.install_dir):
-            return 'pip'
-        
-        # Check if in development mode (editable install)
+        # Check if in development mode (has setup.py but no pip install)
         if (self.install_dir / 'setup.py').exists():
             return 'dev'
         
@@ -199,6 +214,11 @@ class TalkitoUpdater:
             return self.update_via_git()
         elif method == 'pip':
             return self.update_via_pip()
+        elif method == 'editable':
+            print("Editable install detected. Auto-updates disabled.")
+            print("To update: cd to your talkito directory and run 'git pull'")
+            log_message("INFO", "Skipping update for editable install")
+            return False
         elif method == 'dev':
             print("Development installation detected. Please update manually using git pull.")
             return False
@@ -337,15 +357,34 @@ class TalkitoUpdater:
     def _background_check_once(self):
         """Background thread that checks for updates once on startup"""
         try:
-            log_message("INFO", f"Checking for updates (current: {self.current_version}, method: {self.get_update_method()})")
+            method = self.get_update_method()
+            force_update = os.environ.get('TALKITO_FORCE_UPDATE', 'false').lower() == 'true'
+            log_message("INFO", f"Checking for updates (current: {self.current_version}, method: {method}, force: {force_update})")
+            
+            # Skip auto-updates for editable installs unless forced
+            if method == 'editable' and not force_update:
+                log_message("INFO", "Editable install detected - skipping auto-update check")
+                log_message("INFO", "To update: cd to your talkito directory and run 'git pull'")
+                return
+            
+            if force_update:
+                log_message("INFO", "Force update enabled - staging current version for testing")
+                # For testing, stage the current version to test the staging/apply mechanism
+                if self.stage_update(self.current_version):
+                    log_message("INFO", f"Force staged version {self.current_version} for testing")
+                return
+            
             latest_version, update_available = self.check_for_updates()
             
             if latest_version:
                 if update_available:
                     log_message("INFO", f"Update available: {self.current_version} -> {latest_version}")
-                    # Stage the update in background
-                    if self.stage_update(latest_version):
-                        log_message("INFO", f"Update {latest_version} staged for next restart")
+                    # Stage the update in background (only for non-editable installs)
+                    if method != 'editable':
+                        if self.stage_update(latest_version):
+                            log_message("INFO", f"Update {latest_version} staged for next restart")
+                    else:
+                        log_message("INFO", "Editable install - update manually with 'git pull'")
                 else:
                     log_message("INFO", f"Up to date (current: {self.current_version}, latest: {latest_version})")
             

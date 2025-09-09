@@ -1282,8 +1282,6 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
                             asr_mode: str, recorder: SessionRecorder) -> Tuple[bytes, List[str], str, int]:
     """Process output data from PTY and queue text for speech"""
     # Log that we received data
-    if is_logging_enabled():
-        log_message("DEBUG", f"[process_pty_output] Called with {len(data)} bytes of data")
     if b'\xe2\x8f\xba' in data:
         log_message("INFO", "[process_pty_output] Data contains response marker!")
     
@@ -1667,6 +1665,7 @@ def handle_partial_transcript(text: str):
 
     asr_state.current_partial = text # + '\u200b'
     asr_state.last_partial_transcript_time = time.time()
+    asr_state.has_pending_transcript = True
 
     if not text.strip():
         return
@@ -3078,7 +3077,8 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     # Configure TTS based on kwargs
     tts_config = kwargs.get('tts_config', {})
     auto_skip_tts = kwargs.get('auto_skip_tts', False)
-    
+
+    log_message("DEBUG", "Set up TTS engine")
     # Set up TTS engine
     if tts_config and tts_config.get('provider') != 'system':
         if not tts.configure_tts_from_dict(tts_config):
@@ -3092,6 +3092,7 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
                 raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
     
     # Start TTS worker
+    log_message("DEBUG", "Start TTS worker")
     tts.start_tts_worker(engine, auto_skip_tts)
     
     # Start background update checker
@@ -3108,7 +3109,8 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     else:
         # For system/auto, get the actual engine being used
         provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
-    
+
+    log_message("DEBUG", "set_tts_initialized")
     shared_state.set_tts_initialized(True, provider)
     
     # Configure ASR based on kwargs
@@ -3168,6 +3170,7 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
             from .state import save_shared_state
             save_shared_state()
 
+    log_message("DEBUG", "Running command")
     try:
         # Run the command
         return await core.run_command(

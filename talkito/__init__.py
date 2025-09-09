@@ -16,6 +16,8 @@
 
 """Talkito - Universal TTS wrapper and voice interaction library providing TTS, ASR, communication, and voice-enabled CLI interaction."""
 
+# ruff: noqa: E402
+
 from .__version__ import __version__, __author__, __email__, __license__
 
 import warnings

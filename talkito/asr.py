@@ -18,6 +18,8 @@
 
 """Automatic Speech Recognition module demonstrating a more DRY and maintainable approach to supporting multiple ASR providers."""
 
+# ruff: noqa: E402
+
 # Suppress pkg_resources deprecation warnings from Google Cloud SDK dependencies
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
@@ -29,6 +31,7 @@ os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logging if used
 
+import atexit
 import speech_recognition as sr
 import threading
 import queue
@@ -40,7 +43,6 @@ import math
 import soundfile as sf
 import time
 import tempfile
-import atexit
 from typing import Optional, Callable, Dict, Any, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -1440,11 +1442,10 @@ class FasterWhisperProvider(ASRProvider):
         use_pywhispercpp = backend_info["use_pywhispercpp"]
 
         try:
-            # Always use the pre-loaded model
-            if _local_whisper_model is None:
-                raise ValueError("Pre-loaded model is required for streaming. Use preload_pywhisper_model() first.")
-
-            model = _local_whisper_model
+            # Get the cached model with timeout
+            model = get_cached_local_whisper_model(timeout_seconds=10.0)
+            if model is None:
+                raise ValueError("Failed to load local whisper model within timeout")
 
             if use_pywhispercpp:
                 coreml_model_name =  model_name
@@ -1481,16 +1482,6 @@ class FasterWhisperProvider(ASRProvider):
             def transcription_worker():
                 """Worker thread that handles transcription without blocking audio capture"""
                 global _tap_to_talk_outstanding_frames
-                
-                # Set high thread priority for better responsiveness
-                try:
-                    if hasattr(os, 'nice'):
-                        # On Unix systems, lower nice value = higher priority
-                        current_nice = os.nice(0)
-                        os.nice(-5)  # Increase priority (requires permissions)
-                        log_message("DEBUG", f"[LOCAL_WHISPER] Set thread priority: nice {current_nice} -> {current_nice - 5}")
-                except (OSError, PermissionError) as e:
-                    log_message("DEBUG", f"[LOCAL_WHISPER] Could not set thread priority: {e}")
                 
                 # Log model reference to monitor if it's shared
                 log_message("DEBUG", f"[LOCAL_WHISPER] Starting transcription worker thread (model id: {id(model)})")
@@ -1986,17 +1977,17 @@ def _get_local_whisper_backend_info():
         }
 
 
-def select_best_asr_provider(preferred=None) -> str:
-    """Select the best available ASR provider based on accessibility and preferences with order: preferred env var, accessible non-google providers, then Google free fallback."""
+def select_best_asr_provider(preferred=None, excluded_providers=None) -> str:
+    """Select the best available ASR provider with thorough validation of credentials and configuration."""
     accessible = check_asr_provider_accessibility()
+    excluded_providers = excluded_providers or set()
 
-    log_message("DEBUG", f"### {preferred=} {accessible=}")
-    # Check if preferred provider is accessible and imports work
-    if preferred and preferred in accessible:
+    # Check if preferred provider is accessible, properly configured, and not excluded
+    if preferred and preferred in accessible and preferred not in excluded_providers:
         if accessible[preferred]["note"]:
             print(accessible[preferred]["note"])
         if accessible[preferred]['available']:
-            # Actually validate the provider including imports and model cache
+            # Actually validate the provider including imports and configuration
             imports_ok, import_error = check_provider_imports(preferred, requested_provider=preferred)
             if imports_ok:
                 log_message("INFO", f"Using preferred ASR provider: {preferred}")
@@ -2005,26 +1996,42 @@ def select_best_asr_provider(preferred=None) -> str:
                 log_message("WARNING", f"ASR provider {preferred} validation failed: {import_error}")
                 # Continue to fallback logic
     
-    # Get all accessible providers except google (free)
+    # Get all accessible providers except google (free) and excluded providers
     available_providers = [
         provider for provider, info in sorted(accessible.items())
-        if info['available'] and provider != 'google'
+        if info['available'] and provider != 'google' and provider not in excluded_providers
     ]
     
-    # Use first available non-google provider
-    if available_providers:
-        provider = available_providers[0]
-        log_message("INFO", f"Selected ASR provider: {provider} (first available)")
-        return provider
+    # Validate each provider thoroughly before selecting
+    for provider in available_providers:
+        imports_ok, import_error = check_provider_imports(provider, requested_provider=provider)
+        if imports_ok:
+            log_message("INFO", f"Selected ASR provider: {provider} (first validated)")
+            return provider
+        else:
+            log_message("WARNING", f"ASR provider {provider} failed validation: {import_error}, trying next")
     
-    # Fall back to google if available
-    if accessible.get('google', {}).get('available'):
-        log_message("INFO", "Falling back to Google free ASR provider")
-        return 'google'
+    # Fall back to google if available and not excluded
+    if 'google' not in excluded_providers and accessible.get('google', {}).get('available'):
+        imports_ok, import_error = check_provider_imports('google', requested_provider='google')
+        if imports_ok:
+            log_message("INFO", "Falling back to Google free ASR provider")
+            return 'google'
+        else:
+            log_message("WARNING", f"Google ASR provider failed validation: {import_error}")
     
-    # No providers available
-    log_message("WARNING", "No ASR providers available, defaulting to google")
-    return 'google'
+    # Fall back to google_free if google is excluded but google_free isn't
+    if 'google_free' not in excluded_providers:
+        imports_ok, import_error = check_provider_imports('google_free', requested_provider='google_free')
+        if imports_ok:
+            log_message("INFO", "Falling back to Google free ASR provider (google_free)")
+            return 'google_free'
+        else:
+            log_message("WARNING", f"Google free ASR provider failed validation: {import_error}")
+    
+    # Last resort: return google_free anyway (it should always work)
+    log_message("WARNING", "No fully validated ASR providers available, defaulting to google_free")
+    return 'google_free'
 
 
 # Provider registry
@@ -2466,11 +2473,6 @@ def stop_dictation():
             log_message("ERROR", f"Error stopping engine: {e}")
         finally:
             _engine = None
-    
-    # Clean up the preloaded model to prevent destructor issues
-    _cleanup_whisper_model()
-    
-    # Don't clear stored config - it should persist for the session
 
 
 def pause_dictation():
@@ -2544,12 +2546,16 @@ def configure_asr_from_dict(config_dict: dict) -> bool:
         print(f"Error configuring ASR: {e}")
         return False
 
-
 # Global stored config for backward compatibility
 _stored_config: Optional[ASRConfig] = None
 
 # Global storage for preloaded local whisper model
 _local_whisper_model = None
+
+# Local whisper model loading state tracking (similar to TTS local model caching)
+_local_whisper_model_loading = False
+_local_whisper_model_error = None  
+_local_whisper_model_cache_lock = threading.Lock()
 
 # Monkey patch PyWhisperCpp Model to prevent destructor errors during shutdown
 try:
@@ -2569,40 +2575,8 @@ except ImportError:
     # PyWhisperCpp not installed, skip monkey patch
     pass
 
-
-def _cleanup_whisper_model():
-    """Cleanup function to prevent PyWhisperCpp destructor errors on shutdown"""
-    global _local_whisper_model
-    if _local_whisper_model is not None:
-        try:
-            # For PyWhisperCpp models, suppress any destructor errors
-            if hasattr(_local_whisper_model, '__class__') and 'pywhispercpp' in str(type(_local_whisper_model)):
-                # Redirect stderr to suppress destructor errors
-                import sys
-                import os
-                stderr_fd = sys.stderr.fileno()
-                with open(os.devnull, 'w') as devnull:
-                    old_stderr = os.dup(stderr_fd)
-                    try:
-                        os.dup2(devnull.fileno(), stderr_fd)
-                        _local_whisper_model = None
-                    finally:
-                        os.dup2(old_stderr, stderr_fd)
-                        os.close(old_stderr)
-            else:
-                _local_whisper_model = None
-        except Exception:
-            # Ignore any cleanup errors
-            pass
-
-
-# Register cleanup function to run on exit
-atexit.register(_cleanup_whisper_model)
-
-
 # Override the original start_dictation to handle backward compatibility
 _original_start_dictation = start_dictation
-
 
 def start_dictation(text_callback, partial_callback=None, config: Optional[ASRConfig] = None):
     """Backward compatible start_dictation"""
@@ -2728,85 +2702,158 @@ def main():
         stop_dictation()
 
 
-def preload_pywhisper_model(model_name: str = None):
-    """Preload PyWhisper model early to avoid initialization delays during streaming"""
-    import threading
-    global _local_whisper_model
+def get_cached_local_whisper_model(timeout_seconds: float = 10.0):
+    """Get the cached local whisper model, waiting up to timeout_seconds for it to load"""
+    global _local_whisper_model, _local_whisper_model_loading, _local_whisper_model_error
     
-    log_message("INFO", "[PYWHISPER_PRELOAD] Starting preload function")
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout_seconds:
+        with _local_whisper_model_cache_lock:
+            # Check if we have an error
+            if _local_whisper_model_error:
+                log_message("ERROR", f"[LOCAL_WHISPER_CACHE] Model loading failed: {_local_whisper_model_error}")
+                return None
+            
+            # Check if model is ready
+            if _local_whisper_model is not None:
+                log_message("DEBUG", "[LOCAL_WHISPER_CACHE] Model retrieved from cache")
+                return _local_whisper_model
+            
+            # If not loading and no model, return error - don't start new load
+            if not _local_whisper_model_loading:
+                log_message("ERROR", "[LOCAL_WHISPER_CACHE] No model available and none loading - preload_pywhisper_model() should be called first")
+                return None
+        
+        # Brief sleep before checking again
+        time.sleep(0.1)
+    
+    # Timeout reached
+    log_message("WARNING", f"[LOCAL_WHISPER_CACHE] Timeout after {timeout_seconds}s waiting for model")
+    return None
+
+
+def preload_local_asr_model(model_name: str = None):
+    """Start background preloading of local ASR model (following TTS pattern)."""
+    global _local_whisper_model_loading
+    import threading
+    
+    # Use default model if none specified
+    if not model_name:
+        model_name = os.environ.get('WHISPER_MODEL', 'small')
+    
+    # Get backend information
+    backend_info = _get_local_whisper_backend_info()
+    if not backend_info["available"]:
+        log_message("INFO", f"[ASR_PRELOAD] Local whisper not available: {backend_info.get('note', 'Unknown reason')}")
+        return
+    
+    use_pywhispercpp = backend_info["use_pywhispercpp"]
+    
+    with _local_whisper_model_cache_lock:
+        # Skip if already loading or loaded
+        if _local_whisper_model_loading:
+            log_message("DEBUG", f"[ASR_PRELOAD] Model already loading, skipping preload for {model_name}")
+            return
+        
+        if _local_whisper_model is not None:
+            log_message("DEBUG", f"[ASR_PRELOAD] Model already cached, skipping preload for {model_name}")
+            return
+        
+        # Check if model needs consent BEFORE starting background thread
+        # This must happen in main thread where input() works (following TTS pattern)
+        from .models import check_model_cached, ask_user_consent
+        
+        model_download_started = False
+        if use_pywhispercpp:
+            coreml_model_name = model_name
+            provider_name = 'pywhispercpp'
+            if not check_model_cached('pywhispercpp', coreml_model_name):
+                if not ask_user_consent('PyWhisperCpp', coreml_model_name):
+                    log_message("INFO", f"[ASR_PRELOAD] User declined download for PyWhisperCpp model '{coreml_model_name}'")
+                    # Fall back to next best available provider
+                    fallback_provider = select_best_asr_provider(excluded_providers={'local_whisper'})
+                    print(f"Download declined. Falling back to {fallback_provider} ASR provider.")
+                    
+                    # Update shared state with fallback provider
+                    try:
+                        from .state import get_shared_state
+                        shared_state = get_shared_state()
+                        shared_state.set_asr_config(provider=fallback_provider, language='en-US', model=None)
+                        log_message("INFO", f"[ASR_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                    except Exception as e:
+                        log_message("WARNING", f"[ASR_PRELOAD] Could not update shared state with fallback: {e}")
+                    
+                    return
+                model_download_started = True
+        else:
+            provider_name = 'local_whisper'
+            if not check_model_cached('local_whisper', model_name):
+                if not ask_user_consent('faster-whisper', model_name):
+                    log_message("INFO", f"[ASR_PRELOAD] User declined download for faster-whisper model '{model_name}'")
+                    # Fall back to next best available provider  
+                    fallback_provider = select_best_asr_provider(excluded_providers={'local_whisper'})
+                    print(f"Download declined. Falling back to {fallback_provider} ASR provider.")
+                    
+                    # Update shared state with fallback provider
+                    try:
+                        from .state import get_shared_state
+                        shared_state = get_shared_state()
+                        shared_state.set_asr_config(provider=fallback_provider, language='en-US', model=None)
+                        log_message("INFO", f"[ASR_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                    except Exception as e:
+                        log_message("WARNING", f"[ASR_PRELOAD] Could not update shared state with fallback: {e}")
+                    
+                    return
+                model_download_started = True
+        
+        # Start background loading (consent already obtained)
+        _local_whisper_model_loading = True
+        _local_whisper_model_error = None
+    
+    # Start background loading thread
+    thread = threading.Thread(target=_load_asr_model_background, args=(model_name,), daemon=True)
+    thread.start()
+    log_message("INFO", f"[ASR_PRELOAD] Started background loading of {provider_name} model: {model_name}")
+    
+    # Show confirmation message if download was started
+    if model_download_started:
+        print(f"Downloading {provider_name} model '{model_name}' in background. ASR will start automatically when ready.")
+
+
+def _load_asr_model_background(model_name: str):
+    """Load ASR model in background thread (following TTS pattern)."""
+    global _local_whisper_model, _local_whisper_model_loading, _local_whisper_model_error
+    
     try:
-        # Use default model if none specified
-        if not model_name:
-            model_name = os.environ.get('WHISPER_MODEL', 'small')
+        log_message("INFO", f"[ASR_PRELOAD] Background loading model: {model_name}")
         
         # Get backend information
         backend_info = _get_local_whisper_backend_info()
-        if not backend_info["available"]:
-            log_message("INFO", f"[PYWHISPER_PRELOAD] Local whisper not available: {backend_info.get('note', 'Unknown reason')}")
-            return None
-        
         use_pywhispercpp = backend_info["use_pywhispercpp"]
         
         if use_pywhispercpp:
-            # Preload PyWhisperCpp CoreML model
-            from .models import check_model_cached, ask_user_consent, show_download_progress
+            # Load PyWhisperCpp model
             from pywhispercpp.model import Model as PyWhisperModel
-            
-            # Use small for best balance of speed/accuracy with CoreML
-            coreml_model_name = model_name
-            
-            # Check if model is cached and ask for consent if needed
-            if not check_model_cached('pywhispercpp', coreml_model_name):
-                if not ask_user_consent('PyWhisperCpp', coreml_model_name):
-                    log_message("INFO", f"[PYWHISPER_PRELOAD] Download cancelled: PyWhisperCpp/{coreml_model_name}")
-                    return None
-                show_download_progress('PyWhisperCpp', coreml_model_name)
-            
-            # Initialize the model using the same threading pattern as in stream()
-            model_ready_event = threading.Event()
-            model_init_error = None
-            initialized_model = None
-            
-            def init_model():
-                nonlocal initialized_model, model_init_error
+
+            # Redirect stderr to suppress ggml_metal_free messages during model creation
+            with open(os.devnull, 'w') as devnull:
+                old_stderr = os.dup(2)
+                os.dup2(devnull.fileno(), 2)
                 try:
-                    # Redirect stderr to suppress ggml_metal_free messages
-                    with open(os.devnull, 'w') as devnull:
-                        old_stderr = os.dup(2)
-                        os.dup2(devnull.fileno(), 2)
-                        try:
-                            initialized_model = PyWhisperModel(
-                                coreml_model_name,
-                                n_threads=4,
-                                print_progress=False,
-                                print_realtime=False,
-                                print_timestamps=False,
-                                print_special=False,
-                            )
-                        finally:
-                            os.dup2(old_stderr, 2)
-                            os.close(old_stderr)
-                except Exception as e:
-                    model_init_error = e
+                    model = PyWhisperModel(
+                        model_name,
+                        n_threads=4,
+                        print_progress=False,
+                        print_realtime=False,
+                        print_timestamps=False,
+                        print_special=False,
+                    )
                 finally:
-                    model_ready_event.set()
-            
-            # Start initialization in a separate thread
-            init_thread = threading.Thread(target=init_model, daemon=False)
-            init_thread.start()
-            
-            # Block until model initialization is complete
-            model_ready_event.wait()
-            
-            if model_init_error:
-                log_message("ERROR", f"[PYWHISPER_PRELOAD] Model initialization failed: {model_init_error}")
-                return None
-            
-            # Store the initialized model
-            global _local_whisper_model
-            _local_whisper_model = initialized_model
-            
-            # Register cleanup handler to suppress Metal deallocation messages
+                    os.dup2(old_stderr, 2)
+                    os.close(old_stderr)
+                    
+            # Register cleanup handler to suppress Metal deallocation messages on exit
             def cleanup_model():
                 global _local_whisper_model
                 if _local_whisper_model:
@@ -2820,33 +2867,27 @@ def preload_pywhisper_model(model_name: str = None):
                             os.dup2(old_stderr, 2)
                             os.close(old_stderr)
             atexit.register(cleanup_model)
-            
-            log_message("INFO", f"[PYWHISPER_PRELOAD] Successfully preloaded PyWhisperCpp CoreML model: {coreml_model_name}")
-            return initialized_model
-            
         else:
-            # Preload faster-whisper model
-            from faster_whisper import WhisperModel  # noqa: F401
+            # Load faster-whisper model
+            from faster_whisper import WhisperModel
             
             device = os.environ.get('WHISPER_DEVICE', 'cpu')
             compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', 'int8')
             
-            try:
-                model = WhisperModel(model_name, device=device, compute_type=compute_type)
-                
-                # Store the initialized model
-                _local_whisper_model = model
-                
-                log_message("INFO", f"[PYWHISPER_PRELOAD] Successfully preloaded faster-whisper model: {model_name}")
-                return model
-            except Exception as e:
-                log_message("ERROR", f"[PYWHISPER_PRELOAD] faster-whisper initialization failed: {e}")
-                return None
-                
+            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        
+        with _local_whisper_model_cache_lock:
+            _local_whisper_model = model
+            _local_whisper_model_loading = False
+            _local_whisper_model_error = None
+            
+        log_message("INFO", f"[ASR_PRELOAD] Model loaded successfully in background: {model_name}")
+        
     except Exception as e:
-        log_message("ERROR", f"[PYWHISPER_PRELOAD] Preload failed: {e}")
-        return None
-
+        with _local_whisper_model_cache_lock:
+            _local_whisper_model_loading = False
+            _local_whisper_model_error = f"Model loading failed: {e}"
+        log_message("ERROR", f"[ASR_PRELOAD] Background model loading failed: {e}")
 
 if __name__ == "__main__":
     main()

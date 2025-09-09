@@ -24,6 +24,8 @@ import subprocess
 import shutil
 import os
 import sys
+import threading
+import time
 from typing import Optional
 
 from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
@@ -32,6 +34,7 @@ from . import asr
 from . import comms
 from .core import run_with_talkito
 from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
+from .logs import log_message
 
 
 TALKITO_PERMISSIONS = [
@@ -362,7 +365,9 @@ async def run_claude_wrapper(args) -> int:
         kwargs['profile'] = 'claude'
 
     # Add TTS config
+    log_message("DEBUG", "build_tts_config")
     tts_config = build_tts_config(args)
+    log_message("DEBUG", "build_tts_config completed")
     if tts_config:
         kwargs['tts_config'] = tts_config
 
@@ -387,8 +392,6 @@ async def run_claude_wrapper(args) -> int:
 
 async def run_claude_hybrid(args) -> int:
     """Run Claude with in-process MCP server and wrapper functionality"""
-    import threading
-    import time
     import signal
     from .mcp import app, find_available_port
     from .tts import stop_tts_immediately
@@ -402,13 +405,20 @@ async def run_claude_hybrid(args) -> int:
     # Set up logging early if log file specified
     if args.log_file:
         from .logs import setup_logging
+        log_start_time = time.time()
         setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
+        log_message("INFO", f"[CLAUDE_HYBRID] Logging setup completed [{time.time() - log_start_time:.3f}s]")
     
     # Set environment variables for provider preferences
     # Check if the TTS provider is valid first, fall back to system on macOS if not
+    log_message("INFO", f"[CLAUDE_HYBRID] About to process TTS provider: {args.tts_provider}")
     if args.tts_provider:
         # Validate the provider before setting it
-        if not tts.validate_provider_config(args.tts_provider):
+        validate_start = time.time()
+        log_message("INFO", f"[CLAUDE_HYBRID] About to validate TTS provider: {args.tts_provider}")
+        provider_valid = tts.validate_provider_config(args.tts_provider)
+        log_message("INFO", f"[CLAUDE_HYBRID] TTS provider validation completed [{time.time() - validate_start:.3f}s] - valid: {provider_valid}")
+        if not provider_valid:
             import platform
             if platform.system() == 'Darwin':  # macOS
                 print("Falling back to system TTS provider on macOS")
@@ -423,20 +433,28 @@ async def run_claude_hybrid(args) -> int:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
 
     # Initialize providers early (triggers availability checks and download prompts)
+    init_start_time = time.time()
+    log_message("INFO", f"[CLAUDE_HYBRID] About to call initialize_providers_early [start_time={init_start_time}]")
     initialize_providers_early(args)
+    init_end_time = time.time()
+    log_message("INFO", f"[CLAUDE_HYBRID] initialize_providers_early completed [{init_end_time - init_start_time:.3f}s]")
     
     # Handle backwards compatibility for TTS mode
+    step_start = time.time()
     tts_mode = args.tts_mode
     if args.disable_tts:
         tts_mode = 'off'
     elif args.dont_auto_skip_tts:
         tts_mode = 'full'
+    log_message("INFO", f"[CLAUDE_HYBRID] TTS mode configuration completed [{time.time() - step_start:.3f}s]")
     
     # Set ASR and TTS modes in shared state so they're available for status display
+    step_start = time.time()
     from .state import get_shared_state
     shared_state = get_shared_state()
     shared_state.asr_mode = args.asr_mode
     shared_state.tts_mode = tts_mode
+    log_message("INFO", f"[CLAUDE_HYBRID] Shared state configuration completed [{time.time() - step_start:.3f}s]")
 
     # Start MCP server in background thread
     server_ready = threading.Event()
@@ -469,6 +487,64 @@ async def run_claude_hybrid(args) -> int:
         except Exception:
             return False
     
+    def optimized_mcp_health_check(check_port, timeout=10):
+        """
+        Fast health check for MCP server using SSE endpoint
+        Returns True when server is ready, False on timeout
+        """
+        import socket
+        import urllib.request
+        import urllib.error
+        
+        start_time = time.time()
+        last_check_time = 0
+        check_interval = 0.05  # Start with 50ms checks
+        max_check_interval = 0.2  # Cap at 200ms
+        
+        # First wait for port to be listening
+        while time.time() - start_time < timeout:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.1)
+                    if s.connect_ex(('127.0.0.1', check_port)) == 0:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.05)
+        else:
+            return False  # Port never started listening
+        
+        # Now do progressive health checks on SSE endpoint
+        while time.time() - start_time < timeout:
+            current_time = time.time()
+            
+            # Only check if enough time has passed (progressive backoff)
+            if current_time - last_check_time >= check_interval:
+                try:
+                    # Try SSE endpoint - responds immediately when ready
+                    req = urllib.request.Request(
+                        f'http://127.0.0.1:{check_port}/sse',
+                        headers={'Accept': 'text/event-stream'}
+                    )
+                    with urllib.request.urlopen(req, timeout=0.3):
+                        # Server is ready!
+                        return True
+                except urllib.error.HTTPError as e:
+                    # HTTP errors indicate server is responding
+                    if 200 <= e.code < 500:
+                        return True
+                except Exception:
+                    # Connection errors - server not ready yet
+                    pass
+                
+                last_check_time = current_time
+                # Progressive backoff - increase interval slightly each time
+                check_interval = min(check_interval * 1.1, max_check_interval)
+            
+            time.sleep(0.02)  # Small sleep to avoid busy waiting
+        
+        return False  # Timeout
+    
     def run_mcp_server():
         """Run the MCP server in a thread"""
         try:
@@ -495,7 +571,6 @@ async def run_claude_hybrid(args) -> int:
             
             # Start a thread to check when server is actually listening
             def monitor_server_startup():
-                import time
                 import urllib.request
                 import urllib.error
                 start_time = time.time()
@@ -576,6 +651,7 @@ async def run_claude_hybrid(args) -> int:
     
     try:
         # Start the API server first (for webhooks and Claude hooks)
+        step_start = time.time()
         from .api import start_api_server
         
         # Determine webhook port - use args if provided, otherwise find available port
@@ -588,28 +664,51 @@ async def run_claude_hybrid(args) -> int:
                 print("Error: Could not find an available port for API server", file=sys.stderr)
                 return 1
         
-        # Start API server
-        api_server = start_api_server(port=webhook_port)
+        log_message("INFO", f"[CLAUDE_HYBRID] API server port discovery completed [{time.time() - step_start:.3f}s]")
         
-        # Get the actual port the server is running on (might be different if original was in use)
-        if api_server:
-            actual_port = api_server.get_port()
-            if actual_port != webhook_port:
-                webhook_port = actual_port
-        else:
-            print("Warning: API server failed to start", file=sys.stderr)
-            webhook_port = None
+        # Start API server in background thread (non-critical for immediate startup)
+        def start_api_server_background():
+            step_start = time.time()
+            log_message("INFO", "[CLAUDE_HYBRID] Starting API server in background...")
+            api_server = start_api_server(port=webhook_port)
+            log_message("INFO", f"[CLAUDE_HYBRID] API server startup completed [{time.time() - step_start:.3f}s]")
+            
+            # Get the actual port the server is running on (might be different if original was in use)
+            actual_webhook_port = webhook_port
+            if api_server:
+                actual_port = api_server.get_port()
+                if actual_port != webhook_port:
+                    actual_webhook_port = actual_port
+                    log_message("INFO", f"[CLAUDE_HYBRID] API server using port {actual_port} instead of requested {webhook_port}")
+            else:
+                print("Warning: API server failed to start", file=sys.stderr)
+                actual_webhook_port = None
 
-        # Update Claude hooks to use the API server
-        if webhook_port:
-            update_claude_hooks(webhook_port)
+            # Update Claude hooks to use the API server
+            if actual_webhook_port:
+                try:
+                    update_claude_hooks(actual_webhook_port)
+                    log_message("INFO", f"[CLAUDE_HYBRID] Claude hooks updated for port {actual_webhook_port}")
+                except Exception as e:
+                    log_message("ERROR", f"[CLAUDE_HYBRID] Failed to update Claude hooks: {e}")
+            
+            # Update args with the webhook port so comms can use it
+            args.webhook_port = actual_webhook_port
         
-        # Update args with the webhook port so comms can use it
+        # Start API server in background thread
+        api_thread = threading.Thread(target=start_api_server_background, daemon=True, name="APIServerThread")
+        api_thread.start()
+        log_message("INFO", "[CLAUDE_HYBRID] API server thread started in background")
+        
+        # Set initial webhook_port for args (will be updated by background thread)
         args.webhook_port = webhook_port
         
         # Start the MCP server thread
+        log_message("INFO", "[CLAUDE_HYBRID] About to start MCP server thread")
         server_thread = threading.Thread(target=run_mcp_server, daemon=True)
+        thread_start_time = time.time()
         server_thread.start()
+        log_message("INFO", f"[CLAUDE_HYBRID] MCP server thread started [{time.time() - thread_start_time:.3f}s]")
         
         # Wait for server to be ready (max 15 seconds)
         if not server_ready.wait(15):
@@ -621,12 +720,18 @@ async def run_claude_hybrid(args) -> int:
             else:
                 # Port is listening but server might not be fully ready
                 print("Note: MCP server port is listening but may still be initializing", file=sys.stderr)
-                # Give it a bit more time
-                time.sleep(2)
+                # Use optimized health check instead of fixed 2-second sleep
+                health_check_start = time.time()
+                if optimized_mcp_health_check(port, timeout=3):
+                    log_message("INFO", f"[CLAUDE_HYBRID] MCP server health check passed [{time.time() - health_check_start:.3f}s]")
+                else:
+                    log_message("WARNING", f"[CLAUDE_HYBRID] MCP server health check timeout after {time.time() - health_check_start:.3f}s")
+                    # Fall back to small sleep if health check fails
+                    time.sleep(0.5)
         else:
             # Server signaled ready - give it a tiny bit more time to be safe
             time.sleep(0.2)
-        
+        log_message("INFO", "[CLAUDE_HYBRID] restoring logging")
         # Restore logging after FastMCP has messed with it
         if args.log_file:
             import logging
@@ -646,10 +751,12 @@ async def run_claude_hybrid(args) -> int:
         # Initialize Claude with SSE configuration
         if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
             print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
-        
+
+        log_message("INFO", "[CLAUDE_HYBRID] starting print_configuration_status")
         # Show configuration status (now reflects actual providers after fallback)
         print_configuration_status(args)
-        
+        log_message("INFO", "[CLAUDE_HYBRID] print_configuration_status completed")
+
         # Re-install our signal handler right before running Claude
         # This ensures it's the last one installed and will be called first
         signal.signal(signal.SIGINT, hybrid_signal_handler)
@@ -795,8 +902,6 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     config.slack_enabled = has_slack
     
     return config
-
-
 
 
 def print_configuration_status(args):
