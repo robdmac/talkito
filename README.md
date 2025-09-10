@@ -4,9 +4,14 @@ TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be
 
 ## 🚀 Quick Install
 
-### One-liner (macOS/Linux)
+### Option 1: One-liner Install Script (Recommended)
 ```bash
 curl -sSL https://raw.githubusercontent.com/robdmac/talkito/main/install.sh | bash
+```
+
+### Option 2: PyPI (Coming Soon)
+```bash
+pip install talkito
 ```
 
 Then just run:
@@ -14,8 +19,9 @@ Then just run:
 talkito claude
 ```
 
-## Install from Source
+## Install for End Users
 
+### From Source (Stable)
 ```bash
 # Clone the repository
 git clone https://github.com/robdmac/talkito.git
@@ -28,7 +34,29 @@ source venv/bin/activate
 # Install system dependencies (macOS)
 brew install portaudio
 
-# Install package with all features
+# Install package (normal install - gets updates via git pull)
+pip install ".[all]"
+
+# Run this in a directory you want to use claude with
+talkito claude
+```
+
+## Install for Developers
+
+### Editable Install (Development)
+```bash
+# Clone the repository
+git clone https://github.com/robdmac/talkito.git
+cd talkito
+
+# Create and activate virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
+
+# Install system dependencies (macOS)
+brew install portaudio
+
+# Install in development mode (editable install)
 pip install -e ".[all]"
 
 # Run this in a directory you want to use claude with

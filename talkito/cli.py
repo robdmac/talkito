@@ -18,6 +18,8 @@
 
 """Talkito CLI - Command-line interface for the talkito package"""
 
+# ruff: noqa: E402
+
 import os
 import argparse
 import asyncio

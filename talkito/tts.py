@@ -19,6 +19,7 @@
 """Text-to-Speech engine and text processing utilities with TTS engine detection, symbol conversion, and speech synthesis support."""
 
 import argparse
+import io
 import queue
 import os
 import random
@@ -28,6 +29,7 @@ import shutil
 import signal
 import soundfile as sf
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from pathlib import Path
 
 # Import centralized logging utilities
 try:
@@ -47,6 +50,53 @@ except ImportError:
     # Fallback for standalone execution
     def _base_log_message(level: str, message: str, logger_name: str = None):
         print(f"[{level}] {message}")
+
+def patch_phonemizer_espeak_api():
+    """
+    Make official phonemizer behave like the fork for loaders that call
+    EspeakWrapper.set_data_path / set_library.
+    """
+    import os
+    from importlib import import_module
+
+    # Import the wrapper class
+    wrapper = import_module('phonemizer.backend.espeak.wrapper')
+    EspeakWrapper = wrapper.EspeakWrapper
+
+    # Provide missing methods as no-ops that set env vars + class attributes
+    if not hasattr(EspeakWrapper, 'set_data_path'):
+        def _set_data_path(path):
+            if path:
+                os.environ['ESPEAKNG_DATA_PATH'] = path
+                os.environ.setdefault('ESPEAK_DATA_PATH', path)
+                try:
+                    # some builds read a class attribute
+                    setattr(EspeakWrapper, 'data_path', path)
+                except Exception:
+                    pass
+        EspeakWrapper.set_data_path = staticmethod(_set_data_path)
+
+    if not hasattr(EspeakWrapper, 'set_library'):
+        def _set_library(path):
+            if path:
+                os.environ['PHONEMIZER_ESPEAK_LIBRARY'] = path
+                try:
+                    setattr(EspeakWrapper, 'library_path', path)
+                except Exception:
+                    pass
+        EspeakWrapper.set_library = staticmethod(_set_library)
+
+    # Optionally set them now using espeakng-loader (if present)
+    try:
+        import espeakng_loader
+        EspeakWrapper.set_library(espeakng_loader.get_library_path())
+        EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+    except Exception:
+        # fall back to whatever env vars the user has set
+        pass
+
+# Call this BEFORE importing KittenTTS/Kokoro/etc.
+patch_phonemizer_espeak_api()
 
 # Import shared state
 try:
@@ -78,7 +128,6 @@ SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to ad
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
 disable_tts = False  # Whether to disable TTS completely (for testing)
 tts_provider = "system"  # Current TTS provider (system, openai, polly, azure, gcloud, elevenlabs, deepgram, etc.)
-_kittentts_warning_shown = False  # Track if KittenTTS warning has been shown
 openai_voice = os.environ.get('OPENAI_VOICE', 'alloy')  # Default OpenAI voice
 polly_voice = os.environ.get('AWS_POLLY_VOICE', 'Joanna')  # Default AWS Polly voice
 polly_region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')  # Default AWS region for Polly
@@ -89,11 +138,182 @@ gcloud_language_code = os.environ.get('GCLOUD_LANGUAGE_CODE', 'en-US')  # Defaul
 elevenlabs_voice_id = os.environ.get('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default ElevenLabs voice (Rachel)
 elevenlabs_model_id = os.environ.get('ELEVENLABS_MODEL_ID', 'eleven_monolingual_v1')  # Default ElevenLabs model
 deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')  # Default Deepgram model
-kittentts_model = os.environ.get('KITTENTTS_MODEL', 'KittenML/kitten-tts-nano-0.2')  # Default KittenTTS model
+kittentts_model = os.environ.get('KITTENTTS_MODEL', 'kitten-tts-nano-0.2')  # Default KittenTTS model
 kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'expr-voice-3-f')  # Default KittenTTS voice
 kokoro_language = os.environ.get('KOKORO_LANGUAGE', 'a')  # Default Kokoro language (American English)
 kokoro_voice = os.environ.get('KOKORO_VOICE', 'af_heart')  # Default Kokoro voice
 kokoro_speed = os.environ.get('KOKORO_SPEED', '1.0')  # Default Kokoro speed
+
+# Local model caching for offline TTS providers (kokoro/kittentts)
+_local_model_cache = None
+_local_model_provider = None  # Track which provider is cached ('kokoro' or 'kittentts')
+_local_model_loading = False
+_local_model_error = None
+_local_model_cache_lock = threading.Lock()
+
+
+def _create_model_instance(provider: str):
+    """Create model instance for the specified provider."""
+    if provider == 'kokoro':
+        # Check if spaCy model is available
+        from .models import check_spacy_model_consent
+        if not check_spacy_model_consent('kokoro'):
+            raise RuntimeError("spaCy language model required for kokoro but download was declined")
+        
+        with suppress_ai_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+            from kokoro import KPipeline
+        
+        # Model creation - consent was already obtained in main thread
+        repo_id = 'hexgrad/Kokoro-82M'
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+            return KPipeline(lang_code='en-us', repo_id=repo_id)
+        
+    elif provider == 'kittentts':
+        with suppress_ai_warnings():
+            from kittentts import KittenTTS
+        
+        # Model creation - consent was already obtained in main thread
+        model_name = kittentts_model
+        log_message("DEBUG", f"KittenTTS(model_name) with model_name = {model_name}")
+        return KittenTTS(model_name)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+
+def _load_model_background(provider: str):
+    """Load model in background thread."""
+    global _local_model_cache, _local_model_provider, _local_model_loading, _local_model_error
+    
+    try:
+        log_message("INFO", f"Background loading {provider} model...")
+        model = _create_model_instance(provider)
+        
+        with _local_model_cache_lock:
+            _local_model_cache = model
+            _local_model_provider = provider
+            _local_model_loading = False
+            _local_model_error = None
+            
+        log_message("INFO", f"{provider} model loaded successfully in background")
+        
+    except Exception as e:
+        with _local_model_cache_lock:
+            _local_model_loading = False
+            _local_model_error = f"{provider} model loading failed: {e}"
+        log_message("ERROR", f"Background {provider} model loading failed: {e}")
+
+
+def preload_local_model(provider: str):
+    """Start background preloading of local model for specified provider."""
+    global _local_model_loading
+    
+    if provider not in ['kokoro', 'kittentts']:
+        log_message("WARNING", f"Unknown provider for preloading: {provider}")
+        return
+    
+    with _local_model_cache_lock:
+        # Skip if already loading or loaded the same provider
+        if _local_model_loading:
+            log_message("DEBUG", f"Model already loading, skipping preload for {provider}")
+            return
+        
+        if _local_model_provider == provider and _local_model_cache is not None:
+            log_message("DEBUG", f"Model already cached for {provider}, skipping preload")
+            return
+        
+        # Check if model needs consent BEFORE starting background thread
+        # This must happen in main thread where input() works
+        from .models import check_model_cached, ask_user_consent
+        
+        model_download_started = False
+        if provider == 'kokoro':
+            model_name = 'default'  # Kokoro uses 'default' model name
+            if not check_model_cached('kokoro', model_name):
+                if not ask_user_consent('kokoro', model_name):
+                    log_message("INFO", f"User declined download for {provider} model '{model_name}'")
+                    # Fall back to next best available provider
+                    fallback_provider = select_best_tts_provider(excluded_providers={'kokoro'})
+                    print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
+                    
+                    # Update shared state with fallback provider
+                    try:
+                        if SHARED_STATE_AVAILABLE:
+                            from .state import get_shared_state
+                            shared_state = get_shared_state()
+                            shared_state.set_tts_config(provider=fallback_provider)
+                            log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                    except Exception as e:
+                        log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
+                    
+                    return
+                model_download_started = True
+        elif provider == 'kittentts':
+            model_name = kittentts_model  # Use current kittentts model setting  
+            if not check_model_cached('kittentts', model_name):
+                if not ask_user_consent('kittentts', model_name):
+                    log_message("INFO", f"User declined download for {provider} model '{model_name}'")
+                    # Fall back to next best available provider
+                    fallback_provider = select_best_tts_provider(excluded_providers={'kittentts'})
+                    print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
+                    
+                    # Update shared state with fallback provider
+                    try:
+                        if SHARED_STATE_AVAILABLE:
+                            from .state import get_shared_state
+                            shared_state = get_shared_state()
+                            shared_state.set_tts_config(provider=fallback_provider)
+                            log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                    except Exception as e:
+                        log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
+                    
+                    return
+                model_download_started = True
+        
+        # Start background loading (consent already obtained)
+        _local_model_loading = True
+        _local_model_error = None
+    
+    thread = threading.Thread(target=_load_model_background, args=(provider,), daemon=True)
+    thread.start()
+    log_message("INFO", f"Started background loading of {provider} model")
+    
+    # Show confirmation message if download was started
+    if model_download_started:
+        print(f"Downloading {provider} model in background. TTS will start automatically when ready.")
+
+
+def get_cached_local_model(provider: str, timeout: float = 10.0):
+    """Get cached local model, waiting for background loading if needed."""
+    start_time = time.time()
+    need_to_preload = False
+
+    while True:
+        with _local_model_cache_lock:
+            # Check for errors
+            if _local_model_error and not _local_model_loading:
+                print(f"Error loading {provider} model: {_local_model_error}")
+                return None
+            
+            # Check if we have the right model cached
+            if _local_model_provider == provider and _local_model_cache is not None:
+                return _local_model_cache
+            
+            # Check if not loading and not cached - this means no one started loading
+            if not _local_model_loading:
+                print(f"{provider} model not loaded and no background loading in progress. Starting now...")
+                need_to_preload = True
+
+        if need_to_preload:
+            preload_local_model(provider)
+        
+        # Check timeout
+        if time.time() - start_time > timeout:
+            print(f"Timeout waiting for {provider} model to load after {timeout} seconds")
+            return None
+        
+        time.sleep(0.1)
 
 
 def get_tts_config():
@@ -149,10 +369,9 @@ def get_tts_config():
     }
 
 
-# Provider registry for easier management
+# Provider registry for metadata (install instructions, env vars, etc.)
 TTS_PROVIDERS = {
     'openai': {
-        'func': None,  # Will be set to speak_with_openai after function definition
         'env_var': 'OPENAI_API_KEY',
         'voice_var': 'openai_voice',
         'display_name': 'OpenAI',
@@ -160,7 +379,6 @@ TTS_PROVIDERS = {
         'config_keys': ['voice']
     },
     'aws': {
-        'func': None,  # Will be set to speak_with_polly after function definition
         'env_var': None,  # AWS uses multiple env vars or config files
         'env_name': 'AWS credentials',
         'voice_var': 'polly_voice',
@@ -170,7 +388,6 @@ TTS_PROVIDERS = {
         'config_keys': ['voice', 'region']
     },
     'azure': {
-        'func': None,  # Will be set to speak_with_azure after function definition
         'env_var': 'AZURE_SPEECH_KEY',
         'voice_var': 'azure_voice',
         'region_var': 'azure_region',
@@ -179,7 +396,6 @@ TTS_PROVIDERS = {
         'config_keys': ['voice', 'region']
     },
     'gcloud': {
-        'func': None,  # Will be set to speak_with_gcloud after function definition
         'env_var': 'GOOGLE_APPLICATION_CREDENTIALS',
         'voice_var': 'gcloud_voice',
         'language_var': 'gcloud_language_code',
@@ -188,7 +404,6 @@ TTS_PROVIDERS = {
         'config_keys': ['voice', 'language']
     },
     'elevenlabs': {
-        'func': None,  # Will be set to speak_with_elevenlabs after function definition
         'env_var': 'ELEVENLABS_API_KEY',
         'voice_var': 'elevenlabs_voice_id',
         'model_var': 'elevenlabs_model_id',
@@ -197,7 +412,6 @@ TTS_PROVIDERS = {
         'config_keys': ['voice', 'model']
     },
     'deepgram': {
-        'func': None,  # Will be set to speak_with_deepgram after function definition
         'env_var': 'DEEPGRAM_API_KEY',
         'model_var': 'deepgram_voice_model',
         'display_name': 'Deepgram',
@@ -205,7 +419,6 @@ TTS_PROVIDERS = {
         'config_keys': ['model']
     },
     'kittentts': {
-        'func': None,  # Will be set to speak_with_kittentts after function definition
         'env_var': None,  # KittenTTS doesn't need an API key
         'model_var': 'kittentts_model',
         'voice_var': 'kittentts_voice',
@@ -214,7 +427,6 @@ TTS_PROVIDERS = {
         'config_keys': ['model', 'voice']
     },
     'kokoro': {
-        'func': None,  # Will be set to speak_with_kokoro after function definition
         'env_var': None,  # Kokoro doesn't need an API key
         'language_var': 'kokoro_language',
         'voice_var': 'kokoro_voice',
@@ -379,10 +591,13 @@ def log_message(level: str, message: str):
 
 def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str, Dict[str, Any]]:
     """Check TTS provider accessibility based on API keys and environment."""
+    log_message("INFO", f"check_tts_provider_accessibility called with requested_provider={requested_provider}")
+    
     accessible = {}
     
     # System TTS
     detected_engine = detect_tts_engine()
+    log_message("INFO", f"System TTS detection completed - detected: {detected_engine}")
     if detected_engine != "none":
         accessible["system"] = {
             "available": True,
@@ -451,40 +666,21 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     # KittenTTS - Check if dependencies are installed
     kittentts_available = False
     kittentts_note = "Ultra-lightweight TTS that runs without GPU (no API key required)"
-    try:
-        with suppress_ai_warnings():
-            from kittentts import KittenTTS
-        # Check if the model is cached
-        from .models import check_model_cached, with_download_progress
-        model_name = kittentts_model  # Use the actual configured model name
-        if not check_model_cached('kittentts', model_name):
-            # Only prompt for download if this provider was specifically requested
-            if requested_provider == 'kittentts' or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER') == 'kittentts':
-                # Ask user for consent and download if approved
-                try:
-                    def create_model():
-                        return KittenTTS(model_name)
-                    
-                    decorated_func = with_download_progress('kittentts', model_name, create_model)
-                    decorated_func()  # This will ask for consent and download
-                    kittentts_available = True
-                except RuntimeError as e:
-                    if "Download cancelled" in str(e):
-                        kittentts_note = f"KittenTTS model '{model_name}' download declined by user"
-                    else:
-                        kittentts_note = f"KittenTTS model download failed: {e}"
-                    kittentts_available = False
-                except Exception as e:
-                    kittentts_note = f"KittenTTS model download failed: {e}"
-                    kittentts_available = False
-            else:
-                # Model not cached and not specifically requested - mark as unavailable  
-                kittentts_note = f"KittenTTS model '{model_name}' not cached. Will be downloaded on first use."
-                kittentts_available = False
-        else:
+    
+    # For accessibility check, assume kittentts is available if requested
+    # Actual validation happens during model loading with user consent
+    if requested_provider == 'kittentts':
+        kittentts_available = True
+        kittentts_note = "KittenTTS package (validation deferred to model loading)"
+    else:
+        # Only do expensive import check if this provider is NOT specifically requested
+        try:
+            # Just check if kittentts package is importable - actual model loading happens later
+            with suppress_ai_warnings():
+                import kittentts  # noqa: F401 # Just check package availability
             kittentts_available = True
-    except ImportError:
-        kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
+        except ImportError:
+            kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
     
     accessible["kittentts"] = {
         "available": kittentts_available,
@@ -495,56 +691,31 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     # KokoroTTS - Check if dependencies are installed
     kokoro_available = False
     kokoro_note = "High-quality 82M parameter TTS model (no API key required)"
-    try:
-        # Check if spaCy model is available (kokoro's dependency chain includes spacy-curated-transformers)
-        from .models import check_spacy_model_consent
-        if not check_spacy_model_consent('kokoro'):
-            kokoro_note = "spaCy language model required but download was declined"
-            kokoro_available = False
-        else:
-            # Only import kokoro if spaCy model is available
+    
+    # For accessibility check, assume kokoro is available if requested
+    # Actual validation happens during model loading with user consent
+    if requested_provider == 'kokoro':
+        kokoro_available = True
+        kokoro_note = "KokoroTTS package (validation deferred to model loading)"
+        log_message("INFO", "KokoroTTS availability assumed for requested provider")
+    else:
+        # Only do expensive import check if this provider is NOT specifically requested
+        try:
+            # This import is still expensive but we skip it for the common case
             with suppress_ai_warnings():
-                from kokoro import KPipeline
-        # Check if the model is cached
-        from .models import check_model_cached, with_download_progress
-        if not check_model_cached('kokoro', 'default'):
-            # Only prompt for download if this provider was specifically requested
-            if requested_provider == 'kokoro' or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER') == 'kokoro':
-                # Ask user for consent and download if approved
-                try:
-                    repo_id = 'hexgrad/Kokoro-82M'
-                    def create_pipeline():
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-                            return KPipeline(lang_code='en-us', repo_id=repo_id)
-                    
-                    decorated_func = with_download_progress('kokoro', 'default', create_pipeline)
-                    decorated_func()  # This will ask for consent and download
-                    kokoro_available = True
-                except RuntimeError as e:
-                    if "Download cancelled" in str(e):
-                        kokoro_note = "KokoroTTS model download declined by user"
-                    else:
-                        kokoro_note = f"KokoroTTS model download failed: {e}"
-                    kokoro_available = False
-                except Exception as e:
-                    kokoro_note = f"KokoroTTS model download failed: {e}"
-                    kokoro_available = False
-            else:
-                # Model not cached and not specifically requested - mark as unavailable
-                kokoro_note = "KokoroTTS model not cached. Will be downloaded on first use."
-                kokoro_available = False
-        else:
+                import kokoro  # noqa: F401 # Just check package availability
             kokoro_available = True
-    except ImportError:
-        kokoro_note = "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile)"
+        except Exception as e:
+            # Catch all exceptions, not just ImportError (e.g., AttributeError from EspeakWrapper)
+            kokoro_note = f"Kokoro package error: {str(e)}" if not isinstance(e, ImportError) else "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile)"
+        log_message("INFO", f"KokoroTTS availability check completed - available: {kokoro_available}")
     
     accessible["kokoro"] = {
         "available": kokoro_available,
         "note": kokoro_note
     }
-    
-    
+
+    log_message("INFO", f"check_tts_provider_accessibility completed - providers checked: {list(accessible.keys())}")
     return accessible
 
 
@@ -570,42 +741,110 @@ def _create_temp_audio_file(suffix: str = ".mp3") -> str:
 
 
 def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
-    """Play audio file using system player (afplay, mpg123, play)."""
-    process = None
-    
-    # Detect and create player process
-    if shutil.which("afplay"):  # macOS
-        process = subprocess.Popen(["afplay", audio_path])
-    elif shutil.which("mpg123"):
-        process = subprocess.Popen(["mpg123", "-q", audio_path])
-    elif shutil.which("play"):  # SoX
-        process = subprocess.Popen(["play", "-q", audio_path])
+    """Play audio file using an available system player.
+    Prefers players that support the file's format (wav/mp3), with robust fallbacks.
+    """
+    path = Path(audio_path)
+    if not path.exists():
+        log_message("ERROR", f"Audio file not found: {audio_path}")
+        return False
+
+    ext = path.suffix.lower()
+    is_wav = ext == ".wav"
+    is_mp3 = ext == ".mp3"
+
+    # Build candidate player commands in priority order for each format
+    candidates = []
+
+    if is_wav:
+        # macOS / Linux players that handle WAV well
+        # afplay (macOS), sox 'play', ffplay, PulseAudio/ALSA, VLC CLI
+        candidates.extend([
+            (["afplay", audio_path], "afplay"),
+            (["play", "-q", audio_path], "play"),
+            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+            (["paplay", audio_path], "paplay"),
+            (["aplay", audio_path], "aplay"),
+            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+        ])
+
+        # Windows (WAV only): PowerShell SoundPlayer
+        if sys.platform.startswith("win"):
+            candidates.append((
+                ["powershell", "-NoProfile", "-Command",
+                 f'[Console]::OutputEncoding=[Text.UTF8]; '
+                 f'$p=New-Object System.Media.SoundPlayer "{audio_path}"; '
+                 f'$p.PlaySync();'],
+                "powershell-wav"
+            ))
+
+    elif is_mp3:
+        # MP3: prefer afplay (macOS), mpg123 (fast), sox 'play', ffplay, vlc CLI
+        candidates.extend([
+            (["afplay", audio_path], "afplay"),
+            (["mpg123", "-q", audio_path], "mpg123"),
+            (["play", "-q", audio_path], "play"),
+            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+        ])
     else:
-        log_message("ERROR", "No audio player found (afplay, mpg123, or play)")
+        # Unknown extension: try broadly capable players
+        candidates.extend([
+            (["afplay", audio_path], "afplay"),
+            (["play", "-q", audio_path], "play"),
+            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+            (["mpg123", "-q", audio_path], "mpg123"),
+            (["paplay", audio_path], "paplay"),
+            (["aplay", audio_path], "aplay"),
+            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+        ])
+
+    # Pick the first available player from the candidate list
+    chosen_cmd = None
+    for cmd, binary in candidates:
+        # Special case: "powershell-wav" isn't a binary to which/which
+        if binary == "powershell-wav":
+            chosen_cmd = cmd
+            break
+        if shutil.which(binary):
+            chosen_cmd = cmd
+            break
+
+    if not chosen_cmd:
+        # Helpful, format-aware error
+        need = "a WAV-capable player (afplay, play/sox, ffplay, paplay/aplay, or VLC)"
+        if is_mp3:
+            need = "an MP3-capable player (afplay, mpg123, play/sox, ffplay, or VLC)"
+        log_message("ERROR", f"No suitable audio player found for {ext or 'unknown format'}. Install {need}.")
         return False
-    
-    if not process:
+
+    # Launch player
+    try:
+        process = subprocess.Popen(
+            chosen_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True  # ensures we can terminate the whole group
+        )
+    except Exception as e:
+        log_message("ERROR", f"Failed to start audio player {chosen_cmd[0]}: {e}")
         return False
-    
-    # Store process for interruption support if requested
+
     if use_process_control:
         with playback_control.lock:
             playback_control.current_process = process
-    
-    # Wait for completion or interruption
+
     try:
-        # Poll process with timeout to check for interruptions
+        # Poll + allow cooperative interruption
         while process.poll() is None:
-            # Check if we should stop
             if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
-                process.terminate()
                 try:
-                    process.wait(timeout=0.1)
-                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=0.25)
+                except Exception:
                     process.kill()
                 return False
-            time.sleep(0.01)  # Small sleep to avoid busy waiting
-        
+            time.sleep(0.01)
         return process.returncode == 0
     except Exception:
         return False
@@ -632,24 +871,25 @@ def _handle_provider_error(provider_name: str, error: Exception) -> bool:
     log_message("ERROR", f"{provider_name} TTS failed: {error}")
     return False
 
+def _write_temp_audio(audio_bytes: bytes, ext: str) -> str:
+    path = _create_temp_audio_file(ext)
+    with open(path, "wb") as f:
+        f.write(audio_bytes)
+    return path
 
 def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True) -> bool:
     """Synthesize audio via provider function and play it."""
     try:
-        # Get audio data from the provider
-        audio_data = synthesize_func(text)
-        if not audio_data:
+        result = synthesize_func(text)
+        if not result or not isinstance(result, tuple) or len(result) != 2:
+            log_message("ERROR", f"Synthesizer returned unexpected result: {result!r}")
             return False
-            
-        # Create temporary file for audio
-        tmp_path = _create_temp_audio_file(".mp3")
-        
+        audio_bytes, ext = result
+        if not audio_bytes:
+            log_message("ERROR", "No audio returned from synthesizer")
+            return False
+        tmp_path = _write_temp_audio(audio_bytes, ext)
         try:
-            # Write audio content to file
-            with open(tmp_path, 'wb') as tmp_file:
-                tmp_file.write(audio_data)
-            
-            # Play the audio file
             return _play_audio_file(tmp_path, use_process_control=use_process_control)
         finally:
             _cleanup_temp_file(tmp_path)
@@ -671,34 +911,11 @@ def validate_provider_config(provider: str) -> bool:
         print(f"Please set it with: export {env_var}='your-api-key'")
         return False
     
-    # Special case for KittenTTS - check if package is installed
-    if provider == 'kittentts':
-        global _kittentts_warning_shown
-        try:
-            with suppress_ai_warnings():
-                from kittentts import KittenTTS  # noqa: F401
-        except ImportError:
-            # Only print the installation message once
-            if not _kittentts_warning_shown:
-                print("Error: KittenTTS dependencies not installed")
-                print("Please install with:")
-                print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-                print("  pip install soundfile")
-                _kittentts_warning_shown = True
-            log_message("DEBUG", "KittenTTS dependencies not installed")
-            return False
-    
-    # Special case for KokoroTTS - check if package is installed
-    if provider == 'kokoro':
-        try:
-            with suppress_ai_warnings():
-                from kokoro import KPipeline  # noqa: F401
-        except ImportError:
-            print("Error: KokoroTTS dependencies not installed")
-            print("Please install with:")
-            print("  pip install kokoro>=0.9.4 soundfile")
-            log_message("DEBUG", "KokoroTTS dependencies not installed")
-            return False
+    # Skip validation for local providers - they'll be validated during actual model loading
+    # This avoids expensive import operations during startup
+    if provider in ['kittentts', 'kokoro']:
+        log_message("DEBUG", f"Skipping validation for local provider {provider} - will validate during model loading")
+        return True
     
     # Special case for AWS Polly - check AWS credentials
     if provider in ['aws', 'polly']:
@@ -727,13 +944,8 @@ class TTSProvider(ABC):
         self.provider_name = self.__class__.__name__.replace('Provider', '')
     
     @abstractmethod
-    def synthesize(self, text: str) -> Optional[bytes]:
-        """Synthesize speech from text, return audio bytes or None."""
-        pass
-    
-    @abstractmethod
-    def validate_config(self) -> Tuple[bool, Optional[str]]:
-        """Validate provider config, return (is_valid, error_message)."""
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        """Synthesize speech from text, return (audio bytes, format) or None."""
         pass
     
     def speak(self, text: str, use_process_control: bool = True) -> bool:
@@ -756,470 +968,246 @@ class TTSProvider(ABC):
         return default
 
 
-def _synthesize_openai(text: str) -> Optional[bytes]:
-    """Synthesize speech using OpenAI TTS API."""
-    import openai
-    import io
+class OpenAIProvider(TTSProvider):
+    """OpenAI TTS provider implementation."""
     
-    # Get configuration from shared state
-    config = get_tts_config()
-    voice = config.get('voice') or openai_voice
-    
-    # Generate speech using OpenAI
-    response = openai.audio.speech.create(
-        model="tts-1",
-        voice=voice,
-        input=text
-    )
-    
-    # Convert streaming response to bytes
-    audio_data = io.BytesIO()
-    for chunk in response.iter_bytes():
-        audio_data.write(chunk)
-    
-    return audio_data.getvalue()
-
-
-def speak_with_openai(text: str) -> bool:
-    """Speak text using OpenAI TTS API."""
-    try:
-        import openai  # noqa: F401
-        # Check for API key is now done by validate_provider_config
-        api_key = os.environ.get('OPENAI_API_KEY')
-        if not api_key:
-            log_message("ERROR", "OPENAI_API_KEY environment variable not set")
-            return False
-        
-        return synthesize_and_play(_synthesize_openai, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("OpenAI", "pip install openai")
-    except Exception as e:
-        return _handle_provider_error("OpenAI", e)
-
-
-def _synthesize_polly(text: str) -> Optional[bytes]:
-    """Synthesize speech using AWS Polly TTS API."""
-    import boto3
-    
-    # Get configuration from shared state
-    config = get_tts_config()
-    voice = config.get('voice') or polly_voice
-    region = config.get('region') or polly_region
-    
-    # Create Polly client
-    polly_client = boto3.client('polly', region_name=region)
-    
-    # Generate speech using AWS Polly
-    response = polly_client.synthesize_speech(
-        Text=text,
-        OutputFormat='mp3',
-        VoiceId=voice,
-        Engine='neural'  # Use neural voice for better quality
-    )
-    
-    # Return audio stream as bytes
-    return response['AudioStream'].read()
-
-
-def speak_with_polly(text: str) -> bool:
-    """Speak text using AWS Polly TTS API."""
-    try:
-        import boto3  # noqa: F401
-        return synthesize_and_play(_synthesize_polly, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("boto3", "pip install boto3")
-    except Exception as e:
-        return _handle_provider_error("AWS Polly", e)
-
-
-def _synthesize_azure(text: str) -> Optional[bytes]:
-    """Synthesize speech using Microsoft Azure TTS API."""
-    import azure.cognitiveservices.speech as speechsdk
-    
-    # Get configuration from shared state
-    config = get_tts_config()
-    voice = config.get('voice') or azure_voice
-    region = config.get('region') or azure_region
-    
-    # Check for API key and region
-    speech_key = os.environ.get('AZURE_SPEECH_KEY')
-    if not speech_key:
-        raise ValueError("AZURE_SPEECH_KEY environment variable not set")
-    
-    # Create speech configuration
-    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=region)
-    speech_config.speech_synthesis_voice_name = voice
-    
-    # Set output format to mp3
-    speech_config.set_speech_synthesis_output_format(
-        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
-    )
-    
-    # Create synthesizer without audio output (we'll get the audio data)
-    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
-    
-    # Synthesize the text
-    result = synthesizer.speak_text_async(text).get()
-    
-    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        # Return the audio data
-        return bytes(result.audio_data)
-    elif result.reason == speechsdk.ResultReason.Canceled:
-        cancellation_details = result.cancellation_details
-        error_msg = f"Azure TTS synthesis canceled: {cancellation_details.reason}"
-        if cancellation_details.reason == speechsdk.CancellationReason.Error:
-            error_msg += f" - {cancellation_details.error_details}"
-        raise Exception(error_msg)
-    else:
-        raise Exception(f"Azure TTS synthesis failed with reason: {result.reason}")
-
-
-def speak_with_azure(text: str) -> bool:
-    """Speak text using Microsoft Azure TTS API."""
-    try:
-        import azure.cognitiveservices.speech as speechsdk  # noqa: F401
-        return synthesize_and_play(_synthesize_azure, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("Azure Speech SDK", "pip install azure-cognitiveservices-speech")
-    except Exception as e:
-        return _handle_provider_error("Microsoft Azure", e)
-
-
-def _synthesize_gcloud(text: str) -> Optional[bytes]:
-    """Synthesize speech using Google Cloud Text-to-Speech API."""
-    from google.cloud import texttospeech
-    
-    # Get configuration from shared state
-    config = get_tts_config()
-    voice_name = config.get('voice') or gcloud_voice
-    language = config.get('language') or gcloud_language_code
-    
-    # Create a client
-    client = texttospeech.TextToSpeechClient()
-    
-    # Set the text input to be synthesized
-    synthesis_input = texttospeech.SynthesisInput(text=text)
-    
-    # Build the voice request - handle both simple voice names and full voice specs
-    if voice_name and '-' in voice_name:
-        # Full voice name like "en-US-Journey-F"
-        voice = texttospeech.VoiceSelectionParams(
-            language_code=language,
-            name=voice_name
-        )
-    else:
-        # Simple voice name - let Google pick the best match
-        voice = texttospeech.VoiceSelectionParams(
-            language_code=language,
-            ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
-        )
-    
-    # Select the type of audio file you want returned
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3,
-        speaking_rate=1.0,  # Normal speed
-        pitch=0.0,  # Normal pitch
-        volume_gain_db=0.0  # Normal volume
-    )
-    
-    # Perform the text-to-speech request
-    response = client.synthesize_speech(
-        input=synthesis_input, voice=voice, audio_config=audio_config
-    )
-    
-    return response.audio_content
-
-
-def speak_with_gcloud(text: str) -> bool:
-    """Speak text using Google Cloud Text-to-Speech API."""
-    try:
-        from google.cloud import texttospeech  # noqa: F401
-        return synthesize_and_play(_synthesize_gcloud, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("Google Cloud Text-to-Speech", "pip install google-cloud-texttospeech")
-    except Exception as e:
-        return _handle_provider_error("Google Cloud", e)
-
-
-def _synthesize_elevenlabs(text: str) -> Optional[bytes]:
-    """Synthesize speech using ElevenLabs TTS API."""
-    # Get configuration from shared state
-    config = get_tts_config()
-    voice_id = config.get('voice') or elevenlabs_voice_id
-    
-    # Get API key
-    api_key = os.environ.get('ELEVENLABS_API_KEY')
-    
-    # ElevenLabs API endpoint
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": api_key
-    }
-    
-    data = {
-        "text": text,
-        "model_id": elevenlabs_model_id,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.5
-        }
-    }
-    
-    # Make the request
-    response = requests.post(url, json=data, headers=headers)
-    
-    if response.status_code != 200:
-        log_message("ERROR", f"ElevenLabs API returned status {response.status_code}: {response.text}")
-        print(f"ElevenLabs API Error: {response.text}")
-        return None
-    
-    return response.content
-
-
-def speak_with_elevenlabs(text: str) -> bool:
-    """Speak text using ElevenLabs TTS API."""
-    try:
-        # Check for API key
-        api_key = os.environ.get('ELEVENLABS_API_KEY')
-        if not api_key:
-            log_message("ERROR", "ELEVENLABS_API_KEY environment variable not set")
-            return False
-        
-        return synthesize_and_play(_synthesize_elevenlabs, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("requests", "pip install requests")
-    except Exception as e:
-        return _handle_provider_error("ElevenLabs", e)
-
-
-def _synthesize_deepgram(text: str) -> Optional[bytes]:
-    """Synthesize speech using Deepgram TTS API."""
-    from deepgram import DeepgramClient, SpeakOptions
-    
-    # Get configuration from shared state
-    config = get_tts_config()
-    model = config.get('voice') or deepgram_voice_model
-    
-    # Get API key
-    api_key = os.environ.get('DEEPGRAM_API_KEY')
-    
-    # Create Deepgram client
-    deepgram = DeepgramClient(api_key)
-    
-    # Configure options
-    options = SpeakOptions(
-        model=model,
-        encoding="mp3"
-    )
-    
-    # Initialize tmp_filename before try block to ensure it's always defined
-    tmp_filename = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
-            tmp_filename = tmp_file.name
-        
-        # Use the save method as shown in the reference
-        deepgram.speak.rest.v("1").save(tmp_filename, {"text": text}, options)
-        
-        # Read the audio file
-        with open(tmp_filename, 'rb') as f:
-            audio_data = f.read()
-        
-        return audio_data
-    except Exception as e:
-        log_message("ERROR", f"Deepgram TTS error: {e}")
-        return None
-    finally:
-        # Clean up temp file - tmp_filename is guaranteed to be defined
-        if tmp_filename and os.path.exists(tmp_filename):
-            os.unlink(tmp_filename)
-
-
-def speak_with_deepgram(text: str) -> bool:
-    """Speak text using Deepgram TTS API."""
-    try:
-        from deepgram import DeepgramClient  # noqa: F401
-        
-        # Check for API key
-        api_key = os.environ.get('DEEPGRAM_API_KEY')
-        if not api_key:
-            log_message("ERROR", "DEEPGRAM_API_KEY environment variable not set")
-            return False
-        
-        return synthesize_and_play(_synthesize_deepgram, text, use_process_control=True)
-    except ImportError:
-        return _handle_import_error("deepgram-sdk", "pip install deepgram-sdk")
-    except Exception as e:
-        return _handle_provider_error("Deepgram", e)
-
-
-def _synthesize_kittentts(text: str) -> Optional[bytes]:
-    """Synthesize speech using KittenTTS."""
-    try:
-        with suppress_ai_warnings():
-            from kittentts import KittenTTS
-        
-        # Get configuration from shared state
-        config = get_tts_config()
-        model_name = config.get('model') or kittentts_model
-        voice = config.get('voice') or kittentts_voice
-        
-        # Create KittenTTS model (should already be cached from availability check)
-        log_message("DEBUG", f"Using KittenTTS model: {model_name}")
-        m = KittenTTS(model_name)
-        
-        # Generate audio with the specified voice
-        audio = m.generate(text, voice=voice)
-        
-        # Save to temporary WAV file first (soundfile doesn't support MP3 writing directly)
-        # KittenTTS returns audio at 24000 Hz sample rate
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
-            sf.write(tmp_wav.name, audio, 24000)
-            tmp_wav_path = tmp_wav.name
-        
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        import openai
         try:
-            # Convert WAV to MP3 using ffmpeg if available, otherwise use WAV directly
-            if shutil.which('ffmpeg'):
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_mp3:
-                    tmp_mp3_path = tmp_mp3.name
-                
-                # Convert to MP3
-                subprocess.run(
-                    ['ffmpeg', '-i', tmp_wav_path, '-acodec', 'mp3', '-ab', '128k', tmp_mp3_path, '-y'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True
-                )
-                
-                # Read MP3 data
-                with open(tmp_mp3_path, 'rb') as f:
-                    audio_data = f.read()
-                
-                # Clean up MP3 file
-                os.unlink(tmp_mp3_path)
-            else:
-                # If ffmpeg not available, use WAV directly
-                with open(tmp_wav_path, 'rb') as f:
-                    audio_data = f.read()
-            
-            return audio_data
-        finally:
-            # Always clean up WAV file
-            if os.path.exists(tmp_wav_path):
-                os.unlink(tmp_wav_path)
-    except Exception as e:
-        log_message("ERROR", f"KittenTTS synthesis error: {e}")
+            voice = self.get_config_value('voice', openai_voice)
+            response = openai.audio.speech.create(model="tts-1", voice=voice, input=text)
+            audio_data = io.BytesIO()
+            for chunk in response.iter_bytes():
+                audio_data.write(chunk)
+            return audio_data.getvalue(), ".mp3"
+        except Exception as e:
+            log_message("ERROR", f"OpenAI TTS synthesis error: {e}")
+            return None
+
+
+class AWSPollyProvider(TTSProvider):
+    """AWS Polly TTS provider implementation."""
+    
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        import boto3
+
+        try:
+            voice = self.get_config_value('voice', polly_voice)
+            region = self.get_config_value('region', polly_region)
+
+            polly_client = boto3.client('polly', region_name=region)
+
+            response = polly_client.synthesize_speech(
+                Text=text,
+                OutputFormat='mp3',
+                VoiceId=voice,
+                Engine='neural'
+            )
+
+            return response['AudioStream'].read(), ".mp3"
+        except Exception as e:
+            log_message("ERROR", f"AWS Polly TTS synthesis error: {e}")
+            return None
+
+class AzureProvider(TTSProvider):
+    """Azure TTS provider implementation."""
+    
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        import azure.cognitiveservices.speech as speechsdk
+        
+        voice = self.get_config_value('voice', azure_voice)
+        region = self.get_config_value('region', azure_region)
+        
+        speech_key = os.environ.get('AZURE_SPEECH_KEY')
+        if not speech_key:
+            raise ValueError("AZURE_SPEECH_KEY environment variable not set")
+        
+        speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=region)
+        speech_config.speech_synthesis_voice_name = voice
+        
+        # Set output format to mp3
+        speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+        )
+        
+        # Create synthesizer without audio output (we'll get the audio data directly)
+        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
+        
+        result = synthesizer.speak_text_async(text).get()
+        
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            return result.audio_data, ".mp3"
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation_details = result.cancellation_details
+            error_msg = f"Azure TTS synthesis canceled: {cancellation_details.reason}"
+            if cancellation_details.reason == speechsdk.CancellationReason.Error:
+                error_msg += f" - {cancellation_details.error_details}"
+            raise Exception(error_msg)
+        
         return None
 
 
-def speak_with_kittentts(text: str) -> bool:
-    """Speak text using KittenTTS."""
-    try:
-        return synthesize_and_play(_synthesize_kittentts, text, use_process_control=True)
-    except Exception as e:
-        return _handle_provider_error("KittenTTS", e)
+class GoogleCloudProvider(TTSProvider):
+    """Google Cloud TTS provider implementation."""
+    
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        from google.cloud import texttospeech
+
+        try:
+            voice = self.get_config_value('voice', gcloud_voice)
+            language_code = self.get_config_value('language_code', gcloud_language_code)
+
+            client = texttospeech.TextToSpeechClient()
+
+            synthesis_input = texttospeech.SynthesisInput(text=text)
+
+            voice_params = texttospeech.VoiceSelectionParams(
+                language_code=language_code,
+                name=voice
+            )
+
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3
+            )
+
+            response = client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice_params,
+                audio_config=audio_config
+            )
+
+            return response.audio_content, ".mp3"
+        except Exception as e:
+            log_message("ERROR", f"Google TTS synthesis error: {e}")
+            return None
 
 
-def _synthesize_kokoro(text: str) -> Optional[bytes]:
-    """Synthesize speech using KokoroTTS."""
-    try:
-        # Check if spaCy model is available (kokoro's dependency chain includes spacy-curated-transformers)
-        from .models import check_spacy_model_consent
-        if not check_spacy_model_consent('kokoro'):
-            raise RuntimeError("spaCy language model required for kokoro but download was declined")
+class ElevenLabsProvider(TTSProvider):
+    """ElevenLabs TTS provider implementation."""
+    
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        voice_id = self.get_config_value('voice_id', elevenlabs_voice_id)
+        api_key = os.environ.get('ELEVENLABS_API_KEY')
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        headers = {
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': api_key
+        }
         
-        with suppress_ai_warnings():
-            from kokoro import KPipeline
+        data = {
+            'text': text,
+            'model_id': 'eleven_monolingual_v1',
+            'voice_settings': {
+                'stability': 0.5,
+                'similarity_boost': 0.5
+            }
+        }
         
-        # Get configuration from shared state
-        config = get_tts_config()
-        language = config.get('language') or kokoro_language
-        voice = config.get('voice') or kokoro_voice
-        speed = float(config.get('speed') or kokoro_speed)
+        response = requests.post(url, json=data, headers=headers)
         
-        # Create Kokoro pipeline (should already be cached from availability check)
-        repo_id = 'hexgrad/Kokoro-82M'
-        log_message("DEBUG", "Using KokoroTTS model")
+        if response.status_code == 200:
+            return response.content, ".mp3"
         
-        # Suppress torch warnings during pipeline creation and usage
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            pipeline = KPipeline(lang_code=language, repo_id=repo_id)
-            
+        return None
+
+
+class DeepgramProvider(TTSProvider):
+    """Deepgram TTS provider implementation."""
+
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        model = self.get_config_value('model', deepgram_voice_model)  # <-- use 'model'
+        api_key = os.environ.get('DEEPGRAM_API_KEY')
+        if not api_key or not model:
+            log_message("ERROR", "Deepgram missing API key or model")
+            return None
+
+        url = f"https://api.deepgram.com/v1/speak?model={model}"
+        headers = {
+            'Authorization': f'Token {api_key}',
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+        }
+        response = requests.post(url, json={'text': text}, headers=headers)
+        if response.ok:
+            return response.content, ".mp3"
+        log_message("ERROR", f"Deepgram error {response.status_code}: {response.text}")
+        return None
+
+class KittenTTSProvider(TTSProvider):
+    """KittenTTS provider implementation."""
+
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        try:
+            m = get_cached_local_model('kittentts', timeout=10.0)
+            if m is None:
+                raise RuntimeError("KittenTTS model unavailable")
+            audio = m.generate(text, voice=self.get_config_value('voice', kittentts_voice))
+            buf = io.BytesIO()
+            sf.write(buf, audio, 24000, format='WAV')
+            return buf.getvalue(), ".wav"
+        except Exception as e:
+            log_message("ERROR", f"KittenTTS synthesis error: {e}")
+            return None
+
+class KokoroTTSProvider(TTSProvider):
+    """KokoroTTS provider implementation."""
+
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        try:
+            # Get configuration from shared state
+            config = get_tts_config()
+            voice = config.get('voice') or kokoro_voice
+            speed = float(config.get('speed') or kokoro_speed)
+            pipeline = get_cached_local_model('kokoro', timeout=10.0)
+
+            if pipeline is None:
+                log_message("ERROR", "Failed to get cached Kokoro model")
+                return None
+
+            log_message("DEBUG", "Using cached KokoroTTS model")
+
             # Generate audio with the specified voice and speed
             # Kokoro returns a generator, we need to process all chunks
             audio_chunks = []
             for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
                 audio_chunks.append(audio)
-        
-        # Concatenate all audio chunks
-        import numpy as np
-        if audio_chunks:
-            full_audio = np.concatenate(audio_chunks)
-        else:
-            log_message("ERROR", "KokoroTTS generated no audio")
-            return None
-        
-        # Save to temporary WAV file first (Kokoro outputs at 24000 Hz)
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
-            sf.write(tmp_wav.name, full_audio, 24000)
-            tmp_wav_path = tmp_wav.name
-        
-        try:
-            # Convert WAV to MP3 using ffmpeg if available, otherwise use WAV directly
-            if shutil.which('ffmpeg'):
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_mp3:
-                    tmp_mp3_path = tmp_mp3.name
-                
-                # Convert to MP3
-                subprocess.run(
-                    ['ffmpeg', '-i', tmp_wav_path, '-acodec', 'mp3', '-ab', '128k', tmp_mp3_path, '-y'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True
-                )
-                
-                # Read MP3 data
-                with open(tmp_mp3_path, 'rb') as f:
-                    audio_data = f.read()
-                
-                # Clean up MP3 file
-                os.unlink(tmp_mp3_path)
+
+            # Concatenate all audio chunks
+            import numpy as np
+            if audio_chunks:
+                full_audio = np.concatenate(audio_chunks)
+                buf = io.BytesIO()
+                sf.write(buf, full_audio, 24000, format='WAV')
+                return buf.getvalue(), ".wav"
             else:
-                # If ffmpeg not available, use WAV directly
-                with open(tmp_wav_path, 'rb') as f:
-                    audio_data = f.read()
-            
-            return audio_data
-        finally:
-            # Always clean up WAV file
-            if os.path.exists(tmp_wav_path):
-                os.unlink(tmp_wav_path)
-    except Exception as e:
-        log_message("ERROR", f"KokoroTTS synthesis error: {e}")
-        return None
+                log_message("ERROR", "KokoroTTS generated no audio")
+
+        except Exception as e:
+            log_message("ERROR", f"KokoroTTS synthesis error: {e}")
+            return None
+
+# Provider class registry
+PROVIDER_CLASSES = {
+    'openai': OpenAIProvider,
+    'aws': AWSPollyProvider,
+    'polly': AWSPollyProvider,  # Backward compatibility
+    'azure': AzureProvider,
+    'gcloud': GoogleCloudProvider,
+    'elevenlabs': ElevenLabsProvider,
+    'deepgram': DeepgramProvider,
+    'kittentts': KittenTTSProvider,
+    'kokoro': KokoroTTSProvider,
+}
 
 
-def speak_with_kokoro(text: str) -> bool:
-    """Speak text using KokoroTTS."""
-    try:
-        return synthesize_and_play(_synthesize_kokoro, text, use_process_control=True)
-    except Exception as e:
-        return _handle_provider_error("KokoroTTS", e)
+def create_tts_provider(provider_name: str, config: Optional[Dict[str, Any]] = None) -> Optional[TTSProvider]:
+    """Factory function to create TTS provider instances."""
+    provider_class = PROVIDER_CLASSES.get(provider_name.lower())
+    if provider_class:
+        return provider_class(config)
+    return None
 
-
-# Initialize provider functions in the registry
-TTS_PROVIDERS['openai']['func'] = speak_with_openai
-TTS_PROVIDERS['aws']['func'] = speak_with_polly
-TTS_PROVIDERS['azure']['func'] = speak_with_azure
-TTS_PROVIDERS['gcloud']['func'] = speak_with_gcloud
-TTS_PROVIDERS['elevenlabs']['func'] = speak_with_elevenlabs
-TTS_PROVIDERS['deepgram']['func'] = speak_with_deepgram
-TTS_PROVIDERS['kittentts']['func'] = speak_with_kittentts
-TTS_PROVIDERS['kokoro']['func'] = speak_with_kokoro
 
 # Add 'polly' as an alias for 'aws' for backward compatibility
 TTS_PROVIDERS['polly'] = TTS_PROVIDERS['aws']
@@ -1421,10 +1409,14 @@ def speak_text(text: str, engine: str) -> bool:
     if disable_tts:
         return True
 
-    # Use provider registry for cleaner routing
-    provider_info = TTS_PROVIDERS.get(tts_provider)
-    if provider_info and provider_info.get('func'):
-        return provider_info['func'](text)
+    # Use provider classes directly
+    provider = create_tts_provider(tts_provider)
+    if provider:
+        try:
+            return provider.speak(text)
+        except Exception as e:
+            log_message("ERROR", f"TTS provider {tts_provider} failed: {e}")
+            return False
 
     return speak_with_default(text, engine)
 
@@ -1443,28 +1435,16 @@ def save_tts_audio(text: str, filename: str, provider: str = None) -> bool:
     if provider is None:
         provider = tts_provider
     
-    # Get synthesis function for the provider
-    synthesis_funcs = {
-        'kokoro': _synthesize_kokoro,
-        'kittentts': _synthesize_kittentts,
-        'openai': _synthesize_openai,
-        'elevenlabs': _synthesize_elevenlabs,
-        'aws': _synthesize_polly,  # AWS uses polly
-        'polly': _synthesize_polly,
-        'azure': _synthesize_azure,
-        'gcloud': _synthesize_gcloud,
-        'deepgram': _synthesize_deepgram
-    }
-    
-    synthesis_func = synthesis_funcs.get(provider)
-    if not synthesis_func:
+    # Use provider factory to get the provider instance
+    tts_provider_instance = create_tts_provider(provider)
+    if not tts_provider_instance:
         log_message("ERROR", f"Provider {provider} not supported for audio saving")
         return False
     
     try:
         # Generate audio bytes
         log_message("INFO", f"Generating TTS audio with {provider}: {text}")
-        audio_bytes = synthesis_func(text)
+        audio_bytes, ext = tts_provider_instance.synthesize(text)
         
         if not audio_bytes:
             log_message("ERROR", f"Failed to generate audio with {provider}")
@@ -1703,7 +1683,10 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
 
         # Check if something is currently playing and how long it's been playing
         is_currently_playing = playback_control.current_process is not None
+        is_currently_speaking = is_speaking()
         playing_long_enough = False
+        
+        log_message("DEBUG", f"Interjection check: is_currently_playing={is_currently_playing}, is_actually_speaking={is_currently_speaking}, current_speech_item={current_speech_item is not None}")
         
         if is_currently_playing and current_speech_item and current_speech_item.start_time:
             time_playing = time.time() - current_speech_item.start_time
@@ -1717,9 +1700,10 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             except queue.Empty:
                 break
 
-        # Only skip current item if something is actually playing
-        if is_currently_playing:
+        # Only skip current item if something is actually speaking (use is_speaking() for accuracy)
+        if is_currently_speaking:
             playback_control.skip_current_item()
+            log_message("DEBUG", "Skipped current item - was actually speaking")
 
             # Add an interjection only if the current item has been playing long enough
             if playing_long_enough:
@@ -1729,6 +1713,10 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                 log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
             else:
                 log_message("DEBUG", "Skipping interjection - current item hasn't played long enough")
+        elif is_currently_playing:
+            log_message("WARNING", "Process exists but not actually speaking - race condition detected!")
+        else:
+            log_message("DEBUG", "Nothing currently playing - no skip needed")
 
     with _state_lock:
         last_queued_text = speakable_text
@@ -2048,7 +2036,7 @@ def parse_arguments():
 
 def configure_tts_provider(args):
     """Configure TTS provider from command-line args."""
-    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, kittentts_model, kittentts_voice, kokoro_language, kokoro_voice, kokoro_speed
+    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, deepgram_voice_model, kittentts_model, kittentts_voice, kokoro_language, kokoro_voice, kokoro_speed
     
     # Auto-select provider if not specified
     provider = args.tts_provider
@@ -2141,15 +2129,8 @@ def configure_tts_provider(args):
         log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
     
     elif tts_provider == 'kokoro':
-        # Additional KokoroTTS validation
-        try:
-            with suppress_ai_warnings():
-                from kokoro import KPipeline  # noqa: F401
-        except ImportError:
-            print("Error: KokoroTTS dependencies not installed")
-            print("Please install with:")
-            print("  pip install kokoro>=0.9.4 soundfile")
-            return False
+        # Skip expensive kokoro import - will validate during actual model loading
+        log_message("DEBUG", "Skipping kokoro validation in configure_tts_provider - will validate during model loading")
         
         kokoro_language = args.language if hasattr(args, 'language') else 'a'
         if args.voice:
@@ -2159,8 +2140,11 @@ def configure_tts_provider(args):
     return True
 
 
-def select_best_tts_provider() -> str:
-    """Select best available TTS provider by preference order."""
+def select_best_tts_provider(excluded_providers=None) -> str:
+    """Select best available TTS provider by preference order with thorough validation."""
+    log_message("INFO", "select_best_tts_provider called")
+    excluded_providers = excluded_providers or set()
+    
     # Check shared state first
     state_provider = None
     if SHARED_STATE_AVAILABLE:
@@ -2169,34 +2153,43 @@ def select_best_tts_provider() -> str:
             state_provider = state.tts_provider
         except Exception:
             pass
-    
+
     preferred = state_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+
     accessible = check_tts_provider_accessibility(requested_provider=preferred)
+
+    # Check if preferred provider is accessible, properly configured, and not excluded
+    if preferred and preferred in accessible and accessible[preferred]['available'] and preferred not in excluded_providers:
+        if validate_provider_config(preferred):
+            log_message("INFO", f"Using preferred TTS provider: {preferred}")
+            return preferred
+        else:
+            log_message("WARNING", f"Preferred TTS provider {preferred} failed validation, searching for alternatives")
     
-    # Check if preferred provider is accessible
-    if preferred and preferred in accessible and accessible[preferred]['available']:
-        log_message("INFO", f"Using preferred TTS provider: {preferred}")
-        return preferred
-    
-    # Get all accessible providers except system
+    # Get all accessible providers except system and excluded providers
     available_providers = [
         provider for provider, info in sorted(accessible.items())
-        if info['available'] and provider != 'system'
+        if info['available'] and provider != 'system' and provider not in excluded_providers
     ]
     
-    # Use first available non-system provider
-    if available_providers:
-        provider = available_providers[0]
-        log_message("INFO", f"Selected TTS provider: {provider} (first available)")
-        return provider
+    # Validate each provider thoroughly before selecting
+    for provider in available_providers:
+        if validate_provider_config(provider):
+            log_message("INFO", f"Selected TTS provider: {provider} (first validated)")
+            return provider
+        else:
+            log_message("WARNING", f"TTS provider {provider} failed validation, trying next")
     
-    # Fall back to system if available
-    if accessible.get('system', {}).get('available'):
-        log_message("INFO", "Falling back to system TTS provider")
-        return 'system'
+    # Fall back to system if available and not excluded
+    if 'system' not in excluded_providers and accessible.get('system', {}).get('available'):
+        if validate_provider_config('system'):
+            log_message("INFO", "Falling back to system TTS provider")
+            return 'system'
+        else:
+            log_message("WARNING", "System TTS provider failed validation")
     
-    # No providers available
-    log_message("WARNING", "No TTS providers available")
+    # Last resort: return system anyway (it should always work)
+    log_message("WARNING", "No fully validated TTS providers available, defaulting to system")
     return 'system'
 
 
@@ -2311,7 +2304,7 @@ def configure_tts_from_dict(config: dict) -> bool:
         except ImportError:
             print("Error: KittenTTS dependencies not installed")
             print("Please install with:")
-            print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
+            print("  pip install kittentts")
             print("  pip install soundfile")
             return False
         
@@ -2320,6 +2313,24 @@ def configure_tts_from_dict(config: dict) -> bool:
         if config.get('model'):
             kittentts_model = config['model']
         log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
+        
+        # Background preloading started earlier in initialization
+        
+    elif provider == 'kokoro':
+        # Skip expensive kokoro import - will validate during actual model loading
+        log_message("DEBUG", "Skipping kokoro validation in configure_tts_from_dict - will validate during model loading")
+        
+        # Update global config variables
+        global kokoro_voice, kokoro_language, kokoro_speed
+        if config.get('voice'):
+            kokoro_voice = config['voice']
+        if config.get('language'):
+            kokoro_language = config['language']
+        if config.get('speed'):
+            kokoro_speed = str(config['speed'])
+        log_message("INFO", f"Using KokoroTTS with language: {kokoro_language} and voice: {kokoro_voice}")
+        
+        # Background preloading started earlier in initialization
     
     # Update shared state with the actually working provider
     from .state import get_shared_state
@@ -2331,8 +2342,7 @@ def configure_tts_from_dict(config: dict) -> bool:
 
 # Main entry point for testing
 if __name__ == "__main__":
-    import sys
-    
+
     # Parse arguments
     args = parse_arguments()
     

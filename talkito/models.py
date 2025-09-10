@@ -20,9 +20,10 @@
 
 import os
 import sys
-from typing import Callable
-from pathlib import Path
 
+from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub.utils import LocalEntryNotFoundError
+from typing import Callable, Optional
 
 def ask_user_consent(provider: str, model_name: str) -> bool:
     """Ask user for consent to download a model."""
@@ -93,6 +94,18 @@ def with_download_progress(provider: str, model_name: str, download_func: Callab
     
     return wrapper
 
+def _hf_cached(repo_id: str, filename: Optional[str] = None,
+               revision: Optional[str] = None,
+               cache_dir: Optional[str] = None) -> bool:
+    """Return True if a repo (or specific file) is already present in the local HF cache."""
+    try:
+        if filename:
+            hf_hub_download(repo_id=repo_id, filename=filename, revision=revision, local_files_only=True, cache_dir=cache_dir)
+        else:
+            snapshot_download(repo_id=repo_id, revision=revision, local_files_only=True, cache_dir=cache_dir)
+        return True
+    except LocalEntryNotFoundError:
+        return False
 
 def check_model_cached(provider: str, model_name: str) -> bool:
     """Check if a model is already cached locally."""
@@ -106,13 +119,12 @@ def check_model_cached(provider: str, model_name: str) -> bool:
             model_path = os.path.join(MODELS_DIR, f'ggml-{model_name}.bin')
             return os.path.exists(model_path)
         elif provider == 'kittentts':
-            from transformers import cached_file
-            cached_file(model_name, "config.json", local_files_only=True)
-            return True
+            repo = model_name if '/' in model_name else f"KittenML/{model_name}"
+            return _hf_cached(repo_id=repo, filename="config.json")
         elif provider == 'kokoro':
-            # Kokoro uses HuggingFace cache for the hexgrad/Kokoro-82M model
-            cache_dir = Path.home() / '.cache' / 'huggingface' / 'hub' / 'models--hexgrad--Kokoro-82M'
-            return cache_dir.exists() and any(cache_dir.iterdir())
+            repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
+            return _hf_cached(repo_id=repo)
+        
     except Exception:
         pass
     return False

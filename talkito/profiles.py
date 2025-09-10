@@ -272,13 +272,14 @@ CLAUDE_PROFILE = Profile(
         # Level 2: Filter unless -vv (code)
         (2, r'^  \+'),
         (2, r'^  \['),
-        (2, r'import\s+\w+…\)'),              # Import statements in tool output
-        (2, r'     '),                        # Indent usually means code
-        (2, r'  - '),                         # Indent with dash usually means code
-        (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#]'),   # Line numbers + code/comments
-        (2, r'/usr/bin/'),                    # Shebang path prefix
-        (2, r'^\s{2,}import\s+'),             # Indented import statements
-        (2, r'│'),                            # Lines with pipes anywhere
+        (2, r'(import|include|require|use)\s+\w+…\)'),  # Import statements (Python/JS/Rust/PHP)
+        (2, r'     '),                                  # Indent usually means code
+        (2, r'  - '),                                   # Indent with dash usually means code
+        (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#/]'),            # Line numbers + code/comments (added / for C++)
+        (2, r'(/usr/bin/|#!/)'),                        # Shebang path prefix or shebang start
+        (2, r'^\s{2,}(import|include|require|use|from|#include)\s+'), # Indented imports (multi-lang)
+        (2, r'│'),                                      # Lines with pipes anywhere
+        (2, r'^(#|//|/\*|\*)'),                         # Comments: #, //, /*, or continuation *
 
         # Level 3: Filter unless -vvv (tool calling details, implementation details)
         (3, r'esc to interrupt'),             # UI hints
