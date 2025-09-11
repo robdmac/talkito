@@ -20,7 +20,7 @@
 
 import re
 import argparse
-from typing import Dict, List, Tuple, Optional, Pattern, Union
+from typing import Dict, List, Tuple, Optional, Pattern, Union, Sequence
 from dataclasses import dataclass, field
 
 
@@ -29,7 +29,9 @@ class Profile:
     """Represents a program-specific profile with compiled patterns"""
     
     # Basic settings
+    supported: bool
     name: str
+    writes_partial_output: bool = False
     response_prefix: str = '⏺'
     continuation_prefix: Optional[str] = None
     question_prefix: Optional[str] = None
@@ -39,9 +41,10 @@ class Profile:
     
     # Cleaned text patterns
     # skip_patterns can be either strings (verbosity 0) or (verbosity_level, pattern) tuples
-    skip_patterns: List[Union[str, Tuple[int, str]]] = field(default_factory=list)
+    skip_patterns: Sequence[Union[str, Tuple[int, str]]] = field(default_factory=list)
     speak_patterns: List[str] = field(default_factory=list)
     prompt_patterns: List[str] = field(default_factory=list)
+    replacements: List[tuple[str, str]] = field(default_factory=list)
     # exception_patterns: lines containing these patterns are never skipped, regardless of verbosity
     # Format: List of (max_verbosity, pattern) - exception applies up to this verbosity level
     exception_patterns: List[Tuple[int, str]] = field(default_factory=list)
@@ -51,7 +54,7 @@ class Profile:
     strip_symbols: List[str] = field(default_factory=list)
 
     # Input handling
-    input_start: Optional[str] = None
+    input_start: List[str] = field(default_factory=list)
     input_mic_replace: Optional[str] = None
 
     # Compiled patterns (cached)
@@ -104,9 +107,7 @@ class Profile:
         interaction_menu_patterns = [
             r'❯\s*\d+\.',           # ❯ 1. Yes
             r'\s*\d+\.\s*Yes',      # 1. Yes 
-            r'\s*\d+\.\s*No',       # 1. No
-            r'\(shift\+tab\)',      # (shift+tab)
-            r'\(esc\)',             # (esc)
+            r'\s*\d+\.\s*No',       # 2. No
             r'don\'t ask again',    # don't ask again options
             r'tell Claude what',    # tell Claude what to do differently
         ]
@@ -122,6 +123,12 @@ class Profile:
             if pattern.search(line):
                 return f"Raw skip pattern: {self.raw_skip_patterns[i]}"
         return None
+
+    def apply_replacements(self, line: str) -> str:
+        """Apply replacements based on raw patterns"""
+        for replacement in self.replacements:
+            line = line.replace(replacement[0], replacement[1])
+        return line
     
     def should_skip(self, line: str, verbosity: int = 0) -> bool:
         """Check if line should be skipped based on cleaned patterns and verbosity level"""
@@ -140,6 +147,10 @@ class Profile:
         # Check speak patterns (should NOT skip)
         if any(p.search(line) for p in self._compiled_speak):
             return False
+        
+        # Check prompt patterns (should skip UI chrome like prompts)
+        if any(p.search(line) for p in self._compiled_prompt):
+            return True
         
         # Check skip patterns with verbosity
         for min_verbosity, pattern in self._compiled_skip:
@@ -177,6 +188,11 @@ class Profile:
             if p.search(line):
                 return None  # Speak pattern matched - line won't be skipped
         
+        # Check prompt patterns (should skip)
+        for i, p in enumerate(self._compiled_prompt):
+            if p.search(line):
+                return f"Prompt pattern: {self.prompt_patterns[i]}"
+        
         # Check skip patterns with verbosity
         for i, (min_verbosity, pattern) in enumerate(self._compiled_skip):
             if pattern.search(line):
@@ -201,6 +217,8 @@ class Profile:
 
     def is_continuation_line(self, line: str) -> bool:
         """Check if line is a continuation of the previous line"""
+        if line.strip().endswith(":"):
+            return False
         if self._compiled_continuation:
             return self._compiled_continuation.match(line) is not None
         return False
@@ -217,7 +235,7 @@ class Profile:
 
     def is_input_start(self, line: str) -> bool:
         """Check if line is the start of an input block"""
-        if self.input_start and self.input_start in line:
+        if self.input_start and any(s in line for s in self.input_start):
             return True
         return any(p.search(line) for p in self._compiled_prompt)
 
@@ -247,20 +265,64 @@ COMMON_SKIP_PATTERNS = [
     (2, r'^.{0,20}\d{2}:\d{2}:\d{2}'),                         # HH:MM:SS format in first 20 chars
     (2, r'^.{0,20}\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}'),    # YYYY/MM/DD HH:MM:SS format
     (2, r'^.{0,20}\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}'),    # MM/DD/YYYY HH:MM:SS format
+
+    # Level 2: Filter unless -vv (code)
+    (2, r'^  \+'),
+    (2, r'^  \['),
+    (2, r'(import|include|require|use)\s+\w+…\)'),  # Import statements (Python/JS/Rust/PHP)
+    (2, r'     '),                                  # Indent usually means code
+    (2, r'  - '),                                   # Indent with dash usually means code
+    (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#/]'),            # Line numbers + code/comments (added / for C++)
+    (2, r'(/usr/bin/|#!/)'),                        # Shebang path prefix or shebang start
+    (2, r'^\s{2,}(import|include|require|use|from|#include)\s+'), # Indented imports (multi-lang)
+    (2, r'│'),                                      # Lines with pipes anywhere
+    (2, r'^(#|//|/\*|\*)'),                         # Comments: #, //, /*, or continuation *
+    (2, r'^\s*\['),
+
+    (3, r'^\s*\/'),
+    (3, r'^\/help'),
+    (3, r'sc to interrupt|sc interrupt|enter send'),  # UI hints
+    (3, r'ctrl\s*\+r\s*to\s*expand'),  # UI hints
+    (3, r'^\s*⏺\s+Task\('),  # Claude Code task indicator
+    (3, r'^Task\([^)]+\)'),  # Task() without prefix
+    (3, r'Read \d+ lines'),  # Skip "Read X lines" messages
+    (3, r'Edit file'),
+    (3, r'\)…'),
+    (3, r'cwd:'),
+    (3, r'⎿'),  # subheadings underneath an edit block like "Wrote 122 lines to x.py"
+    (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('),
+    (3, r'^[^A-Za-z0-9]*[A-Za-z][a-z]+(?:-[a-z]+)*(?:\.\.\.|…|\.)'),
+
+    (4, r'^\^C '),
+    (4, r'^░█'),
+    (4, r'Press Ctrl-C'),
+    (4, r'^\s*ctrl\+c '),
+    (4, r'xai:function_call'),
+    (4, r'Error File content|\[Pasted text'),
+    (4, r'^[|│]\s*>\s*'),
+    (4, r'(╭|╮|╯|╰)'),
+    (4, r'\? for shortcuts'),
+    (4, r'\(node:'),
+    (4, r'^\['),
+    (4, r'⏵⏵ auto-accept edits'),
+    (4, r'===|▀▀▀▀'),
 ]
+
 
 # Profile definitions
 CLAUDE_PROFILE = Profile(
+    supported=True,
     name='claude',
     response_prefix='⏺',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
-    question_prefix=r'│ Do',
+    question_prefix=r'^\s+Do you',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
         r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
     ],
     exception_patterns=[
-        (0, r'│\s*✻ Welcome'),                # ✻ Welcome to Claude Code
+        (0, r'Welcome to Claude Code'),       # ✻ Welcome to Claude Code
+        (0, r'^⏺')
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
@@ -268,47 +330,12 @@ CLAUDE_PROFILE = Profile(
         (1, r'usage limit'),                  # Usage limit messages
         (1, r'to use best available model'),  # Model suggestions
         (1, r'Update Todos'),                 # Update Todos
-        
-        # Level 2: Filter unless -vv (code)
-        (2, r'^  \+'),
-        (2, r'^  \['),
-        (2, r'(import|include|require|use)\s+\w+…\)'),  # Import statements (Python/JS/Rust/PHP)
-        (2, r'     '),                                  # Indent usually means code
-        (2, r'  - '),                                   # Indent with dash usually means code
-        (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#/]'),            # Line numbers + code/comments (added / for C++)
-        (2, r'(/usr/bin/|#!/)'),                        # Shebang path prefix or shebang start
-        (2, r'^\s{2,}(import|include|require|use|from|#include)\s+'), # Indented imports (multi-lang)
-        (2, r'│'),                                      # Lines with pipes anywhere
-        (2, r'^(#|//|/\*|\*)'),                         # Comments: #, //, /*, or continuation *
 
         # Level 3: Filter unless -vvv (tool calling details, implementation details)
-        (3, r'esc to interrupt'),             # UI hints
-        (3, r'ctrl\s*\+r\s*to\s*expand'),     # UI hints
-        (3, r'^\s*⏺\s+Task\('),               # Claude Code task indicator
-        (3, r'^Task\([^)]+\)'),               # Task() without prefix
-        (3, r'Read \d+ lines'),               # Skip "Read X lines" messages
-        (3, r'Edit file'),
-        (3, r'\)…'),
-        (3, r'\/help'),
-        (3, r'^\/'),
-        (3, r'cwd:'),
-        (3, r'⎿'),                           # subheadings underneath an edit block like "Wrote 122 lines to x.py"
-        (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('), # Tool invocations
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'talkito:'),
-        (3, r'[A-Z][a-z]+(?:-[a-z]+)*[.…]'),     # Single words like "Sparkling.", "Running.", "Higgledy-piggleding"
 
-        # Level 4: Always filter (these would need -vvvv which we don't allow)
-        (4, r'Error File content'),           # Skip file size error messages
-        (4, r'^\s*>\s*'),                     # Claude previous input
-        (4, r'^[|│]\s*>\s*'),                 # Claude previous input
-        (4, r'(╭|╮|╯|╰)'),                    # Box drawing characters (all corners)
-        (4, r'\? for shortcuts'),
-        (4, r'\(node:'),
-        (4, r'^\['),
-        (4, r'Press Ctrl-C'),
-        (4, r'⏵⏵ auto-accept edits'),         # Skip auto-accept edits status line
-        (4, r'==='),                          # auto compact summary
+        (4, r'^\s*>\s*'),
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
@@ -317,21 +344,97 @@ CLAUDE_PROFILE = Profile(
         r'^>\s*.+',          # Line starting with >
         r'^\s*│\s*>\s*',     # Line starting with optional spaces, box, prompt
     ],
-    input_start='│[39m[22m > ',
-    # input_start='│ > ',
-    # or binary would be b'\xe2\x94\x80\xe2\x95\xae\x1b[39m\x1b[22m\r\n\x1b[2m\x1b[38;5;244m\xe2\x94\x82\x1b[39m\x1b[22m\xc2\xa0>'
-    input_mic_replace='│[39m[22m🎤 ',
+    input_start=['>'],
+    input_mic_replace='🎤',
 )
 
 
+CODEX_PROFILE = Profile(
+    supported=True,
+    name='codex',
+    response_prefix='⏺',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
+    question_prefix=r'│ Do',
+    raw_skip_patterns=[
+        r'\[38;5;153m│.*\[38;5;246m\d+',  # Box drawing + line numbers
+        r'\[38;5;246m\d+\s*\[39m',  # Direct line numbers
+    ],
+    exception_patterns=[
+        (0, r'>_ OpenAI Codex'),
+    ],
+    skip_patterns=COMMON_SKIP_PATTERNS + [
+        (2, r'^    '),
+        (3, r'talkito:'),
+        (3, r'^•\s+'),
+        (3, r'^\s*[└□✔]'),
+        (3, r'• Ran'),
+        (4, r'^✨⬆️'),
+        (4, r'^[A-Za-z][a-z]'),
+    ],
+    skip_progress=[],
+    strip_symbols=[],
+    prompt_patterns=[
+        r'^▌',
+    ],
+    input_start=[';3H'],
+    input_mic_replace=';3H🎤',
+)
+
+
+OPENCODE_PROFILE = Profile(
+    supported=False,
+    name='opencode',
+    writes_partial_output=True,
+    response_prefix='',
+    continuation_prefix=r'^[A-Z][a-z]',
+    question_prefix=r'│ Do',
+    raw_skip_patterns=[
+        r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
+        r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
+    ],
+    replacements=[('█▀▀█ █▀▀█ █▀▀ █▀▀▄ █▀▀ █▀▀█ █▀▀▄ █▀▀', 'OpenCode')],
+    exception_patterns=[
+        (0, r'│\s*✻ Welcome'),                # Welcome messages
+    ],
+    skip_patterns=COMMON_SKIP_PATTERNS + [
+        # Level 1: Filter unless -v (tips, hints, usage info)
+        (1, r'Tip:'),
+        (1, r'usage limit'),
+        (1, r'to use best available model'),
+        (1, r'Update Todos'),
+
+        (2, r'^    '),
+
+        # Level 4: Always filter
+        (4, r'^\s*>\s*'),
+        (4, r'^v[0-9]'),
+        (4, r'^ opencode v'),
+        (4, r'^ Build '),
+        (4, r'BUILD AGENT'),
+    ],
+    skip_progress=['Forming', 'Exploring'],
+    strip_symbols=['⏺'],
+    prompt_patterns=[
+        r'^\s*┃',
+        r'^\s*│',
+        r'^>\s*.+',
+        r'^\s*│\s*>\s*',
+    ],
+    input_start=['│ > ', '┃ >'],
+    input_mic_replace='│ 🎤 ',
+)
+
 AIDER_PROFILE = Profile(
+    supported=False,
     name='aider',
     skip_patterns=COMMON_SKIP_PATTERNS + [
-        (1, r'^Main model:'),
-        (1, r'^Editor model:'),
-        (1, r'^Weak model:'),
-        (1, r'^Git repo:'),
-        (1, r'^Repo-map:'),
+        (3, r'^Main model'),
+        (3, r'^Editor model'),
+        (3, r'^Weak model'),
+        (3, r'^Git repo'),
+        (3, r'^Repo-map'),
+        (3, r'^Tokens:'),
+        (3, r'^session.'),
     ],
     prompt_patterns=[
         r'^\s*>\s*$',  # Aider uses simple > prompt
@@ -340,6 +443,7 @@ AIDER_PROFILE = Profile(
 
 
 PIPET_PROFILE = Profile(
+    supported=True,
     name='pipet',
     skip_patterns=COMMON_SKIP_PATTERNS + [
         (1, r'^Analyzing package'),
@@ -351,6 +455,7 @@ PIPET_PROFILE = Profile(
 
 
 PYTHON_PROFILE = Profile(
+    supported=True,
     name='python',
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
@@ -361,6 +466,7 @@ PYTHON_PROFILE = Profile(
 
 
 MYSQL_PROFILE = Profile(
+    supported=True,
     name='mysql',
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
@@ -371,6 +477,7 @@ MYSQL_PROFILE = Profile(
 
 
 PSQL_PROFILE = Profile(
+    supported=True,
     name='psql',
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
@@ -382,6 +489,7 @@ PSQL_PROFILE = Profile(
 
 # Default empty profile for when no specific profile is set
 DEFAULT_PROFILE = Profile(
+    supported=True,
     name='default',
     response_prefix='',
     raw_skip_patterns=[],
@@ -390,18 +498,20 @@ DEFAULT_PROFILE = Profile(
     prompt_patterns=[],
     skip_progress=[],
     strip_symbols=[],
-    input_start='',
+    input_start=[],
     input_mic_replace='',
 )
 
 # Profile registry
 PROFILES: Dict[str, Profile] = {
     'claude': CLAUDE_PROFILE,
+    'codex': CODEX_PROFILE,
     'aider': AIDER_PROFILE,
     'pipet': PIPET_PROFILE,
     'python': PYTHON_PROFILE,
     'mysql': MYSQL_PROFILE,
     'psql': PSQL_PROFILE,
+    'opencode': OPENCODE_PROFILE,
     'default': DEFAULT_PROFILE,
 }
 

@@ -35,7 +35,7 @@ import threading
 import time
 import warnings
 from collections import deque
-from typing import Optional, List, Tuple, Deque, Dict, Any
+from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
@@ -116,6 +116,20 @@ except ImportError:
     # python-dotenv not installed, continue without it
     pass
 
+@dataclass
+class SpeechItem:
+    """Item in speech queue with text, timestamp, and metadata."""
+    text: str
+    original_text: str
+    line_number: Optional[int] = None
+    timestamp: Optional[datetime] = None
+    start_time: Optional[float] = None  # Time when speech actually starts playing
+    source: str = "output"  # "output", "error", etc.
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
+
 # Configuration constants
 MIN_SPEAK_LENGTH = 1  # Minimum characters before speaking
 CACHE_SIZE = 1000  # Cache size for similarity checking
@@ -123,6 +137,45 @@ CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
 SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to add when auto-skipping
+
+# Compiled regex patterns for performance
+RE_FILENAME_PATH = re.compile(r'(?:/?(?:[\w.-]+/)+)([\w.-]+)')
+RE_FILE_EXTENSION = re.compile(r'(\w+)\.(\w+)')
+RE_LIST_MARKERS = re.compile(r'^[-+]\s+', re.MULTILINE)
+RE_MULTIPLE_ASTERISKS = re.compile(r'\*\*+')
+RE_MULTIPLE_HASHES = re.compile(r'##+')
+RE_MULTIPLE_QUESTIONS = re.compile(r'\?\?+')
+RE_SINGLE_HASH = re.compile(r'#')
+RE_DASH_WORD = re.compile(r'--(\w)')
+RE_DATE_FORMAT = re.compile(r'(\d{4})-(\d{1,2})-(\d{1,2})')
+RE_NEGATIVE_NUMBER = re.compile(r'(?<![a-zA-Z0-9])-(\d+)')
+RE_NUMBER_MINUS_NUMBER = re.compile(r'(\d+)\s+-\s+(\d+)')
+RE_WORD_DASH = re.compile(r'(\w+)\s+-\s+')
+RE_NUMBER_RANGE = re.compile(r'(\d+)-(\d+)')
+RE_PLUS_SIGN = re.compile(r'\+')
+RE_DIVISION = re.compile(r'(\d+)\s+/\s+(\d+)')
+RE_HTTP_URL = re.compile(r'(https?:)//([^\s]+)')
+RE_SLASH_PATH = re.compile(r'(?<![.\w])/([a-zA-Z][\w-]+)')
+RE_SLASH_OR = re.compile(r'(?<![.\w])(\w+)/(\w+)(?![.\w])')
+RE_QUOTE_PREFIX = re.compile(r'^> ')
+RE_CWD = re.compile(r'cwd')
+RE_USAGE = re.compile(r'Usage:')
+RE_TODOS = re.compile(r'Todos')
+RE_ANGLE_BRACKETS = re.compile(r'<(\w+)>')
+RE_PUNCT_PERIOD_SPACE = re.compile(r'([!?:;])\.\s')
+RE_PUNCT_PERIOD_END = re.compile(r'([!?:;])\.$')
+RE_MULTIPLE_PERIODS = re.compile(r'\.(\s+\.)+')
+RE_GREATER_UNDERSCORE = re.compile(r'>_')
+RE_NEWLINES = re.compile(r'\n+')
+RE_FUNCTION_CALL = re.compile(r'(\w+)_(\w+)(?:_(\w+))*\(\)')
+RE_UNDERSCORE_WORDS = re.compile(r'(\w+)_(\w+)(?:_(\w+))*')
+RE_TRAILING_PARENS = re.compile(r' *\([^)]*\)$')
+RE_MARKDOWN_BOLD = re.compile(r'\*\*([^*]+)\*\*')
+RE_MARKDOWN_ITALIC = re.compile(r'\*([^*]+)\*')
+RE_MARKDOWN_CODE = re.compile(r'`([^`]+)`')
+RE_NON_SPEECH_CHARS = re.compile(r'[^a-zA-Z0-9 .,!?:\'-•☐▪▫■□◦‣⁃-]')
+RE_MULTIPLE_SPACES = re.compile(r' +')
+RE_HAS_LETTERS = re.compile(r'[a-zA-Z]')
 
 # Global configuration
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
@@ -150,6 +203,9 @@ _local_model_provider = None  # Track which provider is cached ('kokoro' or 'kit
 _local_model_loading = False
 _local_model_error = None
 _local_model_cache_lock = threading.Lock()
+_delayed_items_lock = threading.Lock()
+_delayed_timer = None
+_delayed_speech_item: Optional[SpeechItem] = None
 
 
 def _create_model_instance(provider: str):
@@ -437,21 +493,153 @@ TTS_PROVIDERS = {
     }
 }
 
+class AudioPlaybackThread(threading.Thread):
+    """Thread for non-blocking audio playback."""
+    def __init__(self, audio_path: str, playback_control: 'PlaybackControl'):
+        super().__init__(daemon=True)
+        self.audio_path = audio_path
+        self.playback_control = playback_control
+        self.process: Optional[subprocess.Popen] = None
+        self.stopped = threading.Event()
 
-@dataclass
-class SpeechItem:
-    """Item in speech queue with text, timestamp, and metadata."""
-    text: str
-    original_text: str
-    line_number: Optional[int] = None
-    timestamp: Optional[datetime] = None
-    start_time: Optional[float] = None  # Time when speech actually starts playing
-    source: str = "output"  # "output", "error", etc.
-    
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now()
+    def run(self):
+        """Run the audio playback in this thread."""
+        try:
+            success = self._play_audio_blocking()
+            # Notify playback control that this thread is done
+            with self.playback_control.lock:
+                if self.playback_control.current_playback_thread == self:
+                    self.playback_control.current_playback_thread = None
+                    self.playback_control.current_process = None
+            return success
+        except Exception as e:
+            log_message("ERROR", f"Audio playback thread error: {e}")
+            return False
 
+    def stop(self):
+        """Stop the audio playback."""
+        self.stopped.set()
+        if self.process:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=0.25)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+
+    def _play_audio_blocking(self) -> bool:
+        """Play audio file using an available system player (blocking version)."""
+        path = Path(self.audio_path)
+        if not path.exists():
+            log_message("ERROR", f"Audio file not found: {self.audio_path}")
+            return False
+
+        ext = path.suffix.lower()
+        is_wav = ext == ".wav"
+        is_mp3 = ext == ".mp3"
+
+        # Build candidate player commands in priority order for each format
+        candidates = []
+
+        if is_wav:
+            candidates.extend([
+                (["afplay", self.audio_path], "afplay"),
+                (["play", "-q", self.audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", self.audio_path], "ffplay"),
+                (["paplay", self.audio_path], "paplay"),
+                (["aplay", self.audio_path], "aplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", self.audio_path], "cvlc"),
+            ])
+
+            # Windows (WAV only): PowerShell SoundPlayer
+            if sys.platform.startswith("win"):
+                candidates.append((
+                    ["powershell", "-NoProfile", "-Command",
+                     f'[Console]::OutputEncoding=[Text.UTF8]; '
+                     f'$p=New-Object System.Media.SoundPlayer "{self.audio_path}"; '
+                     f'$p.PlaySync();'],
+                    "powershell-wav"
+                ))
+
+        elif is_mp3:
+            candidates.extend([
+                (["afplay", self.audio_path], "afplay"),
+                (["mpg123", "-q", self.audio_path], "mpg123"),
+                (["play", "-q", self.audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", self.audio_path], "ffplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", self.audio_path], "cvlc"),
+            ])
+        else:
+            candidates.extend([
+                (["afplay", self.audio_path], "afplay"),
+                (["play", "-q", self.audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", self.audio_path], "ffplay"),
+                (["mpg123", "-q", self.audio_path], "mpg123"),
+                (["paplay", self.audio_path], "paplay"),
+                (["aplay", self.audio_path], "aplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", self.audio_path], "cvlc"),
+            ])
+
+        # Pick the first available player
+        chosen_cmd = None
+        for cmd, binary in candidates:
+            if binary == "powershell-wav":
+                chosen_cmd = cmd
+                break
+            if shutil.which(binary):
+                chosen_cmd = cmd
+                break
+
+        if not chosen_cmd:
+            need = "a WAV-capable player (afplay, play/sox, ffplay, paplay/aplay, or VLC)"
+            if is_mp3:
+                need = "an MP3-capable player (afplay, mpg123, play/sox, ffplay, or VLC)"
+            log_message("ERROR", f"No suitable audio player found for {ext or 'unknown format'}. Install {need}.")
+            return False
+
+        # Launch player
+        try:
+            self.process = subprocess.Popen(
+                chosen_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as e:
+            log_message("ERROR", f"Failed to start audio player {chosen_cmd[0]}: {e}")
+            return False
+
+        # Store process in playback control for skip handling
+        with self.playback_control.lock:
+            self.playback_control.current_process = self.process
+
+        try:
+            # Poll + allow cooperative interruption
+            while self.process.poll() is None:
+                if self.stopped.is_set() or shutdown_event.is_set():
+                    try:
+                        self.process.terminate()
+                        self.process.wait(timeout=0.25)
+                    except Exception:
+                        self.process.kill()
+                    return False
+
+                # Check playback control skip flags
+                with self.playback_control.lock:
+                    if self.playback_control.skip_current or self.playback_control.skip_all:
+                        try:
+                            self.process.terminate()
+                            self.process.wait(timeout=0.25)
+                        except Exception:
+                            self.process.kill()
+                        return False
+
+                time.sleep(0.01)
+            return self.process.returncode == 0
+        except Exception:
+            return False
 
 class PlaybackControl:
     """Controls TTS playback state and process management."""
@@ -461,43 +649,50 @@ class PlaybackControl:
         self.skip_current = False
         self.skip_all = False
         self.current_process: Optional[subprocess.Popen] = None
+        self.current_playback_thread: Optional[AudioPlaybackThread] = None
         self.lock = threading.Lock()
-        
+
     def pause(self):
         """Pause current TTS playback."""
         with self.lock:
             self.is_paused = True
-            if self.current_process:
+            if self.current_playback_thread:
+                self.current_playback_thread.stop()
+            elif self.current_process:
                 try:
                     self.current_process.terminate()
                 except Exception:
                     pass
-                    
+
     def resume(self):
         """Resume paused TTS playback."""
         with self.lock:
             self.is_paused = False
-            
+
     def skip_current_item(self):
         """Skip the currently playing TTS item."""
         with self.lock:
             self.skip_current = True
-            if self.current_process:
+            if self.current_playback_thread:
+                self.current_playback_thread.stop()
+            elif self.current_process:
                 try:
                     self.current_process.terminate()
                 except Exception:
                     pass
-                    
+
     def skip_all_items(self):
         """Skip all remaining items in TTS queue."""
         with self.lock:
             self.skip_all = True
-            if self.current_process:
+            if self.current_playback_thread:
+                self.current_playback_thread.stop()
+            elif self.current_process:
                 try:
                     self.current_process.terminate()
                 except Exception:
                     pass
-                    
+
     def reset_skip_flags(self):
         """Reset all skip flags to false."""
         with self.lock:
@@ -554,6 +749,7 @@ spoken_cache: Deque[Tuple[str, float]] = deque(maxlen=CACHE_SIZE)
 tts_worker_thread: Optional[threading.Thread] = None
 shutdown_event = threading.Event()
 last_queued_text = ""
+last_received_text = ""
 last_queue_time = 0
 # Playback control
 playback_control = PlaybackControl()
@@ -566,6 +762,43 @@ SPEECH_BUFFER_TIME = 0.1  # Seconds to wait after TTS process ends for audio to 
 
 # Track the highest line number that has been spoken
 highest_spoken_line_number = -1
+
+# Global bullet point counter for TTS queue numbering
+global_bullet_counter = 0
+
+# Bullet point patterns for detection
+BULLET_PATTERNS = ['☐', '•', '▪', '▫', '■', '□', '◦', '‣', '⁃', '-']
+
+def apply_bullet_numbering(text: str) -> str:
+    """Apply bullet point numbering using global counter, reset counter for non-bullet text."""
+    global global_bullet_counter
+
+    if not text or not text.strip():
+        return text
+
+    # Check if text starts with any bullet pattern
+    text_stripped = text.strip()
+    starts_with_bullet = False
+    bullet_used = None
+
+    for bullet in BULLET_PATTERNS:
+        if text_stripped.startswith(bullet):
+            starts_with_bullet = True
+            bullet_used = bullet
+            break
+
+    if starts_with_bullet:
+        # Increment counter and replace bullet with number
+        global_bullet_counter += 1
+        # Remove the bullet and replace with number
+        remaining_text = text_stripped[len(bullet_used):].strip()
+        numbered_text = f"{global_bullet_counter}: {remaining_text}"
+        # Preserve original spacing/formatting by replacing the stripped portion
+        return text.replace(text_stripped, numbered_text)
+    else:
+        # Reset counter for non-bullet text
+        global_bullet_counter = 0
+        return text
 
 # Thread safety locks
 _state_lock = threading.RLock()  # Reentrant lock for nested access
@@ -580,6 +813,7 @@ def suppress_ai_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
         warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
         warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
         yield
 
 
@@ -741,8 +975,34 @@ def _create_temp_audio_file(suffix: str = ".mp3") -> str:
 
 
 def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
-    """Play audio file using an available system player.
-    Prefers players that support the file's format (wav/mp3), with robust fallbacks.
+    """Play audio file using non-blocking threaded playback.
+    Returns immediately after starting the playback thread.
+    """
+    if not use_process_control:
+        # For backward compatibility, if process control is disabled,
+        # fall back to the old blocking behavior
+        return _play_audio_file_blocking(audio_path, use_process_control)
+
+    # Create and start playback thread
+    playback_thread = AudioPlaybackThread(audio_path, playback_control)
+
+    # Register the thread with playback control
+    with playback_control.lock:
+        # Stop any existing playback thread
+        if playback_control.current_playback_thread:
+            playback_control.current_playback_thread.stop()
+        playback_control.current_playback_thread = playback_thread
+
+    # Start the thread (non-blocking)
+    playback_thread.start()
+
+    # Return True immediately - the TTS worker can continue processing
+    return True
+
+
+def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True) -> bool:
+    """Play audio file using an available system player (blocking version).
+    This is the original blocking implementation, kept for fallback.
     """
     path = Path(audio_path)
     if not path.exists():
@@ -877,7 +1137,7 @@ def _write_temp_audio(audio_bytes: bytes, ext: str) -> str:
         f.write(audio_bytes)
     return path
 
-def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True) -> bool:
+def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True, needs_skip: bool = False) -> bool:
     """Synthesize audio via provider function and play it."""
     try:
         result = synthesize_func(text)
@@ -889,10 +1149,20 @@ def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = 
             log_message("ERROR", "No audio returned from synthesizer")
             return False
         tmp_path = _write_temp_audio(audio_bytes, ext)
-        try:
+
+        if needs_skip:
+            playback_control.skip_current_item()
+
+        if use_process_control:
+            # For threaded playback, the AudioPlaybackThread will handle cleanup
             return _play_audio_file(tmp_path, use_process_control=use_process_control)
-        finally:
-            _cleanup_temp_file(tmp_path)
+        else:
+            # For blocking playback, clean up immediately after
+            try:
+                return _play_audio_file(tmp_path, use_process_control=use_process_control)
+            finally:
+                _cleanup_temp_file(tmp_path)
+
     except Exception as e:
         log_message("ERROR", f"Audio synthesis/playback failed: {e}")
         return False
@@ -948,9 +1218,9 @@ class TTSProvider(ABC):
         """Synthesize speech from text, return (audio bytes, format) or None."""
         pass
     
-    def speak(self, text: str, use_process_control: bool = True) -> bool:
+    def speak(self, text: str, use_process_control: bool = True, needs_skip: bool = False) -> bool:
         """Synthesize and play audio, return True if successful."""
-        return synthesize_and_play(self.synthesize, text, use_process_control)
+        return synthesize_and_play(self.synthesize, text, use_process_control, needs_skip)
     
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get config value from instance, shared state, or default."""
@@ -1222,68 +1492,72 @@ def context_aware_symbol_replacement(text: str) -> str:
         # Get just the filename (last component after /)
         filename = full_path.split('/')[-1]
         return filename
-    
+
     # Replace absolute and relative file paths with just the filename
-    # This comprehensive regex handles various path formats:
-    # - /absolute/path/to/file.ext -> file.ext
-    # - ./relative/path/file.ext -> file.ext
-    # - ~/home/path/file.ext -> file.ext
-    # - relative/path/file.ext -> file.ext
-    text = re.sub(r'(?:/?(?:[\w.-]+/)+)([\w.-]+)', extract_filename, text)
-    
+    text = RE_FILENAME_PATH.sub(extract_filename, text)
+
     # This regex matches filenames with extensions (e.g., talk.py -> talk dot py)
-    text = re.sub(r'(\w+)\.(\w+)', r'\1 dot \2', text)
-    
+    text = RE_FILE_EXTENSION.sub(r'\1 dot \2', text)
+
     # Remove bullet points (- or + at start of line)
-    text = re.sub(r'^[-+]\s+', '', text, flags=re.MULTILINE)
-    
-    # Handle hashtag symbol
-    text = re.sub(r'#', ' hashtag ', text)
-    
+    text = RE_LIST_MARKERS.sub('', text)
+
+    # Handle hashtag/asterix symbol
+    text = RE_MULTIPLE_ASTERISKS.sub('', text)
+    text = RE_MULTIPLE_HASHES.sub('hashtags', text)
+    text = RE_MULTIPLE_QUESTIONS.sub('questionmarks', text)
+    text = RE_SINGLE_HASH.sub(' hashtag ', text)
+
     # Handle double dash (--) when it precedes a word (e.g., --option)
-    text = re.sub(r'--(\w)', r' dash dash \1', text)
-    
+    text = RE_DASH_WORD.sub(r' dash dash \1', text)
+
     # Handle dates (preserve the pattern for later processing)
-    text = re.sub(r'(\d{4})-(\d{1,2})-(\d{1,2})', r'\1 to \2 to \3', text)
-    
+    text = RE_DATE_FORMAT.sub(r'\1 to \2 to \3', text)
+
     # Replace negative numbers (-5 -> minus 5)
-    text = re.sub(r'(?<![a-zA-Z0-9])-(\d+)', r' minus \1', text)
-    
+    text = RE_NEGATIVE_NUMBER.sub(r' minus \1', text)
+
     # Replace subtraction with spaces around it (5 - 3 -> 5 minus 3)
-    text = re.sub(r'(\d+)\s+-\s+(\d+)', r'\1 minus \2', text)
-    
+    text = RE_NUMBER_MINUS_NUMBER.sub(r'\1 minus \2', text)
+
     # Replace dashes surrounded by spaces with dash (word - word -> word dash word)
-    text = re.sub(r'(\w+)\s+-\s+', r'\1 dash ', text)
-    
+    text = RE_WORD_DASH.sub(r'\1 dash ', text)
+
     # Replace ranges (10-20 -> 10 to 20) - must come after spaced subtraction
-    text = re.sub(r'(\d+)-(\d+)', r'\1 to \2', text)
-    
+    text = RE_NUMBER_RANGE.sub(r'\1 to \2', text)
+
     # Replace plus in math contexts
-    text = re.sub(r'\+', ' plus ', text)
-    
+    text = RE_PLUS_SIGN.sub(' plus ', text)
+
     # Division: number / number with spaces (e.g., "10 / 2")
-    text = re.sub(r'(\d+)\s+/\s+(\d+)', r'\1 divided by \2', text)
-    
+    text = RE_DIVISION.sub(r'\1 divided by \2', text)
+
     # URLs: http://example.com or https://example.com - MUST come before other slash handling
-    text = re.sub(r'(https?:)//([^\s]+)', r'\1 slash slash \2', text)
-    
+    text = RE_HTTP_URL.sub(r'\1 slash slash \2', text)
+
     # Commands that start with slash (e.g., /install-github-app, /help)
-    text = re.sub(r'(?<![.\w])/([a-zA-Z][\w-]+)', r'slash \1', text)
-    
+    text = RE_SLASH_PATH.sub(r'slash \1', text)
+
     # Remaining "Either/or" pattern - only for simple word/word without dots or extensions
-    text = re.sub(r'(?<![.\w])(\w+)/(\w+)(?![.\w])', r'\1 or \2', text)
+    text = RE_SLASH_OR.sub(r'\1 or \2', text)
+
+    # Starting with any '>'
+    text = RE_QUOTE_PREFIX.sub('', text)
 
     # Word and acronym replacements
-    text = re.sub(r'cwd', ' current working directory ', text)
-    text = re.sub(r'Usage:', 'Use as follows:', text)
-    text = re.sub(r'Todos', 'To do\'s', text)
-    
+    text = RE_CWD.sub(' current working directory ', text)
+    text = RE_USAGE.sub('Use as follows:', text)
+    text = RE_TODOS.sub('To do\'s', text)
+
+    # Handle placeholder patterns like <from>, <to> by removing brackets
+    text = RE_ANGLE_BRACKETS.sub(r'\1', text)
+
     # Replace other mathematical symbols unconditionally
     skip_symbols = {'+', '-', '/'}  # Already handled above
     for symbol, replacement in SYMBOL_REPLACEMENTS.items():
         if symbol not in skip_symbols:
             text = text.replace(symbol, replacement)
-    
+
     return text
 
 
@@ -1302,82 +1576,48 @@ def add_sentence_ending(text: str) -> str:
 def clean_punctuation_sequences(text: str) -> str:
     """Clean awkward punctuation sequences like '?.' or '!'."""
     # Replace punctuation followed by period+space with just the punctuation+space
-    text = re.sub(r'([!?:;])\.\s', r'\1 ', text)
+    text = RE_PUNCT_PERIOD_SPACE.sub(r'\1 ', text)
     # Replace punctuation followed by period at end with just the punctuation
-    text = re.sub(r'([!?:;])\.$', r'\1', text)
+    text = RE_PUNCT_PERIOD_END.sub(r'\1', text)
     # Only clean up multiple periods with spaces between (like ". ." or ". . .")
     # This preserves intentional ellipsis like "..." or ".."
-    text = re.sub(r'\.(\s+\.)+', '.', text)
+    text = RE_MULTIPLE_PERIODS.sub('.', text)
     return text
 
 
 def extract_speakable_text(text: str) -> (str, str):
     """Extract speakable text and convert mathematical symbols."""
+
+    text = RE_GREATER_UNDERSCORE.sub('', text)
+
+    # Replace newlines with periods for better speech flow
+    text = RE_NEWLINES.sub('. ', text)
+
     # Convert function names: underscores to spaces, drop ()
-    text = re.sub(r'(\w+)_(\w+)(?:_(\w+))*\(\)', lambda m: ' '.join(m.group(0).replace('_', ' ').replace('()', '').split()), text)
-    text = re.sub(r'(\w+)_(\w+)(?:_(\w+))*', lambda m: ' '.join(m.group(0).split('_')), text)
-    
+    text = RE_FUNCTION_CALL.sub(lambda m: ' '.join(m.group(0).replace('_', ' ').replace('()', '').split()), text)
+    text = RE_UNDERSCORE_WORDS.sub(lambda m: ' '.join(m.group(0).split('_')), text)
+
     # Remove bracketed comments at the end
-    text = re.sub(r' *\([^)]*\)$', '', text)
+    text = RE_TRAILING_PARENS.sub('', text)
 
     # Remove markdown formatting
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)  # Italic
-    text = re.sub(r'`([^`]+)`', r'\1', text)  # Code
+    text = RE_MARKDOWN_BOLD.sub(r'\1', text)  # Bold
+    text = RE_MARKDOWN_ITALIC.sub(r'\1', text)  # Italic
+    text = RE_MARKDOWN_CODE.sub(r'\1', text)  # Code
 
-    # Handle bullet point lists by converting to numbered items
-    # Check if the text contains bullet points (☐, •, -, *, etc.)
-    bullet_patterns = [r'☐', r'•', r'▪', r'▫', r'■', r'□', r'◦', r'‣', r'⁃']
-    
-    # Split text into lines and process each
-    lines = text.split('. ')
-    processed_spoken_lines = []
-    processed_written_lines = []
-    bullet_counter = 0
-    spoken_text = ""
-    written_text = ""
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    # Apply context-aware symbol replacement and clean up text
+    text = context_aware_symbol_replacement(text)
+    text = RE_NON_SPEECH_CHARS.sub('', text)  # Keep bullet points in allowed chars
+    text = RE_MULTIPLE_SPACES.sub(' ', text)
+    text = text.strip()
 
-        written_line = line
-            
-        # Check if this line starts with a bullet
-        has_bullet = False
-        for pattern in bullet_patterns:
-            if line.startswith(pattern):
-                has_bullet = True
-                # Remove the bullet and clean up
-                line = line.replace(pattern, '', 1).strip()
-                break
+    spoken_text = text
+    written_text = text
 
-        line = context_aware_symbol_replacement(line)
-
-        line = re.sub(r'[^a-zA-Z0-9 .,!?:\'-]', '', line)  # Added colon to allowed chars
-        line = re.sub(r' +', ' ', line)
-        line = line.strip()
-        if line:
-            if has_bullet:
-                bullet_counter += 1
-                processed_spoken_lines.append(f"{bullet_counter}: {line}")
-                processed_written_lines.append(f"{bullet_counter}: {written_line}")
-            else:
-                # Keep non-bullet lines as-is
-                processed_spoken_lines.append(line)
-                processed_written_lines.append(written_line)
-    
-    if processed_spoken_lines:
-        spoken_text = '. '.join(processed_spoken_lines) + '.'
-
-    if processed_written_lines:
-        written_text = '. '.join(processed_written_lines) + '.'
-    
     # Skip text that contains no letters (just punctuation, numbers, spaces)
-    if not re.search(r'[a-zA-Z]', text):
+    if not RE_HAS_LETTERS.search(text):
         return "", ""
-    
+
     return spoken_text, written_text
 
 
@@ -1404,7 +1644,7 @@ def is_similar_to_recent(text: str) -> bool:
     return False
 
 
-def speak_text(text: str, engine: str) -> bool:
+def speak_text(text: str, engine: str, needs_skip: bool = False) -> bool:
     """Speak text using appropriate engine, return completion status."""
     if disable_tts:
         return True
@@ -1413,7 +1653,7 @@ def speak_text(text: str, engine: str) -> bool:
     provider = create_tts_provider(tts_provider)
     if provider:
         try:
-            return provider.speak(text)
+            return provider.speak(text, use_process_control=True, needs_skip=needs_skip)
         except Exception as e:
             log_message("ERROR", f"TTS provider {tts_provider} failed: {e}")
             return False
@@ -1541,20 +1781,31 @@ def tts_worker(engine: str):
                 continue
                 
             # Wait while paused
-            while playback_control.is_paused and not shutdown_event.is_set():
+            while (playback_control.is_paused or _local_model_loading or tts_queue.empty()) and not shutdown_event.is_set():
                 time.sleep(0.1)
-                
-            # Get next item from queue
-            item = tts_queue.get(timeout=0.1)
 
-            if item == "__SHUTDOWN__":
+            text_to_speak = ""
+            breakout = False
+            while not tts_queue.empty():
+                # Get next item from queue
+                item = tts_queue.get()
+
+                if item == "__SHUTDOWN__":
+                    breakout = True
+                    break
+
+                # Handle both old string format and new SpeechItem format
+                if isinstance(item, str):
+                    speech_item = SpeechItem(text=item, original_text=item)
+                else:
+                    speech_item = item
+
+                if speech_item:
+                    if text_to_speak:
+                        text_to_speak += ". "
+                    text_to_speak += speech_item.text
+            if breakout:
                 break
-                
-            # Handle both old string format and new SpeechItem format
-            if isinstance(item, str):
-                speech_item = SpeechItem(text=item, original_text=item)
-            else:
-                speech_item = item
 
             # Tell ASR to ignore input while we're speaking to prevent feedback
             try:
@@ -1565,18 +1816,52 @@ def tts_worker(engine: str):
             except Exception as e:
                 log_message("DEBUG", f"Could not set ASR ignore flag: {e}")
 
+            # Check for auto-skip before starting audio generation
+            needs_skip = False
+            if auto_skip_tts_enabled and not _local_model_loading and not tts_queue.empty():
+                # Check if something is currently playing and how long it's been playing
+                is_currently_playing = playback_control.current_process is not None
+                is_currently_speaking = is_speaking()
+                playing_long_enough = False
+
+                log_message("DEBUG", f"Auto-skip check: is_currently_playing={is_currently_playing}, is_actually_speaking={is_currently_speaking}, current_speech_item={current_speech_item is not None}")
+
+                if is_currently_playing and current_speech_item and current_speech_item.start_time:
+                    time_playing = time.time() - current_speech_item.start_time
+                    playing_long_enough = time_playing >= 1.0  # Minimum 1 second
+                    log_message("DEBUG", f"Current item has been playing for {time_playing:.2f} seconds")
+
+                # Only skip current item if something is actually speaking
+                if is_currently_speaking:
+                    needs_skip = True
+                    log_message("INFO", f"Auto-skipping current audio for new text ({len(text_to_speak)} chars)")
+
+                    # Add an interjection only if the current item has been playing long enough
+                    if playing_long_enough:
+                        interjection = random.choice(SKIP_INTERJECTIONS)
+                        # Prepend the interjection to the text for TTS only
+                        text_to_speak = f"{interjection}, {text_to_speak}"
+                        log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
+                    else:
+                        log_message("DEBUG", "Skipping interjection - current item hasn't played long enough")
+                elif is_currently_playing:
+                    log_message("WARNING", "Process exists but not actually speaking - race condition detected!")
+                else:
+                    log_message("DEBUG", "Nothing currently playing - no auto-skip needed")
+
             # Set current speech item with thread safety and record start time
             with _state_lock:
                 speech_item.start_time = time.time()
                 current_speech_item = speech_item
-            
-            # Include line number in log if available
-            if speech_item.line_number is not None:
-                log_message("INFO", f"Speaking via {engine} (line {speech_item.line_number}): '{speech_item.text}'")
-            else:
-                log_message("INFO", f"Speaking via {engine}: '{speech_item.text}'")
 
-            speak_text(speech_item.text, engine)
+            if text_to_speak.strip():
+                # Include line number in log if available
+                if speech_item.line_number is not None:
+                    log_message("INFO", f"Speaking via {engine} (line {speech_item.line_number}) qsize {tts_queue.qsize()}: '{text_to_speak}'")
+                else:
+                    log_message("INFO", f"Speaking via {engine}: '{text_to_speak}'")
+
+                speak_text(text_to_speak, engine, needs_skip)
 
             # Check if we should skip current or if shutdown was requested
             if playback_control.skip_current or shutdown_event.is_set():
@@ -1617,10 +1902,49 @@ def tts_worker(engine: str):
         except Exception as e:
             log_message("ERROR", f"TTS worker error: {e}")
 
+def _retry_delayed_speech(speech_item: SpeechItem, callback: Optional[Callable[[str], None]] = None, forced: bool = False):
+    global _delayed_timer, _delayed_speech_item, last_queued_text
+    log_message("DEBUG", f"retry_delayed_speech [{speech_item.text}] {forced=}")
+    with _delayed_items_lock:
+        with _state_lock:
+            if _delayed_timer:
+                last_queued_text = ""
+                _delayed_timer = None
+                _delayed_speech_item = None
+            try:
+                # Apply bullet numbering at queue time
+                numbered_text = apply_bullet_numbering(speech_item.text)
+                speech_item.text = numbered_text
 
-def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False) -> str:
+                with _cache_lock:
+                    spoken_cache.append((speech_item.text, time.time()))
+                tts_queue.put_nowait(speech_item)
+                speech_history.append(speech_item)
+                # Call the callback now that we're actually going to speak it
+                if callback:
+                    callback(speech_item.text)
+            except queue.Full:
+                log_message("WARNING", "TTS queue full, skipping text")
+
+def _text_is_novel(new_text: str, old_text: str) -> bool:
+    if not old_text:
+        return True
+    with _state_lock:
+        if new_text == old_text:
+            return False
+
+        if old_text in new_text:
+            return False
+
+        if SequenceMatcher(None, new_text, old_text).ratio() > 0.7:
+            return False
+
+        return True
+
+
+def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False, writes_partial_output: bool = False, callback: Optional[Callable[[str], None]] = None) -> str:
     """Queue text for TTS with debouncing and filtering."""
-    global highest_spoken_line_number, last_queued_text, last_queue_time
+    global highest_spoken_line_number, last_queued_text, last_queue_time, _delayed_timer, _delayed_speech_item
 
     # Check shared state if available
     if SHARED_STATE_AVAILABLE:
@@ -1638,85 +1962,77 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         log_message("INFO", f"Text too short: '{text}' -> '{speakable_text}'")
         return ""
     
-    # Add sentence ending if needed
-    speakable_text = add_sentence_ending(speakable_text)
-    
     # Clean up any awkward punctuation sequences
     speakable_text = clean_punctuation_sequences(speakable_text)
 
+
     # Get current time for various time-based checks
     current_time = time.time()
-    
-    # Always check for exact duplicates of the last spoken text
-    with _state_lock:
-        if last_queued_text and speakable_text == last_queued_text:
-            log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}'")
-            return ""
-    
-    # Check if we're in tool use mode (between PreToolUse and PostToolUse hooks)
-    in_tool_use = False
-    if SHARED_STATE_AVAILABLE:
-        shared_state = get_shared_state()
-        in_tool_use = shared_state.get_in_tool_use()
-    
-    # Skip similarity checks if we're in tool use mode (prompting the user)
-    if not in_tool_use:
-        # Debounce rapidly changing text
-        with _state_lock:
-            if (last_queued_text and
-                    SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
-                    current_time - last_queue_time < DEBOUNCE_TIME):
-                log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
-                last_queued_text = speakable_text
-                last_queue_time = current_time
-                return ""
+    delay = False
+    if writes_partial_output:
+        log_message("INFO", f"_text_is_novel {speakable_text.lower()} {last_queued_text.lower()} = {_text_is_novel(speakable_text.lower(), last_queued_text.lower())} and _delayed_speech_item {_delayed_speech_item is not None}")
+        text_is_novel = _text_is_novel(speakable_text.lower()[:-1], last_queued_text.lower()[:-1])
+        if text_is_novel:
+            if is_similar_to_recent(speakable_text):
+                log_message("DEBUG", "On further inspection text is similar to something already spoken")
+                text_is_novel = False
+
+        if text_is_novel and _delayed_speech_item:
+            log_message("INFO", f"The new text is novel {text_is_novel} so we early execute what was being kept back")
+            with _delayed_items_lock:
+                if _delayed_timer:
+                    _delayed_timer.cancel()
+            _retry_delayed_speech(_delayed_speech_item, callback, forced = True)
 
         if is_similar_to_recent(speakable_text):
             log_message("INFO", f"Recently spoken: '{speakable_text}'")
             return ""
+
+        with _delayed_items_lock:
+            if _delayed_timer:
+                log_message("DEBUG", "Clearing out a delayed item as a partial of the new text")
+                last_queued_text = ""  # If we've cancelled pending text then we don't want to debounce due to similarity
+                _delayed_timer.cancel()
+                _delayed_timer = None
+                _delayed_speech_item = None
+
+        with _state_lock:
+            delay = True
+            log_message("INFO", f"Will delay incomplete sentence: '{text}' by {2000}ms")
+
     else:
-        log_message("INFO", f"Bypassing similarity checks for exception pattern match: '{speakable_text}'")
+        # Always check for exact duplicates of the last spoken text
+        with _state_lock:
+            if last_queued_text and speakable_text == last_queued_text and not exception_match:
+                log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}'")
+                return ""
 
-    # If filtered text is longer than 20 characters and auto-skip is enabled, clear the queue to jump to this message
-    if auto_skip_tts_enabled and len(speakable_text) > 20:
-        log_message("INFO", f"Long text detected ({len(speakable_text)} chars), clearing queue to jump to latest")
+        # Check if we're in tool use mode (between PreToolUse and PostToolUse hooks)
+        in_tool_use = False
+        if SHARED_STATE_AVAILABLE:
+            shared_state = get_shared_state()
+            in_tool_use = shared_state.get_in_tool_use()
 
-        # Check if something is currently playing and how long it's been playing
-        is_currently_playing = playback_control.current_process is not None
-        is_currently_speaking = is_speaking()
-        playing_long_enough = False
-        
-        log_message("DEBUG", f"Interjection check: is_currently_playing={is_currently_playing}, is_actually_speaking={is_currently_speaking}, current_speech_item={current_speech_item is not None}")
-        
-        if is_currently_playing and current_speech_item and current_speech_item.start_time:
-            time_playing = time.time() - current_speech_item.start_time
-            playing_long_enough = time_playing >= 1.0  # Minimum 1 second
-            log_message("DEBUG", f"Current item has been playing for {time_playing:.2f} seconds")
+        # Skip similarity checks if we're in tool use mode (prompting the user)
+        if not (in_tool_use and "Do you " in speakable_text):
+            # Debounce rapidly changing text
+            with _state_lock:
+                if (last_queued_text and
+                        SequenceMatcher(None, speakable_text.lower(), last_queued_text.lower()).ratio() > 0.7 and
+                        current_time - last_queue_time < DEBOUNCE_TIME):
+                    log_message("INFO", f"Debouncing similar text: '{speakable_text}'")
+                    last_queued_text = speakable_text
+                    last_queue_time = current_time
+                    return ""
 
-        # Clear the queue
-        while not tts_queue.empty():
-            try:
-                tts_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        # Only skip current item if something is actually speaking (use is_speaking() for accuracy)
-        if is_currently_speaking:
-            playback_control.skip_current_item()
-            log_message("DEBUG", "Skipped current item - was actually speaking")
-
-            # Add an interjection only if the current item has been playing long enough
-            if playing_long_enough:
-                interjection = random.choice(SKIP_INTERJECTIONS)
-                # Prepend the interjection to the text for TTS only
-                speakable_text = f"{interjection}, {speakable_text}"
-                log_message("INFO", f"Added interjection '{interjection}' for smoother transition")
-            else:
-                log_message("DEBUG", "Skipping interjection - current item hasn't played long enough")
-        elif is_currently_playing:
-            log_message("WARNING", "Process exists but not actually speaking - race condition detected!")
+            if is_similar_to_recent(speakable_text):
+                log_message("INFO", f"Recently spoken: '{speakable_text}'")
+                return ""
         else:
-            log_message("DEBUG", "Nothing currently playing - no skip needed")
+            log_message("INFO", f"Bypassing similarity checks for exception pattern match: '{speakable_text}'")
+
+    # Auto-skip logic now handled in tts_worker for seamless switching
+    # This avoids gaps between skipping current audio and generating new audio
 
     with _state_lock:
         last_queued_text = speakable_text
@@ -1727,13 +2043,9 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                         f"Skipping line {line_number} (already spoken up to line {highest_spoken_line_number}): '{speakable_text[:50]}...'")
             return ""
 
-        if line_number is not None and line_number > highest_spoken_line_number:
+        if not delay and line_number is not None and line_number > highest_spoken_line_number:
             highest_spoken_line_number = line_number
             log_message("DEBUG", f"Updated highest_spoken_line_number to {highest_spoken_line_number}")
-
-    # Use cache lock for cache operations
-    with _cache_lock:
-        spoken_cache.append((speakable_text, current_time))
 
     with _state_lock:
         # Create speech item
@@ -1745,9 +2057,25 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         )
 
         try:
-            tts_queue.put_nowait(speech_item)
-            # Thread-safe append to history
-            speech_history.append(speech_item)
+            if delay:
+                with _delayed_items_lock:
+                    _delayed_timer = threading.Timer(2.0, _retry_delayed_speech, args=(speech_item,))
+                    _delayed_speech_item = speech_item
+                    _delayed_timer.start()
+                log_message("INFO", f"Delaying incomplete sentence for {2000}ms: '{speakable_text}'")
+                # TODO: We need a callback instead of a return for queue_output so core.py can also use the speakable text when appropriate
+                return "--ignore--"
+            else:
+                # Apply bullet numbering at queue time
+                numbered_text = apply_bullet_numbering(speech_item.text)
+                speech_item.text = numbered_text
+
+                # Use cache lock for cache operations
+                with _cache_lock:
+                    spoken_cache.append((speech_item.text, current_time))
+                tts_queue.put_nowait(speech_item)
+                # Thread-safe append to history
+                speech_history.append(speech_item)
         except queue.Full:
             log_message("WARNING", "TTS queue full, skipping text")
 
@@ -1958,6 +2286,11 @@ def navigate_to_previous():
             # Skip current and get previous
             playback_control.skip_current_item()
             prev_item = speech_history[-2]
+
+            # Apply bullet numbering at queue time
+            numbered_text = apply_bullet_numbering(prev_item.text)
+            prev_item.text = numbered_text
+
             # Re-queue the previous item
             tts_queue.put_nowait(prev_item)
             log_message("INFO", f"Navigating to previous item: {prev_item.text[:50]}...")
@@ -2064,7 +2397,7 @@ def configure_tts_provider(args):
         log_message("INFO", f"Using OpenAI TTS with voice: {openai_voice}")
         
     elif tts_provider in ['aws', 'polly']:
-        polly_region = args.region or 'us-east-1'
+        polly_region = args.tts_region or 'us-east-1'
         if args.voice:
             polly_voice = args.voice
         log_message("INFO", f"Using AWS Polly TTS with voice: {polly_voice} in region: {polly_region}")
@@ -2077,7 +2410,7 @@ def configure_tts_provider(args):
             print(f"Error: {provider_info['install']} required")
             return False
             
-        azure_region = args.region or 'eastus'
+        azure_region = args.tts_region or 'eastus'
         if args.voice:
             azure_voice = args.voice
         log_message("INFO", f"Using Microsoft Azure TTS with voice: {azure_voice} in region: {azure_region}")
@@ -2193,24 +2526,21 @@ def select_best_tts_provider(excluded_providers=None) -> str:
     return 'system'
 
 
-def configure_tts_from_dict(config: dict) -> bool:
+def configure_tts_from_args(args) -> bool:
     """Configure TTS provider from config dictionary."""
     global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
     
-    provider = config.get('provider', 'system')
-    tts_provider = provider
+    tts_provider = args.tts_provider
     
     # Validate provider configuration
-    if not validate_provider_config(provider):
-        log_message("WARNING", f"TTS provider {provider} validation failed")
+    if not validate_provider_config(tts_provider):
+        log_message("WARNING", f"TTS provider {tts_provider} validation failed")
         # Fall back to best available provider
         fallback_provider = select_best_tts_provider()
-        if fallback_provider != provider:
+        if fallback_provider != tts_provider:
             log_message("INFO", f"Falling back to TTS provider: {fallback_provider}")
             provider = fallback_provider
             tts_provider = provider
-            config = dict(config)  # Make a copy
-            config['provider'] = provider
             # Validate fallback provider
             if not validate_provider_config(provider):
                 log_message("ERROR", f"Fallback TTS provider {fallback_provider} also failed")
@@ -2219,24 +2549,23 @@ def configure_tts_from_dict(config: dict) -> bool:
             return False
     
     # Get provider info
-    provider_info = TTS_PROVIDERS.get(provider)
+    provider_info = TTS_PROVIDERS.get(tts_provider)
     if not provider_info:
         # System provider
         log_message("INFO", "Using system default TTS")
         return True
     
     # Handle provider-specific configuration
-    if provider == 'openai':
-        if config.get('voice'):
-            openai_voice = config['voice']
+    if tts_provider == 'openai':
+        if args.tts_voice:
+            openai_voice = args.tts_voice
         log_message("INFO", f"Using OpenAI TTS with voice: {openai_voice}")
         
-    elif provider in ['aws', 'polly']:
+    elif tts_provider in ['aws', 'polly']:
         # Additional AWS validation
         try:
             import boto3
-            region = config.get('region', 'us-east-1')
-            test_client = boto3.client('polly', region_name=region)
+            test_client = boto3.client('polly', region_name=args.tts_region)
             test_client.describe_voices(LanguageCode='en-US')
         except ImportError:
             print(f"Error: {provider_info['install']} required")
@@ -2246,12 +2575,12 @@ def configure_tts_from_dict(config: dict) -> bool:
             print("Please configure AWS credentials (e.g., AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)")
             return False
             
-        polly_region = config.get('region', 'us-east-1')
-        if config.get('voice'):
-            polly_voice = config['voice']
+        polly_region = args.tts_region
+        if args.tts_voice:
+            polly_voice = args.tts_voice
         log_message("INFO", f"Using AWS Polly TTS with voice: {polly_voice} in region: {polly_region}")
         
-    elif provider == 'azure':
+    elif tts_provider == 'azure':
         # Additional Azure validation
         try:
             import azure.cognitiveservices.speech as speechsdk  # noqa: F401
@@ -2259,12 +2588,12 @@ def configure_tts_from_dict(config: dict) -> bool:
             print(f"Error: {provider_info['install']} required")
             return False
             
-        azure_region = config.get('region', 'eastus')
-        if config.get('voice'):
-            azure_voice = config['voice']
+        azure_region = args.tts_region
+        if args.tts_voice:
+            azure_voice = args.tts_voice
         log_message("INFO", f"Using Microsoft Azure TTS with voice: {azure_voice} in region: {azure_region}")
         
-    elif provider == 'gcloud':
+    elif tts_provider == 'gcloud':
         # Additional Google Cloud validation
         try:
             from google.cloud import texttospeech  # noqa: F401
@@ -2279,24 +2608,22 @@ def configure_tts_from_dict(config: dict) -> bool:
             print("Please check your GOOGLE_APPLICATION_CREDENTIALS file")
             return False
             
-        gcloud_language_code = config.get('language', 'en-US')
-        if config.get('voice'):
-            gcloud_voice = config['voice']
+        gcloud_language_code = args.tts_language
+        if args.tts_voice:
+            gcloud_voice = args.tts_voice
         log_message("INFO", f"Using Google Cloud TTS with voice: {gcloud_voice} in language: {gcloud_language_code}")
         
-    elif provider == 'elevenlabs':
-        if config.get('voice'):
-            elevenlabs_voice_id = config['voice']
-        if config.get('model'):
-            elevenlabs_model_id = config['model']
+    elif tts_provider == 'elevenlabs':
+        if args.tts_voice:
+            elevenlabs_voice_id = args.tts_voice
         log_message("INFO", f"Using ElevenLabs TTS with voice ID: {elevenlabs_voice_id}")
     
-    elif provider == 'deepgram':
-        if config.get('model'):
-            deepgram_voice_model = config['model']
+    elif tts_provider == 'deepgram':
+        if args.tts_voice:
+            deepgram_voice_model = args.tts_voice
         log_message("INFO", f"Using Deepgram TTS with model: {deepgram_voice_model}")
     
-    elif provider == 'kittentts':
+    elif tts_provider == 'kittentts':
         # Additional KittenTTS validation
         try:
             with suppress_ai_warnings():
@@ -2308,26 +2635,24 @@ def configure_tts_from_dict(config: dict) -> bool:
             print("  pip install soundfile")
             return False
         
-        if config.get('voice'):
-            kittentts_voice = config['voice']
-        if config.get('model'):
-            kittentts_model = config['model']
+        if args.tts_voice:
+            kittentts_voice = args.tts_voice
         log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
         
         # Background preloading started earlier in initialization
         
-    elif provider == 'kokoro':
+    elif tts_provider == 'kokoro':
         # Skip expensive kokoro import - will validate during actual model loading
         log_message("DEBUG", "Skipping kokoro validation in configure_tts_from_dict - will validate during model loading")
         
         # Update global config variables
         global kokoro_voice, kokoro_language, kokoro_speed
-        if config.get('voice'):
-            kokoro_voice = config['voice']
-        if config.get('language'):
-            kokoro_language = config['language']
-        if config.get('speed'):
-            kokoro_speed = str(config['speed'])
+        if args.tts_voice:
+            kokoro_voice = args.tts_voice
+        if args.tts_language:
+            kokoro_language = args.tts_language
+        if args.tts_rate:
+            kokoro_speed = args.tts_rate
         log_message("INFO", f"Using KokoroTTS with language: {kokoro_language} and voice: {kokoro_voice}")
         
         # Background preloading started earlier in initialization
@@ -2335,7 +2660,7 @@ def configure_tts_from_dict(config: dict) -> bool:
     # Update shared state with the actually working provider
     from .state import get_shared_state
     shared_state = get_shared_state()
-    shared_state.set_tts_config(provider=provider)
+    shared_state.set_tts_config(provider=tts_provider)
     
     return True
 

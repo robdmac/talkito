@@ -29,6 +29,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
 from . import asr, comms, profiles, tts
 
@@ -43,14 +44,13 @@ from .tts import (
     is_speaking,
     get_queue_size,
     get_current_speech_item,
-    configure_tts_from_dict,
+    configure_tts_from_args,
 )
 
 # ASR API
 from .asr import (
     start_dictation,
     stop_dictation,
-    configure_asr_from_dict,
     ASRConfig,
 )
 
@@ -108,7 +108,7 @@ __all__ = [
     "is_speaking",
     "get_queue_size",
     "get_current_speech_item",
-    "configure_tts_from_dict",
+    "configure_tts_from_args",
     
     # ASR functions
     "start_dictation",

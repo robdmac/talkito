@@ -23,9 +23,10 @@
 import os
 import argparse
 import asyncio
-import signal
 import sys
 from typing import List, Optional, Union, Tuple
+
+from .core import run_with_talkito
 
 # Suppress deprecation warnings early
 import warnings
@@ -35,6 +36,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="spacy")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="click")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
 # Try to load .env files if available
 try:
@@ -51,8 +53,8 @@ except ImportError:
 from . import __version__
 from . import tts
 from . import asr
-from . import comms
 from .core import TalkitoCore
+from .logs import log_message
 from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
 
 # Check Python version
@@ -63,44 +65,6 @@ if sys.version_info < (3, 8):
 
 # Global references for signal handlers
 core_instance: Optional[TalkitoCore] = None
-
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    # Import cleanup function from core
-    from .core import cleanup_terminal
-    
-    # First ensure we clean up the terminal - this is critical
-    cleanup_terminal()
-    
-    # Then stop ASR and TTS
-    if asr:
-        try:
-            asr.stop_dictation()
-        except Exception:
-            pass
-    
-    # For interrupt signals, shutdown immediately without waiting
-    if signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            tts.shutdown_tts()  # Shutdown immediately
-        except Exception:
-            pass
-    else:
-        # For other signals, wait for TTS to finish
-        try:
-            tts.wait_for_tts_to_finish()
-            tts.shutdown_tts()
-        except Exception:
-            # If interrupted during cleanup, just shutdown
-            try:
-                tts.shutdown_tts()
-            except Exception:
-                pass
-    
-    # Exit with proper code for signal termination
-    sys.exit(128 + signum)
-
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -211,10 +175,12 @@ def parse_arguments():
                         help='Arguments for the command')
     
     args = parser.parse_args()
-    
+
     # Handle verbosity levels
-    if args.verbosity is not None:
-        args.verbose = args.verbosity
+    if args.verbose > 0 and args.verbosity is None:
+        args.verbosity = args.verbose
+    elif args.verbosity is None:
+        args.verbosity = 0
     
     # Handle special commands
     if args.command == "init" and args.arguments and args.arguments[0] == "claude":
@@ -235,6 +201,9 @@ def parse_arguments():
     if args.update or args.force_update:
         args.show_update = True
         return args
+
+    if not args.profile and args.command:
+        args.profile = os.path.basename(args.command)
     
     # Validate arguments
     if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp and not args.update and not args.force_update:
@@ -259,116 +228,9 @@ def parse_arguments():
     return args
 
 
-def build_tts_config(args) -> dict:
-    """Build TTS configuration from command line arguments"""
-    config = {}
-    
-    if args.tts_provider:
-        config['provider'] = args.tts_provider
-    else:
-        # If no provider specified, use the best available one
-        best_provider = tts.select_best_tts_provider()
-        if best_provider != 'system':
-            config['provider'] = best_provider
-    if args.tts_voice:
-        config['voice'] = args.tts_voice
-    if args.tts_region:
-        config['region'] = args.tts_region
-    # Only include language if it's not the default or if a provider is specified
-    if args.tts_language and (args.tts_language != 'en-US' or args.tts_provider):
-        config['language'] = args.tts_language
-    if args.tts_rate is not None:
-        config['rate'] = args.tts_rate
-    if args.tts_pitch is not None:
-        config['pitch'] = args.tts_pitch
-    
-    # Only return config if we have actual values
-    return config if config else None
-
-
-def build_asr_config(args) -> dict:
-    """Build ASR configuration from command line arguments"""
-    config = {}
-    
-    if args.asr_provider:
-        config['provider'] = args.asr_provider
-    else:
-        # If no provider specified, use the best available one
-        if asr:
-            try:
-                best_provider = asr.select_best_asr_provider()
-                if best_provider != 'google':  # 'google' is the free fallback
-                    config['provider'] = best_provider
-            except Exception:
-                pass
-    if args.asr_language:
-        config['language'] = args.asr_language
-    if args.asr_model:
-        config['model'] = args.asr_model
-    
-    return config if config else None
-
-
-def build_comms_config(args) -> Optional[comms.CommsConfig]:
-    """Build communication configuration from command line arguments"""
-    config = comms.create_config_from_env()
-    
-    # Override with command line arguments first
-    if args.sms_recipients:
-        config.sms_recipients = [r.strip() for r in args.sms_recipients.split(',')]
-    if args.whatsapp_recipients:
-        config.whatsapp_recipients = [r.strip() for r in args.whatsapp_recipients.split(',')]
-    if args.slack_channel:
-        config.slack_channel = args.slack_channel
-    if args.webhook_port:
-        config.webhook_port = args.webhook_port
-    
-    # Check if any communication is configured (after applying overrides)
-    has_sms = config.twilio_account_sid and config.sms_recipients
-    has_whatsapp = config.twilio_whatsapp_number and config.whatsapp_recipients
-    has_slack = config.slack_bot_token and config.slack_app_token and config.slack_channel
-    
-    if not any([has_sms, has_whatsapp, has_slack]):
-        # No communication configured
-        return None
-    
-    # Auto-detect based on configuration
-    config.sms_enabled = has_sms
-    config.whatsapp_enabled = has_whatsapp
-    config.slack_enabled = has_slack
-    
-    return config
-
-
-
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
-    # Force state initialization by importing and accessing it
-    from .state import get_shared_state
-    shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
-    
-    # Build comms config to check what's configured
-    comms_config = build_comms_config(args)
-    
-    # Update shared state with configured providers from args/env
-    if comms_config:
-        # Check if providers are configured
-        has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
-        has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
-        
-        # Update shared state
-        shared_state.communication.whatsapp_enabled = has_whatsapp
-        shared_state.communication.slack_enabled = has_slack
-        
-        # Also update recipients/channels
-        if has_whatsapp and comms_config.whatsapp_recipients:
-            shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
-        if has_slack and comms_config.slack_channel:
-            shared_state.communication.slack_channel = comms_config.slack_channel
-            # Automatically activate slack mode when --slack-channel is provided
-            shared_state.set_slack_mode(True)
-    
     # Initialize providers early (triggers availability checks and download prompts)
     initialize_providers_early(args)
     
@@ -397,105 +259,82 @@ def print_configuration_status(args):
     # Print with the same format but add the note about .talkito.env
     print(f"╭ {status}")
 
-
-# Claude-specific functions moved to claude.py
-
-
-
-
-
 async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
-    
+
+    # Set up logging early if log file specified
+    if args.log_file:
+        from .logs import setup_logging
+        setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
+
+    # Set environment variables for provider preferences
+    # Check if the TTS provider is valid first, fall back to system on macOS if not
+    if args.tts_provider:
+        # Validate the provider before setting it
+        log_message("INFO", f"About to validate TTS provider: {args.tts_provider}")
+        provider_valid = tts.validate_provider_config(args.tts_provider)
+        log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
+        if not provider_valid:
+            import platform
+            if platform.system() == 'Darwin':  # macOS
+                print("Falling back to system TTS provider on macOS")
+                args.tts_provider = 'system'
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = 'system'
+            else:
+                # On non-macOS systems, let it fail as before
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+        else:
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+    if args.asr_provider:
+        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
+
+    # Initialize providers early (triggers availability checks and download prompts)
+    initialize_providers_early(args)
+
+    # Handle backwards compatibility for TTS mode
+    tts_mode = args.tts_mode
+    if args.disable_tts:
+        tts_mode = 'off'
+    elif args.dont_auto_skip_tts:
+        tts_mode = 'full'
+
+    # Set ASR and TTS modes in shared state so they're available for status display
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+    shared_state.asr_mode = args.asr_mode
+    shared_state.tts_mode = tts_mode
+
     # Special handling for 'claude' command
     if args.command == 'claude':
-        # Import Claude-specific functions
-        from .claude import run_claude_wrapper, run_claude_hybrid
-        
-        # Check if MCP is disabled
-        if args.disable_mcp:
-            # Use wrapper mode only
-            return await run_claude_wrapper(args)
-        else:
-            # Use hybrid approach
-            return await run_claude_hybrid(args)
-    
+        log_message("INFO", "Starting claude mode")
+        try:
+            # Import Claude-specific functions
+            from .claude import run_claude_extensions
+            # Check if MCP is disabled
+            log_message("DEBUG", f"Starting claude mode args.disable_mcp {args.disable_mcp}")
+            if not args.disable_mcp:
+                await run_claude_extensions(args)
+        finally:
+            pass  # Signal handling moved to core.py
+
     # Build command list
     cmd = [args.command] + args.arguments
-    
-    # Build kwargs for run_with_talkito
-    kwargs = {
-        'verbosity': args.verbose,
-        'asr_mode': args.asr_mode,
-        'record_file': args.record,
-        'auto_skip_tts': not args.dont_auto_skip_tts,  # Auto-skip is on by default, disabled with --dont-auto-skip-tts
-    }
-    
-    # Add log file if specified
-    if args.log_file:
-        kwargs['log_file'] = args.log_file
-    
-    # Add profile if specified
-    if args.profile:
-        kwargs['profile'] = args.profile
-    elif args.command:
-        # Try to auto-detect profile based on command
-        kwargs['profile'] = os.path.basename(args.command)
-    
-    # Add TTS config
-    tts_config = build_tts_config(args)
-    if tts_config:
-        kwargs['tts_config'] = tts_config
-    
-    # Add ASR config
-    if asr:
-        asr_config = build_asr_config(args)
-        if asr_config:
-            kwargs['asr_config'] = asr_config
-    
-    # Add communications config
-    comms_config = build_comms_config(args)
-    if comms_config:
-        kwargs['comms_config'] = comms_config
-    
-    # Handle TTS disable
-    if args.disable_tts:
-        tts.disable_tts = True
-    
+
     # Use the high-level API from core
-    from .core import run_with_talkito
-    return await run_with_talkito(cmd, **kwargs)
+    return await run_with_talkito(cmd, args)
 
 
 async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
     """Replay a recorded session"""
     from .core import replay_recorded_session
-    
-    # Build TTS config if specified
-    tts_config = build_tts_config(args)
-    
-    # Build communication config if specified - this was missing!
-    comms_config = build_comms_config(args)
-    
+
     # Use the command argument as profile name if provided
     command_name = args.command if args.command else None
-    
+
     # Run the replay using the original function signature
-    result = await replay_recorded_session(
-        args.replay,
-        auto_skip_tts=not args.dont_auto_skip_tts,
-        tts_config=tts_config,
-        record_file=args.record,
-        capture_tts=args.capture_tts_output is not None,
-        disable_tts=args.disable_tts,
-        show_output=not args.no_output,
-        command_name=command_name,
-        verbosity=args.verbose,
-        log_file=args.log_file,
-        comms_config=comms_config  # Pass communication config to replay
-    )
-    
+    result = await replay_recorded_session(args = args, command_name=command_name)
+
     # Handle capture_tts output
     if args.capture_tts_output and isinstance(result, list):
         # Save captured TTS output to file
@@ -552,7 +391,7 @@ def show_slack_setup():
     from .templates import SLACK_BOT_MANIFEST
     import json
     import shutil
-    
+
     print("🚀 Talkito Slack Bot Setup Instructions")
     print("=" * 60)
     print()
@@ -587,7 +426,7 @@ def show_slack_setup():
     print("SLACK APP MANIFEST:")
     print("=" * 60)
     print()
-    
+
     # Pretty print the manifest
     try:
         manifest_dict = json.loads(SLACK_BOT_MANIFEST)
@@ -595,10 +434,10 @@ def show_slack_setup():
         print(manifest_pretty)
     except Exception:
         print(SLACK_BOT_MANIFEST)
-    
+
     print()
     print("=" * 60)
-    
+
     # Check if pbcopy is available on macOS
     if shutil.which('pbcopy'):
         try:
@@ -678,13 +517,13 @@ def show_whatsapp_setup():
 async def main_async() -> int:
     """Async main function"""
     args = parse_arguments()
-    
+
     # Handle MCP server modes synchronously before entering async context
     if args.mcp_server or args.mcp_sse_server:
         # MCP servers have their own event loops, so we can't run them from within asyncio.run()
         # This is handled in main() instead
         return 0
-    
+
     try:
         if args.replay:
             return await replay_session(args)
@@ -727,41 +566,47 @@ async def main_async() -> int:
 
 def main():
     """Main entry point for the CLI"""
+    # Install signal handlers early to handle hangs during initialization
+    import signal
+    from .core import signal_handler
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     # Check and apply any staged updates first
     from .update import check_and_apply_staged_update
     check_and_apply_staged_update()
-    
+
     # Handle MCP server mode before entering asyncio context
     args = parse_arguments()
-    
+
     # Handle special commands that don't need async
     if hasattr(args, 'init_claude') and args.init_claude:
         from .claude import init_claude
         success = init_claude()
         sys.exit(0 if success else 1)
-    
+
     if hasattr(args, 'show_slack_setup') and args.show_slack_setup:
         show_slack_setup()
         sys.exit(0)
-    
+
     if hasattr(args, 'show_whatsapp_setup') and args.show_whatsapp_setup:
         show_whatsapp_setup()
         sys.exit(0)
-    
+
     if hasattr(args, 'show_update') and args.show_update:
         from .update import TalkitoUpdater
         updater = TalkitoUpdater()
         success = updater.update(force=args.force_update)
         sys.exit(0 if success else 1)
-    
+
     if args.mcp_server:
         run_mcp_server()
         sys.exit(0)
-    
+
     if args.mcp_sse_server:
         run_mcp_sse_server()
         sys.exit(0)
-    
+
     # Run everything else in asyncio
     exit_code = asyncio.run(main_async())
     sys.exit(exit_code)

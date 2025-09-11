@@ -32,6 +32,7 @@ import sys
 import termios
 import time
 import threading
+import traceback
 import tty
 from collections import deque
 from dataclasses import dataclass, field
@@ -106,14 +107,6 @@ PROGRESS_PATTERNS = [
     # r'^\s*\d+\s*[:\|]\s*',  # Line numbers with : or | separator
 ]
 
-# Common regex patterns
-FILE_PATH_PATTERN = r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$'
-NUMBERS_ONLY_PATTERN = r'^\s*\d+(\s+\d+)*\s*$'
-BOX_CONTENT_PATTERN = r'│\s*([^│]+)\s*│'
-BOX_SEPARATOR_PATTERN = r'^[─═╌╍]+$'
-PROMPT_PATTERN = r'^\s*[>\$#]\s*$'
-SENTENCE_END_PATTERN = r'[.!?]$'
-
 # Terminal escape sequences
 RESET_SEQUENCES = [
     b'\x1b[H\x1b[2J',
@@ -130,6 +123,8 @@ ALT_SCREEN_SEQUENCES = [
 ]
 
 # ANSI escape code pattern - comprehensive
+ANSI_CHAR_PATTERN = re.compile(r'(?:\x1B\[[0-9;?]*[a-zA-Z])+([A-Za-z0-9])(?=(?:\x1B\[[0-9;?]*[a-zA-Z])|$)')
+ANSI_MOVE_LINE_PATTERN = re.compile(r'\x1B\[(\d+);(\d+)[Hf]')
 ANSI_PATTERN = re.compile(
     r'(\x1B\[[0-9;]*[a-zA-Z]|'  # Standard codes
     r'\x1B\]([0-9]+;[^\x07\x1B]*)?\x07|'  # OSC sequences
@@ -153,6 +148,28 @@ ANSI_PATTERN = re.compile(
     r'\x1B\[[0-9;]*~)'  # Special keys
 )
 
+# Precompiled regex patterns for clean_text() function
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
+ORPHANED_M_PATTERN = re.compile(r'(?<![a-zA-Z0-9\'])m(?![a-zA-Z])')
+DASH_LINE_PATTERN = re.compile(r'──+')
+ANSI_NUMBER_M_PATTERN = re.compile(r'(?<![a-zA-Z])\d{1,3}m\b')
+
+# Precompiled regex patterns for other frequent operations
+BOX_CONTENT_PATTERN = re.compile(r'│\s*([^│]+)\s*│')
+BOX_SEPARATOR_PATTERN = re.compile(r'^[─═╌╍]+$')
+PROMPT_PATTERN = re.compile(r'^\s*[>\$#]\s*$')
+SENTENCE_END_PATTERN = re.compile(r'[.!?]$')
+ANSI_SIMPLE_PATTERN = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+# Additional precompiled patterns for performance
+FILE_PATH_FILTER_PATTERN = re.compile(r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$')
+NUMBERS_ONLY_FILTER_PATTERN = re.compile(r'^\s*\d+(\s+\d+)*\s*$')
+CURSOR_UP_PATTERN = re.compile(rb'\x1b\[(\d*)A')
+CURSOR_DOWN_PATTERN = re.compile(rb'\x1b\[(\d*)B')
+CURSOR_POS_PATTERN = re.compile(rb'\x1b\[(\d+);(\d+)H')
+ANSI_FOR_LENGTH_PATTERN = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+ANSI_INPUT_PATTERN = re.compile(r'\x1b\[[0-9;]*[mGKHJ]')
+
 # Global state - these are updated by TalkitoCore
 current_master_fd: Optional[int] = None
 current_proc: Optional[asyncio.subprocess.Process] = None
@@ -162,6 +179,12 @@ comm_manager: Optional[Any] = None  # Will be CommunicationManager when initiali
 # Thread pool for blocking I/O operations
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='talkito-io')
 
+def _trim_after_cursor_move(s):
+    match = ANSI_MOVE_LINE_PATTERN.search(s)
+    if match:
+        return s[:match.start()]
+    return s
+
 # Register cleanup on exit
 def _cleanup_io_executor():
     """Cleanup thread pool executor on exit"""
@@ -170,10 +193,17 @@ def _cleanup_io_executor():
 atexit.register(_cleanup_io_executor)
 
 # Non-blocking I/O helpers
-async def async_read(fd: int, size: int) -> bytes:
+async def async_read(fd: int, size: int, timeout: float = 5.0) -> bytes:
     """Non-blocking read using thread pool"""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_io_executor, os.read, fd, size)
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_io_executor, os.read, fd, size),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        log_message("WARNING", f"Read timeout on fd {fd}")
+        return b""
 
 async def async_write(fd: int, data: bytes) -> int:
     """Non-blocking write using thread pool"""
@@ -204,10 +234,15 @@ class TerminalState:
     previous_line_was_skipped: bool = False
     previous_line_was_queued: bool = False
     previous_line_was_queued_space_seperated: bool = False
-    pending_speech_text: str = ""
+    pending_speech_text: List[str] = field(default_factory=list)
     pending_text_line_number: int = 0
     pending_text_exception_match: bool = False
+    pending_text_should_skip: bool = False
     last_line_number: int = -1
+    last_sent_text: str = ""
+    # Timer for automatic send_pending_text after delay
+    pending_text_timer: Optional['threading.Timer'] = None
+    pending_text_timer_lock: threading.Lock = field(default_factory=threading.Lock)
 
 @dataclass 
 class ASRState:
@@ -408,37 +443,83 @@ def check_comms_input() -> Optional[str]:
             log_message("ERROR", f"Failed to check comms input: {e}")
     return None
 
+
+def _send_pending_text_delayed():
+    """Timer callback to send pending text after delay."""
+    with terminal.pending_text_timer_lock:
+        # Clear the timer reference since it's about to complete
+        terminal.pending_text_timer = None
+
+    log_message("INFO", "Auto-sending pending text after 2-second timeout")
+    send_pending_text()
+
+
 def send_pending_text():
-    if terminal.pending_speech_text.strip():
-        log_message("DEBUG", f"send_pending_text [{terminal.pending_speech_text}]")
+    # Cancel any pending timer first
+    with terminal.pending_text_timer_lock:
+        if terminal.pending_text_timer:
+            terminal.pending_text_timer.cancel()
+            terminal.pending_text_timer = None
+
+    if terminal.pending_speech_text and ''.join(terminal.pending_speech_text).strip():
+        pending_text = ''.join(terminal.pending_speech_text)
+        log_message("DEBUG", f"send_pending_text [{pending_text}]")
+        log_message("DEBUG", f"last_sent_text {terminal.last_sent_text}")
+
+        # Check for duplicate sends
+        if pending_text.strip() == terminal.last_sent_text.strip():
+            log_message("DEBUG", f"Skipping duplicate send: '{pending_text}'")
+            terminal.pending_speech_text.clear()
+            terminal.pending_text_should_skip = False
+            terminal.pending_text_exception_match = False
+            return
+        
+        # Check the stored skip decision
+        if terminal.pending_text_should_skip:
+            log_message("FILTER", f"Skipped buffered text by profile: '{pending_text}'")
+            terminal.pending_speech_text.clear()
+            terminal.pending_text_should_skip = False
+            terminal.pending_text_exception_match = False
+            return
         
         # Check if TTS is enabled before queueing
         shared_state = get_shared_state()
+        terminal.last_sent_text = pending_text
         if shared_state.tts_enabled:
+
+            def speech_callback(speakable_text: str):
+                """Called when text is actually queued for speech (immediate or delayed)"""
+                log_message("DEBUG", f"All checks passed for [{speakable_text}]. Send to comms")
+                send_to_comms(speakable_text)
+
             # Pass the exception match flag from terminal state
             exception_match = getattr(terminal, 'pending_text_exception_match', False)
             speakable_text = tts.queue_for_speech(
-                terminal.pending_speech_text, 
+                pending_text, 
                 terminal.pending_text_line_number,
                 source="output",
-                exception_match=exception_match
+                exception_match=exception_match,
+                writes_partial_output=active_profile.writes_partial_output,
+                callback=speech_callback,
             )
             if speakable_text:
-                log_message("DEBUG", f"All checks passed for [{speakable_text}]. Set previous_line_was_queued to True and send to comms")
-                terminal.pending_speech_text = ""
+                terminal.pending_speech_text.clear()
                 terminal.pending_text_exception_match = False  # Reset flag
-                send_to_comms(speakable_text)
+                terminal.pending_text_should_skip = False  # Reset flag
+                if speakable_text != "--ignore--":
+                    speech_callback(speakable_text)
         else:
             log_message("DEBUG", "TTS disabled, not sending pending text to speech")
-            terminal.pending_speech_text = ""
-            terminal.pending_text_exception_match = False  # Reset flag
             # Still send to comms even if TTS is disabled
-            send_to_comms(terminal.pending_speech_text)
+            send_to_comms(pending_text)
+            terminal.pending_speech_text.clear()
+            terminal.pending_text_exception_match = False  # Reset flag
+            terminal.pending_text_should_skip = False  # Reset flag
 
 def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
     """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
-    if line_number < terminal.last_line_number:
+    if line_number < terminal.last_line_number and not active_profile.writes_partial_output:
         log_message("DEBUG", "queue_output skipping previously seen line number")
     elif text and text.strip():
         # Check if TTS is enabled before accumulating text
@@ -451,6 +532,11 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
             
         # Store exception match flag for later use
         terminal.pending_text_exception_match = exception_match
+
+        text = active_profile.apply_replacements(text)
+        
+        # Check if text should be skipped based on profile
+        should_skip = active_profile and active_profile.should_skip(text, verbosity_level)
             
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
         append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
@@ -459,35 +545,63 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
             log_message("DEBUG", "queue_output appending")
             if text.startswith("  "):
                 text = "\n" + text
-            terminal.pending_speech_text = terminal.pending_speech_text + text
+            terminal.pending_speech_text.append(text)
+            # When appending, keep the more permissive skip decision (False wins over True)
+            terminal.pending_text_should_skip = terminal.pending_text_should_skip and should_skip
+            log_message("DEBUG", f"queue_output setting should skip to be terminal.pending_text_should_skip {terminal.pending_text_should_skip} and should_skip {should_skip} = {terminal.pending_text_should_skip}")
+
+            # Restart the 2-second timer since new text was appended
+            with terminal.pending_text_timer_lock:
+                if terminal.pending_text_timer:
+                    terminal.pending_text_timer.cancel()
+                terminal.pending_text_timer = threading.Timer(2.0, _send_pending_text_delayed)
+                terminal.pending_text_timer.daemon = True
+                terminal.pending_text_timer.start()
+                log_message("DEBUG", "Restarted 2-second timer for pending text")
         else:
             if terminal.pending_speech_text:
                 send_pending_text()
             terminal.previous_line_was_skipped = False
             terminal.previous_line_was_queued = True
-            terminal.pending_speech_text = text
+            terminal.pending_speech_text = [text]
             terminal.pending_text_line_number = line_number
+            terminal.pending_text_should_skip = should_skip
+
+            # Start the 2-second timer for new pending text
+            with terminal.pending_text_timer_lock:
+                if terminal.pending_text_timer:
+                    terminal.pending_text_timer.cancel()
+                terminal.pending_text_timer = threading.Timer(2.0, _send_pending_text_delayed)
+                terminal.pending_text_timer.daemon = True
+                terminal.pending_text_timer.start()
+                log_message("DEBUG", "Started 2-second timer for pending text")
 
 def clean_text(text: str) -> str:
     """Strip ANSI escape codes and terminal control sequences"""
+
     # First, remove all ANSI escape sequences
+    text = _trim_after_cursor_move(text)
+    text = ANSI_CHAR_PATTERN.sub('', text)
     text = ANSI_PATTERN.sub('', text)
-    text = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', text)
+    text = ANSI_ESCAPE_PATTERN.sub('', text)
     text = text.replace('\x1B', '')
-    
+
     # Remove various control characters
     text = text.replace('\x08', '')  # Backspace
     text = text.replace('\x0D', '')  # Carriage return
-    
+
     # Remove standalone 'm' characters that are likely orphaned from ANSI codes
     # This handles cases where 'm' appears after whitespace or at start of string
     # but NOT when it's part of a word (like 'am', 'pm', 'them', etc.)
     # Also preserve contractions like "I'm", "don't", etc.
-    text = re.sub(r'(?<![a-zA-Z0-9\'])m(?![a-zA-Z])', '', text)
-    
+    text = text.replace("'","'")
+    text = ORPHANED_M_PATTERN.sub('', text)
+
+    text = DASH_LINE_PATTERN.sub('', text)
+
     # Also remove patterns like "2m" or "22m" that might be left from ANSI codes
-    text = re.sub(r'(?<![a-zA-Z])\d{1,3}m\b', '', text)
-    
+    text = ANSI_NUMBER_M_PATTERN.sub('', text)
+
     # Filter out non-printable characters
     return ''.join(char for char in text if ord(char) >= 32 or char in '\n\t')
 
@@ -508,12 +622,12 @@ def is_response_line(line: str) -> bool:
 
 def extract_box_content(line: str) -> Optional[str]:
     """Extract meaningful content from box drawing lines"""
-    box_match = re.match(BOX_CONTENT_PATTERN, line)
+    box_match = BOX_CONTENT_PATTERN.match(line)
     if box_match:
         box_content = box_match.group(1).strip()
         if (box_content and
-                not re.match(BOX_SEPARATOR_PATTERN, box_content) and
-                not re.match(PROMPT_PATTERN, box_content)):
+                not BOX_SEPARATOR_PATTERN.match(box_content) and
+                not PROMPT_PATTERN.match(box_content)):
             return box_content
     return None
 
@@ -530,7 +644,7 @@ def is_prompt_line(line: str) -> bool:
     prompt_patterns = profile_prompt_patterns if profile_prompt_patterns else default_prompt_patterns
 
     try:
-        return (any(re.search(p, line) for p in prompt_patterns if p) or line.strip() == '>')
+        return any(re.search(p, line) for p in prompt_patterns if p)
     except Exception as e:
         log_message("ERROR", f"Error in is_prompt_line: {e} - patterns: {prompt_patterns}, line: {line!r}")
         return False
@@ -550,15 +664,16 @@ def is_duplicate_screen_content(content: str) -> bool:
     return False
 
 
-def modify_prompt_for_asr(data: bytes, input_prompt, input_mic_replace) -> bytes:
+def modify_prompt_for_asr(data: bytes, input_prompts, input_mic_replace) -> bytes:
     """Modify prompt output to show microphone emoji when ASR is active"""
     try:
         text = data.decode('utf-8', errors='ignore')
-        if input_prompt in text:
-            # When we find the prompt, mark that we've seen it
-            asr_state.prompt_detected = True
-            text = text.replace(input_prompt, input_mic_replace)
-            return text.encode('utf-8')
+        for input_prompt in input_prompts:
+            if input_prompt in text:
+                # When we find the prompt, mark that we've seen it
+                asr_state.prompt_detected = True
+                text = text.replace(input_prompt, input_mic_replace)
+                return text.encode('utf-8')
         log_message("WARNING", f"input prompt {input_prompt} not found in text {text}")
         return data
     except Exception:
@@ -594,12 +709,12 @@ def should_skip_line(line: str) -> bool:
         # Continue processing on error
 
     # Skip lines that are just file paths
-    if re.match(r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$', line):
+    if FILE_PATH_FILTER_PATTERN.match(line):
         log_message("FILTER", f"Skipped file path: '{line}'")
         return True
 
     # Skip lines that are just numbers (single or multiple), catches cases like "599" or "599 603 1117"
-    if re.match(r'^\s*\d+(\s+\d+)*\s*$', line):
+    if NUMBERS_ONLY_FILTER_PATTERN.match(line):
         log_message("FILTER", f"Skipped line with only numbers: '{line}'")
         return True
 
@@ -822,9 +937,9 @@ def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = 
     return buffer, line, detected_prompt
 
 
-def _queue_text(text: str, line_number: Optional[int] = None) -> None:
+def _queue_text(text: str, line_number: Optional[int] = None, is_question = False) -> None:
     """Helper to queue text with exception matching"""
-    exception_match = active_profile and active_profile.matches_exception_pattern(text, verbosity_level)
+    exception_match = (active_profile and active_profile.matches_exception_pattern(text, verbosity_level)) or is_question
     queue_output(strip_profile_symbols(text), line_number, exception_match)
 
 
@@ -858,6 +973,7 @@ def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], l
     # Only treat interaction menu lines as continuations if Slack communications are active
     is_interaction_menu = False
     if active_profile and active_profile.is_interaction_menu_line(cleaned_line):
+        log_message("DEBUG", "is interactive menu line")
         # Check if Slack communications are active
         shared_state = get_shared_state()
         is_interaction_menu = shared_state.slack_mode_active if shared_state else False
@@ -872,7 +988,15 @@ def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], l
         
     if not (terminal.previous_line_was_skipped or terminal.previous_line_was_queued):
         return None
-        
+
+    # Check exception patterns before filtering out continuation lines
+    if active_profile:
+        for min_verbosity, pattern in active_profile._compiled_exceptions:
+            log_message("DEBUG", f"Checking exception pattern '{pattern.pattern}' (min_verbosity={min_verbosity}) against cleaned_line: '{cleaned_line}' or line: '{line}' (verbosity_level={verbosity_level})")
+            if (pattern.search(cleaned_line) or pattern.search(line)) and verbosity_level >= min_verbosity:
+                log_message("DEBUG", f"Continuation line matches exception pattern, processing normally: '{line[:MAX_LINE_PREVIEW]}...'")
+                return None  # Don't handle as continuation, let normal processing continue
+
     if is_interaction_menu:
         log_message("DEBUG", f"Processing interaction menu line as continuation: '{line[:MAX_LINE_PREVIEW]}...'")
     else:
@@ -924,7 +1048,7 @@ def _process_buffer_and_queue(cleaned_line: str, line: str, buffer: List[str], l
 
     new_buffer = [cleaned_line] if cleaned_line and cleaned_line.strip() else []
 
-    if cleaned_line and re.search(SENTENCE_END_PATTERN, cleaned_line):
+    if cleaned_line and SENTENCE_END_PATTERN.search(cleaned_line):
         if text_to_speak:
             log_message("INFO", "Queueing buffered text before sentence end")
             _queue_text(text_to_speak, line_number)
@@ -940,16 +1064,19 @@ def process_line(line: str, buffer: List[str], prev_line: str,
                  skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[List[str], str, bool]:
     """Process a single line and queue text internally. Returns (new_buffer, new_prev_line, detected_prompt)"""
 
-    # Check if this is a question line - these should ALWAYS be spoken
-    if active_profile and active_profile.is_question_line(line):
-        log_message("INFO", f"Detected question line: '{line[:MAX_LINE_PREVIEW]}...'")
-        asr_state.question_mode = True
-        cleaned_line = clean_text(line)
-        _queue_text(cleaned_line, line_number)
-        terminal.previous_line_was_skipped = True
-        return buffer, line, False
+    log_message("DEBUG", f"Processing line: ['{line}']")
 
     cleaned_line = clean_text(line)
+
+
+
+    # Check if this is a question line - these should ALWAYS be spoken
+    if active_profile and active_profile.is_question_line(cleaned_line):
+        log_message("INFO", f"Detected question line: '{line[:MAX_LINE_PREVIEW]}...'")
+        asr_state.question_mode = True
+        _queue_text(cleaned_line, line_number, is_question=True)
+        terminal.previous_line_was_skipped = True
+        return buffer, line, False
 
     # Check if this is a continuation line
     continuation_result = _handle_continuation_line(cleaned_line, line, buffer, line_number)
@@ -967,7 +1094,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         return _skip_line_and_return(buffer, line)
 
     # Detect prompts
-    is_prompt = (active_profile and active_profile.input_start and active_profile.input_start in line) or is_prompt_line(cleaned_line)
+    is_prompt = is_prompt_line(cleaned_line)
     
     # Log prompt detection for debugging
     if ">" in cleaned_line and "│" in cleaned_line:
@@ -1045,7 +1172,10 @@ def clear_terminal_state(output_buffer: LineBuffer, cursor_row: int = 1) -> int:
         # Process each line that hasn't been processed yet
         for idx, line in output_buffer.lines.items():
             if line and line.strip():
-                log_message("DEBUG", f"Processing line {idx} before clear: '{line[:80]}...'")
+                print_line = line.strip()
+                if len(print_line) > 120:
+                    print_line = line.strip()[:80] + "..." + line.strip()[-30:]
+                log_message("DEBUG", f"Processing line {idx} before clear: '{print_line}'")
                 # Queue the line for speech before we lose it
                 cleaned = clean_text(line)
                 if cleaned and not active_profile.should_skip(cleaned, verbosity_level):
@@ -1240,41 +1370,6 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
     return enabled_auto_listen, last_check_time
 
 
-def configure_tts_engine(tts_config: dict, auto_skip_tts: bool) -> str:
-    """Configure and validate TTS engine"""
-    if tts_config and tts_config.get('provider') != 'system':
-        if not tts.configure_tts_from_dict(tts_config):
-            log_message("ERROR", "Failed to configure TTS provider")
-            return None
-        engine = "cloud"
-    else:
-        engine = TTS_ENGINE
-        if engine == "auto":
-            engine = tts.detect_tts_engine()
-            if engine == "none":
-                print("Error: No TTS engine found. Please install one of: espeak, festival, flite (Linux) or use macOS with 'say' command", file=sys.stderr)
-                log_message("ERROR", "No TTS engine found")
-                return None
-            print(f"Using TTS engine: {engine}")
-            log_message("INFO", f"Using TTS engine: {engine}")
-
-    tts.start_tts_worker(engine, auto_skip_tts)
-    
-    # Update shared state
-    shared_state = get_shared_state()
-    
-    # Get the actual provider that was configured
-    if tts_config and tts_config.get('provider'):
-        provider = tts_config.get('provider')
-    else:
-        # For system/auto, get the actual engine being used
-        provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
-    
-    shared_state.set_tts_initialized(True, provider)
-    
-    return engine
-
-
 async def process_pty_output(data: bytes, output_buffer: LineBuffer,
                             line_buffer: bytes, text_buffer: List[str],
                             prev_line: str,
@@ -1410,9 +1505,8 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
 
 def get_visual_length(text):
     """Calculate the visual length of text, excluding ANSI codes and zero-width characters."""
-    # Remove ANSI escape sequences
-    import re
-    text_no_ansi = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+    # Remove ANSI escape sequences using precompiled pattern
+    text_no_ansi = ANSI_SIMPLE_PATTERN.sub('', text)
 
     # Remove zero-width characters
     text_no_zwc = text_no_ansi.replace('\u200d', '').replace('\u200c', '').replace('\u200b', '')
@@ -1426,53 +1520,56 @@ def get_visual_length(text):
 def insert_partial_transcript(data_str, asr_state, active_profile):
     """Insert the partial transcript into the terminal output while preserving formatting. Returns modified data_str."""
     # Find the input start position
-    start_idx = data_str.find(active_profile.input_start) if active_profile and active_profile.input_start else -1
-    if start_idx != -1:
-        start_idx += len(active_profile.input_start)
+    start_idx = -1
+    if active_profile and active_profile.input_start:
+        for input_start in active_profile.input_start:
+            start_idx = data_str.find(input_start)
+            if start_idx != -1:
+                start_idx += len(input_start)
 
-        # Find the right border on the same line as the input
-        # Look for the next │ after the input start
-        line_end = data_str.find('\r\n', start_idx)
-        if line_end == -1:
-            line_end = len(data_str)
+                # Find the right border on the same line as the input
+                # Look for the next │ after the input start
+                line_end = data_str.find('\r\n', start_idx)
+                if line_end == -1:
+                    line_end = len(data_str)
 
-        # Find the rightmost │ before the line end
-        search_area = data_str[start_idx:line_end]
-        right_border_pos = search_area.rfind('│')
-        if right_border_pos != -1:
-            # Check for ANSI codes before the │
-            # Look backwards from the pipe to find where ANSI sequences start
-            check_start = max(0, right_border_pos - 20)
-            before_pipe = search_area[check_start:right_border_pos]
+                # Find the rightmost │ before the line end
+                search_area = data_str[start_idx:line_end]
+                right_border_pos = search_area.rfind('│')
+                if right_border_pos != -1:
+                    # Check for ANSI codes before the │
+                    # Look backwards from the pipe to find where ANSI sequences start
+                    check_start = max(0, right_border_pos - 20)
+                    before_pipe = search_area[check_start:right_border_pos]
 
-            # Find all ANSI escape sequences
-            ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
+                    # Find all ANSI escape sequences
+                    ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
 
-            if ansi_matches:
-                # Find the position where continuous ANSI codes start before the pipe
-                last_ansi_end = len(before_pipe)
-                for match in reversed(ansi_matches):
-                    if match.end() == last_ansi_end:
-                        # This ANSI code is adjacent to the previous one (or to the pipe)
-                        last_ansi_end = match.start()
+                    if ansi_matches:
+                        # Find the position where continuous ANSI codes start before the pipe
+                        last_ansi_end = len(before_pipe)
+                        for match in reversed(ansi_matches):
+                            if match.end() == last_ansi_end:
+                                # This ANSI code is adjacent to the previous one (or to the pipe)
+                                last_ansi_end = match.start()
+                            else:
+                                # There's a gap, so ANSI codes are not continuous to the pipe
+                                break
+
+                        if last_ansi_end < len(before_pipe):
+                            # We found ANSI codes that continue to the pipe
+                            end_idx = start_idx + check_start + last_ansi_end
+                        else:
+                            # No continuous ANSI codes before pipe
+                            end_idx = start_idx + right_border_pos
                     else:
-                        # There's a gap, so ANSI codes are not continuous to the pipe
-                        break
-
-                if last_ansi_end < len(before_pipe):
-                    # We found ANSI codes that continue to the pipe
-                    end_idx = start_idx + check_start + last_ansi_end
+                        # No ANSI codes before pipe
+                        end_idx = start_idx + right_border_pos
                 else:
-                    # No continuous ANSI codes before pipe
-                    end_idx = start_idx + right_border_pos
-            else:
-                # No ANSI codes before pipe
-                end_idx = start_idx + right_border_pos
-        else:
-            # Fallback to finding any │ after start
-            end_idx = data_str.find('│', start_idx)
-            if end_idx == -1:
-                end_idx = line_end
+                    # Fallback to finding any │ after start
+                    end_idx = data_str.find('│', start_idx)
+                    if end_idx == -1:
+                        end_idx = line_end
     else:
         start_idx = 0  # Fallback if start not in this chunk
 
@@ -1489,9 +1586,9 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
     clean_input = ''
     i = 0
     while i < len(input_area):
-        if input_area[i] == '\x1b' and re.match(r'\x1b\[[0-9;]*[mGKHJ]', input_area[i:]):
+        if input_area[i] == '\x1b' and ANSI_INPUT_PATTERN.match(input_area[i:]):
             # Skip the ANSI sequence
-            match = re.match(r'\x1b\[[0-9;]*[mGKHJ]', input_area[i:])
+            match = ANSI_INPUT_PATTERN.match(input_area[i:])
             i += len(match.group())
         else:
             clean_input += input_area[i]
@@ -1550,9 +1647,17 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         # if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
         #     partial_to_show = partial_to_show[:remaining_space - 1] + '…'
 
-        # Work only within the input line boundaries
-        input_start_len = len(active_profile.input_start) if active_profile and active_profile.input_start else 0
-        before_input = data_str[:start_idx - input_start_len]
+        input_start_len = 0
+        matched_start = ""
+        if active_profile and active_profile.input_start:
+            for input_start in active_profile.input_start:
+                idx = data_str.find(input_start)
+                if idx != -1:
+                    input_start_len = len(input_start)
+                    matched_start = input_start
+                    break
+        before_input = data_str[:start_idx - input_start_len] if input_start_len else data_str
+
         input_content = data_str[start_idx:end_idx]
         after_input = data_str[end_idx:]
 
@@ -1647,7 +1752,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
             new_input += ' ' * (len(input_content) - len(new_input))
 
         # Reconstruct the full string
-        data_str = before_input + active_profile.input_start + new_input + after_input
+        data_str = before_input + matched_start + new_input + after_input
 
         log_message("DEBUG", f"Input area update: old_len={len(input_content)}, new_len={len(new_input)}")
         log_message("DEBUG", f"Inserted partial transcript: '{partial_to_show}' at position {insert_pos}")
@@ -1937,7 +2042,7 @@ def ensure_tts_state_sync():
     # If TTS was disabled, clear any pending speech text
     if not shared_state.tts_enabled and terminal and terminal.pending_speech_text:
         log_message("INFO", "TTS disabled, clearing pending speech text")
-        terminal.pending_speech_text = ""
+        terminal.pending_speech_text.clear()
         terminal.pending_text_line_number = None
 
 
@@ -2030,10 +2135,12 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
         log_message("DEBUG", "ASR not initialized, cannot auto-enable")
         return False
         
-    # If ASR was explicitly enabled via MCP when CLI had it off, treat as auto-input
+    # If ASR was explicitly enabled via MCP when CLI had it off, use stored user preference
     if asr_mode == "off" and shared_state.asr_enabled:
-        asr_mode = "auto-input"
-        log_message("DEBUG", "ASR enabled via MCP, overriding CLI mode to auto-input")
+        # Respect the user's stored ASR mode preference instead of blindly overriding to auto-input
+        stored_mode = getattr(shared_state, 'asr_mode', 'auto-input')
+        asr_mode = stored_mode
+        log_message("DEBUG", f"ASR enabled via MCP, using stored user preference: {stored_mode}")
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
@@ -2329,10 +2436,12 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         data_str = output_data.decode('utf-8')
 
                     if not in_input and active_profile.input_start:
-                        if active_profile.input_start and active_profile.input_start in data_str:
-                            start_idx = data_str.find(active_profile.input_start) + len(active_profile.input_start)
-                            log_message("DEBUG", f"Found input start at position {start_idx}")
-                            in_input = True
+                        for input_start in active_profile.input_start:
+                            if input_start in data_str:
+                                start_idx = data_str.find(input_start) + len(input_start)
+                                log_message("DEBUG", f"Found input start at position {start_idx}")
+                                in_input = True
+                                break
 
                     # Display partial transcript if available and we're in input area
                     if asr_state.current_partial and in_input:
@@ -2371,12 +2480,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                             stdout_buffer.add(output_data)
                         else:
                             log_message("ERROR", f"Error writing to stdout: {e}")
-                            import traceback
                             log_message("ERROR", f"Traceback: {traceback.format_exc()}")
-                    
-                    log_message("DEBUG", "After stdout write/flush")
-
-                    # Removed buffer switch delay to ensure all lines are processed
 
                     # Process lines even in alternate buffer to ensure nothing is missed
                     # if in_alternate_buffer:
@@ -2404,7 +2508,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     break
                 except Exception as e:
                     log_message("ERROR", f"Unexpected error in PTY read loop: {e}")
-                    import traceback
                     log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
             if proc.returncode is not None:
@@ -2464,8 +2567,17 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         # Flush any pending speech text before command completes
         send_pending_text()
 
-        tts.wait_for_tts_to_finish()
-        
+        # Re-install signal handlers after subprocess completion to regain control
+        try:
+            log_message("DEBUG", "Re-installing signal handlers after subprocess completion")
+
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGWINCH, debounced_winch_handler)
+            log_message("DEBUG", "Signal handlers re-installed successfully")
+        except Exception as e:
+            log_message("ERROR", f"Failed to re-install signal handlers: {e}")
+
         # Stop ASR if it was running
         if ASR_AVAILABLE:
             try:
@@ -2590,7 +2702,7 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             track_line_position(line_idx, cursor_row)
 
         if line.strip():
-            log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()[:100]}...'")
+            log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()}'")
         
         # Check if this is a Ctrl-C prompt from Claude
         if "Press Ctrl-C again to exit" in line:
@@ -2753,9 +2865,69 @@ def signal_handler(signum, frame=None):
     os._exit(exit_code)  # type: ignore[attr-defined]
 
 
-async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, tts_config: dict = None, record_file: str = None, capture_tts: bool = False, disable_tts: bool = False, show_output: bool = True, command_name: str = None, verbosity: int = 0, log_file: str = None, comms_config: Optional["comms.CommsConfig"] = None) -> Union[int, List[Tuple[float, str, int]]]:
+async def replay_recorded_session(args, command_name: str = None) -> Union[int, List[Tuple[float, str, int]]]:
     """Replay a recorded session file through the TTS pipeline for debugging"""
     global active_profile, terminal, asr_state, verbosity_level, comm_manager
+
+    record_file = args.record
+    capture_tts = args.capture_tts_output is not None
+    disable_tts = args.disable_tts
+    show_output = not args.no_output
+    command_name = command_name
+    verbosity = args.verbose
+    log_file = args.log_file
+
+    comms_config = build_comms_config(args)
+
+    core = TalkitoCore(
+        verbosity_level=args.verbosity,
+        log_file_path=args.log_file
+    )
+
+    # Set up profile if specified
+    profile = get_profile(args.profile)
+    if profile:
+        core.active_profile = profile
+
+    # Ensure we have at least a default profile
+    if core.active_profile is None:
+        core.active_profile = get_profile('default')
+
+    log_message("DEBUG", "Set up TTS engine")
+    # Set up TTS engine
+    if args and args.tts_provider != 'system':
+        if not tts.configure_tts_from_args(args):
+            raise RuntimeError("Failed to configure TTS provider")
+        engine = "cloud"
+    else:
+        engine = TTS_ENGINE
+        if engine == "auto":
+            engine = tts.detect_tts_engine()
+            if engine == "none":
+                raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
+
+    # Start TTS worker
+    log_message("DEBUG", "Start TTS worker")
+    auto_skip_tts = not args.dont_auto_skip_tts
+    tts.start_tts_worker(engine, auto_skip_tts)
+
+    # Start background update checker
+    from .update import start_background_update_checker
+    start_background_update_checker()
+
+    # Update shared state for TTS initialization
+    from .state import get_shared_state
+    shared_state = get_shared_state()
+
+    # Get the actual provider that was configured
+    if args.tts_provider:
+        tts_provider = args.tts_provider
+    else:
+        # For system/auto, get the actual engine being used
+        tts_provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
+
+    log_message("DEBUG", "set_tts_initialized")
+    shared_state.set_tts_initialized(True, tts_provider)
 
     # Initialize terminal state if not already done
     if terminal is None:
@@ -2769,7 +2941,7 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
     verbosity_level = verbosity
     
     setup_logging(log_file)
-    log_message("INFO", f"Replaying recorded session: {replay_file} with verbosity level {verbosity}")
+    log_message("INFO", f"Replaying recorded session: {args.replay} with verbosity level {verbosity}")
     
     # Set up communications if configured - this was missing from replay!
     if comms_config and COMMS_AVAILABLE:
@@ -2842,14 +3014,14 @@ async def replay_recorded_session(replay_file: str, auto_skip_tts: bool = True, 
         log_message("INFO", "No profile set for replay, using default")
     
     # Configure TTS provider
-    engine = configure_tts_engine(tts_config, auto_skip_tts)
-    if not engine:
-        return 1
+    # engine = configure_tts_engine(tts_config, auto_skip_tts)
+    # if not engine:
+    #     return 1
 
     # Parse recorded session
-    entries = SessionRecorder.parse_file(replay_file)
+    entries = SessionRecorder.parse_file(args.replay)
     if not entries:
-        print(f"Error: No valid entries found in replay file: {replay_file}", file=sys.stderr)
+        print(f"Error: No valid entries found in replay file: {args.replay}", file=sys.stderr)
         return 1
     
     buffer = []
@@ -3043,8 +3215,38 @@ class TalkitoCore:
         return result
 
 
+def build_comms_config(args) -> Optional[comms.CommsConfig]:
+    """Build communication configuration from command line arguments"""
+    config = comms.create_config_from_env()
+
+    # Override with command line arguments first
+    if args.sms_recipients:
+        config.sms_recipients = [r.strip() for r in args.sms_recipients.split(',')]
+    if args.whatsapp_recipients:
+        config.whatsapp_recipients = [r.strip() for r in args.whatsapp_recipients.split(',')]
+    if args.slack_channel:
+        config.slack_channel = args.slack_channel
+    if args.webhook_port:
+        config.webhook_port = args.webhook_port
+
+    # Check if any communication is configured (after applying overrides)
+    has_sms = config.twilio_account_sid and config.sms_recipients
+    has_whatsapp = config.twilio_whatsapp_number and config.whatsapp_recipients
+    has_slack = config.slack_bot_token and config.slack_app_token and config.slack_channel
+
+    if not any([has_sms, has_whatsapp, has_slack]):
+        # No communication configured
+        return None
+
+    # Auto-detect based on configuration
+    config.sms_enabled = has_sms
+    config.whatsapp_enabled = has_whatsapp
+    config.slack_enabled = has_slack
+
+    return config
+
 # High-level API functions
-async def run_with_talkito(command: List[str], **kwargs) -> int:
+async def run_with_talkito(command: List[str], args) -> int:
     """Run a command with talkito functionality
     
     Args:
@@ -3054,34 +3256,42 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     Returns:
         Exit code of the command
     """
-    # Set up signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Set up signal handlers (if not already installed)
+    current_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, current_sigint)  # Restore current handler
+    if current_sigint == signal.SIG_DFL:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGWINCH, debounced_winch_handler)
+
+    # Handle TTS disable
+    if args.disable_tts:
+        tts.disable_tts = True
+
+    comms_config = build_comms_config(args)
     
     core = TalkitoCore(
-        verbosity_level=kwargs.get('verbosity', 0),
-        log_file_path=kwargs.get('log_file')
+        verbosity_level=args.verbosity,
+        log_file_path=args.log_file
     )
     
     # Set up profile if specified
-    if 'profile' in kwargs:
-        profile = get_profile(kwargs['profile'])
-        if profile:
-            core.active_profile = profile
+    profile = get_profile(args.profile)
+    if profile:
+        core.active_profile = profile
+
+    if not profile.supported:
+        print(f"Sorry, TalkiTo does not support {args.profile}. Please get in touch with me if you want to help resolve this.")
+        exit(0)
     
     # Ensure we have at least a default profile
     if core.active_profile is None:
         core.active_profile = get_profile('default')
-    
-    # Configure TTS based on kwargs
-    tts_config = kwargs.get('tts_config', {})
-    auto_skip_tts = kwargs.get('auto_skip_tts', False)
 
     log_message("DEBUG", "Set up TTS engine")
     # Set up TTS engine
-    if tts_config and tts_config.get('provider') != 'system':
-        if not tts.configure_tts_from_dict(tts_config):
+    if args and args.tts_provider != 'system':
+        if not tts.configure_tts_from_args(args):
             raise RuntimeError("Failed to configure TTS provider")
         engine = "cloud"
     else:
@@ -3093,6 +3303,7 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     
     # Start TTS worker
     log_message("DEBUG", "Start TTS worker")
+    auto_skip_tts = not args.dont_auto_skip_tts
     tts.start_tts_worker(engine, auto_skip_tts)
     
     # Start background update checker
@@ -3104,29 +3315,21 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
     shared_state = get_shared_state()
     
     # Get the actual provider that was configured
-    if tts_config and tts_config.get('provider'):
-        provider = tts_config.get('provider')
+    if args.tts_provider:
+        tts_provider = args.tts_provider
     else:
         # For system/auto, get the actual engine being used
-        provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
+        tts_provider = engine if engine != 'cloud' else getattr(tts, 'tts_provider', 'system')
+
+    asr.configure_asr_from_args(args)
 
     log_message("DEBUG", "set_tts_initialized")
-    shared_state.set_tts_initialized(True, provider)
-    
-    # Configure ASR based on kwargs
-    if 'asr_config' in kwargs and ASR_AVAILABLE:
-        asr.configure_asr_from_dict(kwargs['asr_config'])
-    
-    # Set ASR state based on mode
-    asr_mode = kwargs.get('asr_mode', 'auto-input')
-    
-    # Store ASR mode in shared state for other components to access
-    shared_state.asr_mode = asr_mode
+    shared_state.set_tts_initialized(True, tts_provider)
     
     if ASR_AVAILABLE:
-        if asr_mode != 'off':
+        if shared_state.asr_mode != 'off':
             # Enable ASR in shared state - centralized functions will handle initialization
-            log_message("INFO", f"Enabling ASR for {asr_mode} mode")
+            log_message("INFO", f"Enabling ASR for {shared_state.asr_mode} mode")
             shared_state.set_asr_enabled(True)
         else:
             # Explicitly disable ASR when mode is 'off'
@@ -3134,19 +3337,18 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
             shared_state.set_asr_enabled(False)
     
     # Set up communications if configured
-    if 'comms_config' in kwargs and COMMS_AVAILABLE:
+    if comms_config and COMMS_AVAILABLE:
         global comm_manager
-        config = kwargs['comms_config']
         # Extract enabled providers from config
         providers = []
-        if hasattr(config, 'sms_enabled') and config.sms_enabled:
+        if hasattr(comms_config, 'sms_enabled') and comms_config.sms_enabled:
             providers.append('sms')
-        if hasattr(config, 'whatsapp_enabled') and config.whatsapp_enabled:
+        if hasattr(comms_config, 'whatsapp_enabled') and comms_config.whatsapp_enabled:
             providers.append('whatsapp')
-        if hasattr(config, 'slack_enabled') and config.slack_enabled:
+        if hasattr(comms_config, 'slack_enabled') and comms_config.slack_enabled:
             providers.append('slack')
 
-        comm_manager = comms.setup_communication(providers=providers, config=config)
+        comm_manager = comms.setup_communication(providers=providers, config=comms_config)
         core.comm_manager = comm_manager
         
         # Update shared state with configured providers
@@ -3161,10 +3363,10 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
             shared_state.communication.slack_enabled = has_slack
             
             # Also update recipients/channels if available from config
-            if has_whatsapp and config and hasattr(config, 'whatsapp_recipients') and config.whatsapp_recipients:
-                shared_state.communication.whatsapp_to_number = config.whatsapp_recipients[0]
-            if has_slack and config and hasattr(config, 'slack_channel') and config.slack_channel:
-                shared_state.communication.slack_channel = config.slack_channel
+            if has_whatsapp and comms_config and hasattr(comms_config, 'whatsapp_recipients') and comms_config.whatsapp_recipients:
+                shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
+            if has_slack and comms_config and hasattr(comms_config, 'slack_channel') and comms_config.slack_channel:
+                shared_state.communication.slack_channel = comms_config.slack_channel
             
             # Save the state
             from .state import save_shared_state
@@ -3175,8 +3377,8 @@ async def run_with_talkito(command: List[str], **kwargs) -> int:
         # Run the command
         return await core.run_command(
             command,
-            asr_mode=asr_mode,
-            record_file=kwargs.get('record_file')
+            asr_mode=shared_state.asr_mode,
+            record_file=args.record,
         )
     except KeyboardInterrupt:
         signal_handler(signal.SIGINT)
@@ -3191,5 +3393,3 @@ def wrap_command(command: List[str], **kwargs):
     except KeyboardInterrupt:
         signal_handler(signal.SIGINT)
         return 130  # Standard exit code for SIGINT
-
-

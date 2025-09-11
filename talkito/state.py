@@ -1,10 +1,12 @@
 """Shared state manager for Talkito MCP and wrapper integration ensuring configuration changes made through MCP tools affect the wrapper runtime."""
 
-import threading
+import json
 import os
+import threading
+import time
+
 from typing import Optional, Dict, Any, Callable, List
 from dataclasses import dataclass, field
-import json
 from .logs import log_message
 
 
@@ -462,7 +464,6 @@ def save_shared_state():
 
 def initialize_providers_early(args):
     """Initialize providers early to trigger availability checks and download prompts"""
-    import time
     start_time = time.time()
     log_message("INFO", f"initialize_providers_early called with args: {type(args)} [start_time={start_time}]")
     
