@@ -22,18 +22,12 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
-import os
 import sys
 import threading
 import time
-from typing import Optional
 
 from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
-from . import tts
-from . import asr
-from . import comms
-from .core import run_with_talkito
-from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
+from .state import get_status_summary, show_tap_to_talk_notification_once
 from .logs import log_message
 
 
@@ -255,8 +249,6 @@ def find_talkito_command():
     return "talkito"
 
 
-
-
 def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
     """Initialize Claude integration for talkito"""
     
@@ -343,58 +335,11 @@ def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
     return success
 
 
-async def run_claude_wrapper(args) -> int:
-    """Run Claude with wrapper mode"""
-    cmd = [args.command] + args.arguments
-
-    # Build kwargs for run_with_talkito
-    kwargs = {
-        'verbosity': args.verbose,
-        'asr_mode': args.asr_mode,
-        'record_file': args.record,
-        'auto_skip_tts': not args.dont_auto_skip_tts,  # Auto-skip is on by default, disabled with --dont-auto-skip-tts
-    }
-
-    # Add other configurations...
-    if args.log_file:
-        kwargs['log_file'] = args.log_file
-
-    if args.profile:
-        kwargs['profile'] = args.profile
-    else:
-        kwargs['profile'] = 'claude'
-
-    # Add TTS config
-    log_message("DEBUG", "build_tts_config")
-    tts_config = build_tts_config(args)
-    log_message("DEBUG", "build_tts_config completed")
-    if tts_config:
-        kwargs['tts_config'] = tts_config
-
-    # Add ASR config
-    if asr:
-        asr_config = build_asr_config(args)
-        if asr_config:
-            kwargs['asr_config'] = asr_config
-
-    # Add communications config
-    comms_config = build_comms_config(args)
-    if comms_config:
-        kwargs['comms_config'] = comms_config
-
-    # Handle TTS disable
-    if args.disable_tts:
-        tts.disable_tts = True
-
-    # Use the high-level API from core
-    return await run_with_talkito(cmd, **kwargs)
-
-
-async def run_claude_hybrid(args) -> int:
+async def run_claude_extensions(args) -> int:
     """Run Claude with in-process MCP server and wrapper functionality"""
-    import signal
     from .mcp import app, find_available_port
-    from .tts import stop_tts_immediately
+
+    log_message("DEBUG", "run_claude_hybrid")
     
     # Find available port
     port = args.port if args.port else find_available_port(8000)
@@ -402,77 +347,9 @@ async def run_claude_hybrid(args) -> int:
         print("Error: Could not find an available port", file=sys.stderr)
         return 1
 
-    # Set up logging early if log file specified
-    if args.log_file:
-        from .logs import setup_logging
-        log_start_time = time.time()
-        setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
-        log_message("INFO", f"[CLAUDE_HYBRID] Logging setup completed [{time.time() - log_start_time:.3f}s]")
-    
-    # Set environment variables for provider preferences
-    # Check if the TTS provider is valid first, fall back to system on macOS if not
-    log_message("INFO", f"[CLAUDE_HYBRID] About to process TTS provider: {args.tts_provider}")
-    if args.tts_provider:
-        # Validate the provider before setting it
-        validate_start = time.time()
-        log_message("INFO", f"[CLAUDE_HYBRID] About to validate TTS provider: {args.tts_provider}")
-        provider_valid = tts.validate_provider_config(args.tts_provider)
-        log_message("INFO", f"[CLAUDE_HYBRID] TTS provider validation completed [{time.time() - validate_start:.3f}s] - valid: {provider_valid}")
-        if not provider_valid:
-            import platform
-            if platform.system() == 'Darwin':  # macOS
-                print("Falling back to system TTS provider on macOS")
-                args.tts_provider = 'system'
-                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = 'system'
-            else:
-                # On non-macOS systems, let it fail as before
-                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
-        else:
-            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
-    if args.asr_provider:
-        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
-
-    # Initialize providers early (triggers availability checks and download prompts)
-    init_start_time = time.time()
-    log_message("INFO", f"[CLAUDE_HYBRID] About to call initialize_providers_early [start_time={init_start_time}]")
-    initialize_providers_early(args)
-    init_end_time = time.time()
-    log_message("INFO", f"[CLAUDE_HYBRID] initialize_providers_early completed [{init_end_time - init_start_time:.3f}s]")
-    
-    # Handle backwards compatibility for TTS mode
-    step_start = time.time()
-    tts_mode = args.tts_mode
-    if args.disable_tts:
-        tts_mode = 'off'
-    elif args.dont_auto_skip_tts:
-        tts_mode = 'full'
-    log_message("INFO", f"[CLAUDE_HYBRID] TTS mode configuration completed [{time.time() - step_start:.3f}s]")
-    
-    # Set ASR and TTS modes in shared state so they're available for status display
-    step_start = time.time()
-    from .state import get_shared_state
-    shared_state = get_shared_state()
-    shared_state.asr_mode = args.asr_mode
-    shared_state.tts_mode = tts_mode
-    log_message("INFO", f"[CLAUDE_HYBRID] Shared state configuration completed [{time.time() - step_start:.3f}s]")
-
     # Start MCP server in background thread
     server_ready = threading.Event()
     server_thread = None
-    
-    # Set up signal handler for hybrid mode
-    def hybrid_signal_handler(signum, frame):
-        """Handle signals in hybrid mode - stop TTS immediately"""
-        if signum == signal.SIGINT:
-            try:
-                stop_tts_immediately()
-            except Exception:
-                pass
-            # Exit with conventional SIGINT exit code to avoid race conditions
-            sys.exit(128 + signal.SIGINT)
-    
-    # Install our signal handler
-    original_sigint_handler = signal.signal(signal.SIGINT, hybrid_signal_handler)
     
     def check_port_listening(host='127.0.0.1', check_port=None, timeout=0.1):
         """Check if a port is listening"""
@@ -757,21 +634,12 @@ async def run_claude_hybrid(args) -> int:
         print_configuration_status(args)
         log_message("INFO", "[CLAUDE_HYBRID] print_configuration_status completed")
 
-        # Re-install our signal handler right before running Claude
-        # This ensures it's the last one installed and will be called first
-        signal.signal(signal.SIGINT, hybrid_signal_handler)
-        
-        # Now run Claude using the wrapper approach
-        return await run_claude_wrapper(args)
+        return True
         
     except Exception as e:
-        print(f"Hybrid mode error: {e}")
-        # Fall back to regular wrapper
-        print("Falling back to standard wrapper mode...")
-        return await run_claude_wrapper(args)
-    finally:
-        # Restore original signal handler
-        signal.signal(signal.SIGINT, original_sigint_handler)
+        print(f"Error running TalkiTo Claude extensions: {e}")
+
+        return False
 
 
 def apply_claude_tool_filter():
@@ -804,131 +672,31 @@ def apply_claude_tool_filter():
     app._tool_manager.list_tools = filtered_list_tools
 
 
-# Helper functions needed by the Claude runners
-def build_tts_config(args) -> dict:
-    """Build TTS configuration from command line arguments"""
-    config = {}
-    
-    # Use the actually selected provider from shared state (after consent/validation)
-    # instead of the originally requested provider
-    from .state import get_shared_state
-    shared_state = get_shared_state()
-    selected_provider = shared_state.get_tts_provider()
-    
-    if selected_provider and selected_provider != 'system':
-        config['provider'] = selected_provider
-    elif args.tts_provider:
-        # Fallback to requested provider if no provider was selected yet
-        config['provider'] = args.tts_provider
-    else:
-        # If no provider specified, use the best available one
-        best_provider = tts.select_best_tts_provider()
-        if best_provider != 'system':
-            config['provider'] = best_provider
-    if args.tts_voice:
-        config['voice'] = args.tts_voice
-    if args.tts_region:
-        config['region'] = args.tts_region
-    # Only include language if it's not the default or if a provider is specified
-    if args.tts_language and (args.tts_language != 'en-US' or args.tts_provider):
-        config['language'] = args.tts_language
-    if args.tts_rate is not None:
-        config['rate'] = args.tts_rate
-    if args.tts_pitch is not None:
-        config['pitch'] = args.tts_pitch
-    
-    # Only return config if we have actual values
-    return config if config else None
-
-
-def build_asr_config(args) -> dict:
-    """Build ASR configuration from command line arguments"""
-    config = {}
-    
-    # Use the actually selected provider from shared state (after consent/validation)
-    # instead of the originally requested provider
-    from .state import get_shared_state
-    shared_state = get_shared_state()
-    selected_provider = shared_state.get_asr_provider()
-    
-    if selected_provider and selected_provider != 'google':  # 'google' is the free fallback
-        config['provider'] = selected_provider
-    elif args.asr_provider:
-        # Fallback to requested provider if no provider was selected yet
-        config['provider'] = args.asr_provider
-    else:
-        # If no provider specified, use the best available one
-        if asr:
-            try:
-                best_provider = asr.select_best_asr_provider()
-                if best_provider != 'google':  # 'google' is the free fallback
-                    config['provider'] = best_provider
-            except Exception:
-                pass
-    if args.asr_language:
-        config['language'] = args.asr_language
-    if args.asr_model:
-        config['model'] = args.asr_model
-    
-    return config if config else None
-
-
-def build_comms_config(args) -> Optional[comms.CommsConfig]:
-    """Build communication configuration from command line arguments"""
-    config = comms.create_config_from_env()
-    
-    # Override with command line arguments first
-    if args.sms_recipients:
-        config.sms_recipients = [r.strip() for r in args.sms_recipients.split(',')]
-    if args.whatsapp_recipients:
-        config.whatsapp_recipients = [r.strip() for r in args.whatsapp_recipients.split(',')]
-    if args.slack_channel:
-        config.slack_channel = args.slack_channel
-    if args.webhook_port:
-        config.webhook_port = args.webhook_port
-    
-    # Check if any communication is configured (after applying overrides)
-    has_sms = config.twilio_account_sid and config.sms_recipients
-    has_whatsapp = config.twilio_whatsapp_number and config.whatsapp_recipients
-    has_slack = config.slack_bot_token and config.slack_app_token and config.slack_channel
-    
-    if not any([has_sms, has_whatsapp, has_slack]):
-        # No communication configured
-        return None
-    
-    # Auto-detect based on configuration
-    config.sms_enabled = has_sms
-    config.whatsapp_enabled = has_whatsapp
-    config.slack_enabled = has_slack
-    
-    return config
-
-
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
     # Force state initialization by importing and accessing it
-    from .state import get_shared_state
-    shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
+    # from .state import get_shared_state
+    # shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
     
     # Build comms config to check what's configured
-    comms_config = build_comms_config(args)
-    
-    # Update shared state with configured providers from args/env
-    if comms_config:
-        # Check if providers are configured
-        has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
-        has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
-        
-        # Update shared state
-        shared_state.communication.whatsapp_enabled = has_whatsapp
-        shared_state.communication.slack_enabled = has_slack
-        
-        # Also update recipients/channels
-        if has_whatsapp and comms_config.whatsapp_recipients:
-            shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
-        if has_slack and comms_config.slack_channel:
-            shared_state.communication.slack_channel = comms_config.slack_channel
+    # comms_config = build_comms_config(args)
+    #
+    # # Update shared state with configured providers from args/env
+    # if comms_config:
+    #     # Check if providers are configured
+    #     has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
+    #     has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
+    #
+    #     # Update shared state
+    #     shared_state.communication.whatsapp_enabled = has_whatsapp
+    #     shared_state.communication.slack_enabled = has_slack
+    #
+    #     # Also update recipients/channels
+    #     if has_whatsapp and comms_config.whatsapp_recipients:
+    #         shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
+    #     if has_slack and comms_config.slack_channel:
+    #         shared_state.communication.slack_channel = comms_config.slack_channel
     
     # Show one-time notification about tap-to-talk change if needed
     show_tap_to_talk_notification_once()

@@ -516,6 +516,14 @@ class GoogleFreeProvider(ASRProvider):
         
         def callback(recognizer, audio):
             try:
+                # Check if we should ignore input (e.g., during TTS playback or tap-to-talk not active)
+                with _ignore_input_lock:
+                    should_ignore = _ignore_input
+                
+                if should_ignore:
+                    log_message("DEBUG", "[GOOGLE] Discarding audio segment due to ignore_input flag")
+                    return
+                
                 result = recognizer.recognize_google(
                     audio, 
                     language=self.config.language,
@@ -901,12 +909,21 @@ class HoundifyProvider(ASRProvider):
                 
                 while engine.is_active and not engine.stop_event.is_set():
                     try:
+                        # Check if we should ignore input (e.g., during TTS playback or tap-to-talk not active)
+                        with _ignore_input_lock:
+                            should_ignore = _ignore_input
+                        
                         # Use smaller buffer size like the reference (256 frames = 512 bytes for 16-bit audio)
                         try:
                             audio_data = source.stream.read(512, exception_on_overflow=False)
                         except TypeError:
                             # Fallback for older PyAudio versions
                             audio_data = source.stream.read(512)
+                        
+                        if should_ignore:
+                            log_message("DEBUG", "[HOUNDIFY] Discarding audio segment due to ignore_input flag")
+                            continue  # Skip processing but keep reading to prevent buffer overflow
+                        
                         bytes_sent += len(audio_data)
                         chunks_sent += 1
                         
@@ -1460,7 +1477,7 @@ class FasterWhisperProvider(ASRProvider):
             RATE = 16000
             
             # Optimize transcription window duration based on model size for faster response
-            TRANSCRIPTION_WINDOW_DURATION = 1.1    # 750ms for larger models
+            TRANSCRIPTION_WINDOW_DURATION = 1.1
                 
             # Calculate how many PyAudio frames to accumulate before transcribing
             FRAMES_TO_ACCUMULATE = int(RATE * TRANSCRIPTION_WINDOW_DURATION / CHUNK)
@@ -1547,6 +1564,9 @@ class FasterWhisperProvider(ASRProvider):
 
                                 while "[BLANK_AUDIO]" in text_result:
                                     text_result = text_result.replace("[BLANK_AUDIO]", "").strip()
+
+                                while "[MUSIC PLAYING]" in text_result:
+                                    text_result = text_result.replace("[MUSIC PLAYING]", "").strip()
                                 
                                 log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp final result: text_length={len(text_result)}, segments={segment_count}, content='{text_result}'")
                                 
@@ -1750,9 +1770,9 @@ class FasterWhisperProvider(ASRProvider):
                         if audio_buffer:
                             log_message("INFO", f"[LOCAL_WHISPER] Tap-to-talk released - processing partial segment ({frame_count}/{FRAMES_TO_ACCUMULATE} frames)")
                             
-                            # Pad to at least 1 second of audio to ensure PyWhisperCpp compatibility  
+                            # Pad to the configured transcription window duration for consistency with other segments  
                             current_samples = len(audio_buffer)
-                            min_samples = int(RATE * 1.0)  # 1 second minimum for PyWhisperCpp
+                            min_samples = FRAMES_TO_ACCUMULATE * CHUNK
                             if current_samples < min_samples:
                                 padding_needed = min_samples - current_samples
                                 audio_buffer.extend([0.0] * padding_needed)
@@ -1794,6 +1814,13 @@ class FasterWhisperProvider(ASRProvider):
                         rms_energy_threshold = math.sqrt(sr_energy_threshold / (32768.0 ** 2 * samples_per_transcription_window))
                         
                         if is_tap_to_talk_active or process_remaining_frames or energy_level > rms_energy_threshold:
+                            # Ensure audio segment meets minimum size requirements for whisper
+                            min_samples_required = FRAMES_TO_ACCUMULATE * CHUNK
+                            if len(audio_np) < min_samples_required:
+                                padding_needed = min_samples_required - len(audio_np)
+                                audio_np = np.concatenate([audio_np, np.zeros(padding_needed, dtype=np.float32)])
+                                log_message("DEBUG", f"[LOCAL_WHISPER] Padded audio from {len(audio_np)-padding_needed} to {len(audio_np)} samples ({len(audio_np)/RATE:.1f}s)")
+                            
                             if is_tap_to_talk_active:
                                 log_message("DEBUG", f"[LOCAL_WHISPER] Queueing audio segment (tap-to-talk active): shape={audio_np.shape}, energy={energy_level:.4f}")
                             elif process_remaining_frames:
@@ -2495,10 +2522,14 @@ def is_recognizing() -> bool:
 
 
 # Backward compatibility functions for Talkito
-def configure_asr_from_dict(config_dict: dict) -> bool:
+def configure_asr_from_args(args) -> bool:
     """Backward compatibility function for talkito.py"""
+    config = ASRConfig(
+        provider=args.asr_provider,
+        language=args.asr_language if args.asr_language else 'en-US',
+        model=args.asr_model,
+    )
     try:
-        config = create_config_from_dict(config_dict)
         # Validate the configuration
         provider_class = PROVIDERS.get(config.provider)
         if not provider_class:

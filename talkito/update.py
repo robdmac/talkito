@@ -431,25 +431,6 @@ def check_and_apply_staged_update():
     return False
 
 
-def check_for_updates_now():
-    """Do an immediate update check and log the result"""
-    try:
-        updater = TalkitoUpdater()
-        log_message("INFO", f"Immediate update check (current: {updater.current_version}, method: {updater.get_update_method()})")
-        latest_version, update_available = updater.check_for_updates()
-        
-        if latest_version:
-            if update_available:
-                log_message("INFO", f"Update available: {updater.current_version} -> {latest_version}")
-            else:
-                log_message("INFO", f"Up to date (current: {updater.current_version}, latest: {latest_version})")
-        
-        return latest_version, update_available
-    except Exception as e:
-        log_message("ERROR", f"Failed immediate update check: {e}")
-        return None, False
-
-
 def start_background_update_checker():
     """Start the background update checker (called on startup)"""
     try:
