@@ -22,7 +22,6 @@ import sys
 import time
 from typing import Any
 import asyncio
-import atexit
 import os
 import argparse
 from fastmcp import FastMCP, Context
@@ -49,7 +48,7 @@ except ImportError:
 from . import tts
 from . import comms
 from .comms import SlackProvider, TwilioWhatsAppProvider
-from .core import TalkitoCore, ensure_asr_initialized
+from .core import ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
 
@@ -282,54 +281,13 @@ def _ensure_logging():
             setup_logging(_log_file_path, mode='a')
             log_message("WARNING", "Logging was broken, reinitialized")
 
-def _ensure_initialization():
-    """Ensure TTS system is initialized"""
-    global _shutdown_registered, _core_instance, _comms_manager
-    
-    # Always ensure logging is working first
-    _ensure_logging()
-    
-    shared_state = get_shared_state()
-    
-    if not shared_state.tts_initialized:
-        # Create core instance
-        _core_instance = TalkitoCore(verbosity_level=0)
-        
-        # Log initialization
-        log_message("INFO", "Initializing TTS system")
-        
-        # Select the best available TTS provider
-        best_provider = tts.select_best_tts_provider()
-        
-        if best_provider == 'system':
-            # Use system TTS engine
-            engine = tts.detect_tts_engine()
-            if engine == "none":
-                raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
-            tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
-        else:
-            # Configure and use the selected provider
-            tts_config = {'provider': best_provider}
-            if not tts.configure_tts_from_dict(tts_config):
-                # Fall back to system if configuration fails
-                log_message("WARNING", f"Failed to configure {best_provider}, falling back to system")
-                engine = tts.detect_tts_engine()
-                if engine == "none":
-                    raise RuntimeError("No TTS engine found")
-                tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
-            else:
-                tts.start_tts_worker(best_provider, auto_skip_tts=_auto_skip_tts)
-        
-        shared_state.set_tts_initialized(True, provider=best_provider)
-        log_message("INFO", f"TTS initialized with provider: {tts.tts_provider}")
-        
-        # Register cleanup on exit
-        if not _shutdown_registered:
-            atexit.register(_cleanup)
-            # Don't register signal handlers - let FastMCP handle graceful shutdown
-            # signal.signal(signal.SIGINT, _signal_handler)
-            # signal.signal(signal.SIGTERM, _signal_handler)
-            _shutdown_registered = True
+# def _ensure_initialization():
+#     """Ensure TTS system is initialized"""
+#     # REMOVED: MCP should not handle initialization
+#     # Initialization is handled by CLI/state.py and TTS system automatically
+#     # when speak_text is called. MCP is a passive service that uses
+#     # whatever configuration was already set up.
+#     pass
 
 def _cleanup():
     """Cleanup TTS and ASR resources"""
@@ -755,7 +713,7 @@ async def _enable_tts_internal() -> str:
     """Internal function to enable TTS"""
     try:
         _ensure_logging_restored()
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         
         # Clear any old queued messages before enabling
         tts.clear_speech_queue()
@@ -941,7 +899,7 @@ async def speak_text(text: str, clean_text_flag: bool = True) -> None:
     try:
         global _last_spoken_text, _last_spoken_time
 
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         log_message("INFO", f"speak_text called with text length: {len(text)}, clean_text_flag: {clean_text_flag}")
 
         # Clean text if requested
@@ -989,7 +947,7 @@ async def skip_current_speech() -> str:
         Status message about the skip action
     """
     try:
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         
         if tts.is_speaking():
             current_item = tts.get_current_speech_item()
@@ -1021,7 +979,7 @@ async def stop_all_speech() -> str:
         Status message about the stop action
     """
     try:
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         
         log_message("INFO", "stop_all_speech called")
         
@@ -1046,7 +1004,7 @@ async def get_speech_status() -> dict[str, Any]:
         Dictionary with TTS status information
     """
     try:
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         
         is_speaking = tts.is_speaking()
         current_item = tts.get_current_speech_item()
@@ -1080,7 +1038,7 @@ async def wait_for_speech_completion(timeout: float = 30.0) -> str:
         Status message about completion
     """
     try:
-        _ensure_initialization()
+        # Initialization handled automatically by TTS system
         
         tts.wait_for_tts_to_finish(timeout=timeout)
         result = "All speech completed"
@@ -2792,7 +2750,7 @@ def start_http_api_server(port=None):
             
             try:
                 # Directly use the TTS functionality
-                _ensure_initialization()
+                # Initialization handled automatically by TTS system
                 
                 # Clean text if requested
                 processed_text = text
@@ -3226,12 +3184,6 @@ def main():
         print("=" * 60, file=sys.stderr)
         print("Talkito MCP server is starting...", file=sys.stderr)
         print(f"Transport: {args.transport.upper()}", file=sys.stderr)
-        print("Features:", file=sys.stderr)
-        if args.transport == 'sse':
-            print("  - Server-Sent Events for real-time notifications", file=sys.stderr)
-        print("  - Real-time notifications for incoming messages", file=sys.stderr)
-        print("  - Push notifications for dictation results", file=sys.stderr)
-        print("  - All standard talkito MCP functionality", file=sys.stderr)
         if args.transport == 'sse' and not args.no_http_api:
             print("  - HTTP API with CORS for web access", file=sys.stderr)
         if args.log_file:

@@ -614,13 +614,13 @@ class CommunicationManager:
 
         # Check if this line should be filtered based on verbosity level
         if active_profile.should_skip(line, verbosity_level):
-            log_message("DEBUG", f"#### Filtered buffer line by profile (verbosity={verbosity_level}): '{line[:50]}...'")
+            log_message("DEBUG", f"Filtered buffer line by profile (verbosity={verbosity_level}): '{line[:50]}...'")
             return
 
         cleaned_line = line.replace(" │ │", "").strip().replace("│", "")
         
         if cleaned_line and any(c.isalnum() for c in cleaned_line):
-            log_message("DEBUG", f"#### Added to buffer ({cleaned_line})")
+            log_message("DEBUG", f"Added to buffer ({cleaned_line})")
             self.processed_lines_buffer.append(cleaned_line)
             # Keep buffer size reasonable
             if len(self.processed_lines_buffer) > self.BUFFER_MAX_LINES:
@@ -824,7 +824,7 @@ class CommunicationManager:
                 in_tool_use = shared_state.get_in_tool_use()
             
             if in_tool_use or not self._is_duplicate_message(final_text, channel_key):
-                log_message("DEBUG", f"#### sending final text {len(final_text)} {final_text} to slack")
+                log_message("DEBUG", f"sending final text {len(final_text)} {final_text} to slack")
                 msg = Message(
                     content=final_text,
                     sender=self.config.slack_channel,
@@ -834,7 +834,7 @@ class CommunicationManager:
                 self.output_queue.put(msg)
                 self._add_to_cache(final_text, channel_key)
             else:
-                log_message("INFO", f"#### Recently sent to Slack {self.config.slack_channel}: '{final_text[:50]}...'")
+                log_message("INFO", f"Recently sent to Slack {self.config.slack_channel}: '{final_text[:50]}...'")
     
     def get_input(self, timeout: float = None) -> Optional[str]:
         """Get input from communication channels."""

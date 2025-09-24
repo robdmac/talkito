@@ -205,9 +205,9 @@ class TalkitoState:
                 'asr_enabled': self.asr_enabled,
                 'tts_initialized': self.tts_initialized,
                 'asr_initialized': self.asr_initialized,
-                # Don't persist provider info - let it be determined by CLI args and runtime logic
-                # 'tts_provider': self.tts_provider,
-                # 'asr_provider': self.asr_provider,
+                # Persist provider info for background MCP processes
+                'tts_provider': self.tts_provider,
+                'asr_provider': self.asr_provider,
                 'tts_voice': self.tts_voice,
                 'tts_region': self.tts_region,
                 'tts_language': self.tts_language,
@@ -314,8 +314,11 @@ class SharedStateManager:
                 with open(state_file, 'r') as f:
                     data = json.load(f)
                     # Only load preferences that haven't been explicitly set
-                    # TTS and ASR providers should not be loaded from persistent state
-                    # since they should be determined by command-line args or runtime logic
+                    # Load provider info for background MCP processes
+                    if 'tts_provider' in data:
+                        self.state.tts_provider = data['tts_provider']
+                    if 'asr_provider' in data:
+                        self.state.asr_provider = data['asr_provider']
                     if 'tts_voice' in data:
                         self.state.tts_voice = data['tts_voice']
                     if 'tts_region' in data:
@@ -484,29 +487,35 @@ def initialize_providers_early(args):
     shared_state = get_shared_state()
 
     # Trigger TTS provider selection (this will run availability checks and downloads)
+    # Check both command line args and environment variable (same as ASR)
+    step_start = time.time()
+    requested_tts_provider = None
     if hasattr(args, 'tts_provider') and args.tts_provider:
-        try:
-            step_start = time.time()
-            log_message("INFO", f"Starting TTS provider selection for: {args.tts_provider}")
+        requested_tts_provider = args.tts_provider
+        log_message("INFO", f"Found tts_provider in args: {requested_tts_provider}")
+    preferred = requested_tts_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+    log_message("INFO", f"Starting TTS provider selection for: {preferred}")
+    try:
+        if preferred:
             # Set the requested provider in shared state so select_best_tts_provider knows what was requested
-            shared_state.tts_provider = args.tts_provider
-            selected_tts = tts.select_best_tts_provider()
-            shared_state.tts_provider = selected_tts
-            log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
-            
-            # Start preloading TTS models early for local providers
-            if selected_tts in ['kokoro', 'kittentts']:
-                try:
-                    preload_start = time.time()
-                    log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
-                    tts.preload_local_model(selected_tts)
-                    log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
-                except Exception as preload_e:
-                    log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
-            
-        except Exception as e:
-            log_message("ERROR", f"TTS provider selection failed: {e}")
-            pass  # Continue even if selection fails
+            shared_state.tts_provider = preferred
+        selected_tts = tts.select_best_tts_provider()
+        shared_state.tts_provider = selected_tts
+        log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
+
+        # Start preloading TTS models early for local providers
+        if selected_tts in ['kokoro', 'kittentts']:
+            try:
+                preload_start = time.time()
+                log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
+                tts.preload_local_model(selected_tts)
+                log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
+            except Exception as preload_e:
+                log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
+
+    except Exception as e:
+        log_message("ERROR", f"TTS provider selection failed: {e}")
+        pass  # Continue even if selection fails
     
     # Trigger ASR provider selection (this will run availability checks and downloads)  
     # Check both command line args and environment variable (claude command sets env var)

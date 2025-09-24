@@ -20,14 +20,6 @@
 
 # ruff: noqa: E402
 
-import os
-import argparse
-import asyncio
-import sys
-from typing import List, Optional, Union, Tuple
-
-from .core import run_with_talkito
-
 # Suppress deprecation warnings early
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
@@ -40,22 +32,42 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
 # Try to load .env files if available
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv, set_key
     # Load .env first (takes precedence)
     load_dotenv()
     # Also load .talkito.env (won't override existing vars from .env)
     load_dotenv('.talkito.env')
+    dotenv_available = True
 except ImportError:
     # python-dotenv not installed, continue without it
-    pass
+    dotenv_available = False
+
+import os
+import argparse
+import asyncio
+import json
+import platform
+import signal
+import shutil
+import subprocess
+import sys
+import termios
+import traceback
+import tty
+
+from typing import List, Optional, Union, Tuple
 
 # Import from our package
 from . import __version__
-from . import tts
 from . import asr
-from .core import TalkitoCore
-from .logs import log_message
-from .state import get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
+from . import tts
+from .core import replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
+from .claude import init_claude, run_claude_extensions
+from .logs import log_message, setup_logging
+from .mcp import main as mcp_main
+from .state import get_shared_state, get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
+from .templates import SLACK_BOT_MANIFEST
+from .update import check_and_apply_staged_update, TalkitoUpdater
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -205,9 +217,10 @@ def parse_arguments():
     if not args.profile and args.command:
         args.profile = os.path.basename(args.command)
     
-    # Validate arguments
+    # Validate arguments - show welcome screen if no command provided
     if not args.replay and not args.command and not args.mcp_server and not args.mcp_sse_server and not args.setup_slack and not args.setup_whatsapp and not args.update and not args.force_update:
-        parser.error('Command is required unless using --replay, --mcp-server, --mcp-sse-server, --setup-slack, --setup-whatsapp, --update or init claude')
+        args.show_welcome = True
+        return args
     
     # Check if any command arguments look like talkito options
     if args.command and args.arguments:
@@ -242,7 +255,6 @@ def print_configuration_status(args):
         tts_mode = 'full'
     
     # Set ASR and TTS modes in shared state so they're available for status display
-    from .state import get_shared_state
     shared_state = get_shared_state()
     shared_state.asr_mode = args.asr_mode
     shared_state.tts_mode = tts_mode
@@ -263,11 +275,6 @@ async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
 
-    # Set up logging early if log file specified
-    if args.log_file:
-        from .logs import setup_logging
-        setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
-
     # Set environment variables for provider preferences
     # Check if the TTS provider is valid first, fall back to system on macOS if not
     if args.tts_provider:
@@ -276,7 +283,6 @@ async def run_talkito_command(args) -> int:
         provider_valid = tts.validate_provider_config(args.tts_provider)
         log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
         if not provider_valid:
-            import platform
             if platform.system() == 'Darwin':  # macOS
                 print("Falling back to system TTS provider on macOS")
                 args.tts_provider = 'system'
@@ -286,6 +292,14 @@ async def run_talkito_command(args) -> int:
                 os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
         else:
             os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+
+    # If no ASR provider specified on command line, check environment variable
+    if not args.asr_provider:
+        env_asr_provider = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
+        if env_asr_provider:
+            args.asr_provider = env_asr_provider
+            log_message("INFO", f"Using ASR provider from environment: {env_asr_provider}")
+
     if args.asr_provider:
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
 
@@ -300,7 +314,6 @@ async def run_talkito_command(args) -> int:
         tts_mode = 'full'
 
     # Set ASR and TTS modes in shared state so they're available for status display
-    from .state import get_shared_state
     shared_state = get_shared_state()
     shared_state.asr_mode = args.asr_mode
     shared_state.tts_mode = tts_mode
@@ -309,8 +322,6 @@ async def run_talkito_command(args) -> int:
     if args.command == 'claude':
         log_message("INFO", "Starting claude mode")
         try:
-            # Import Claude-specific functions
-            from .claude import run_claude_extensions
             # Check if MCP is disabled
             log_message("DEBUG", f"Starting claude mode args.disable_mcp {args.disable_mcp}")
             if not args.disable_mcp:
@@ -327,7 +338,6 @@ async def run_talkito_command(args) -> int:
 
 async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
     """Replay a recorded session"""
-    from .core import replay_recorded_session
 
     # Use the command argument as profile name if provided
     command_name = args.command if args.command else None
@@ -354,7 +364,6 @@ async def replay_session(args) -> Union[int, List[Tuple[float, str, int]]]:
 def run_mcp_server():
     """Run the MCP server"""
     try:
-        from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
         # but remove the --mcp-server argument itself
         sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg != '--mcp-server']
@@ -367,7 +376,6 @@ def run_mcp_server():
 def run_mcp_sse_server():
     """Run the MCP server with SSE transport"""
     try:
-        from .mcp import main as mcp_main
         # Pass through the original sys.argv to the MCP server
         # but remove the --mcp-sse-server argument and add --transport sse
         sys.argv = [sys.argv[0]] + ['--transport', 'sse'] + [arg for arg in sys.argv[1:] if arg != '--mcp-sse-server']
@@ -375,22 +383,17 @@ def run_mcp_sse_server():
         mcp_main()
     except ImportError as e:
         print(f"Error: Failed to import MCP server: {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc()
         print("Make sure the MCP SDK is installed: pip install mcp", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Error running MCP server: {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc()
         sys.exit(1)
 
 
 def show_slack_setup():
     """Show instructions for setting up Slack bot"""
-    from .templates import SLACK_BOT_MANIFEST
-    import json
-    import shutil
 
     print("🚀 Talkito Slack Bot Setup Instructions")
     print("=" * 60)
@@ -441,7 +444,6 @@ def show_slack_setup():
     # Check if pbcopy is available on macOS
     if shutil.which('pbcopy'):
         try:
-            import subprocess
             subprocess.run(['pbcopy'], input=SLACK_BOT_MANIFEST.encode(), check=True)
             print("✅ Manifest copied to clipboard! (macOS)")
         except Exception:
@@ -455,6 +457,298 @@ def show_slack_setup():
     # print("  talkito claude")
     # print("  Then: /talkito:start_slack_mode")
     # print()
+
+
+def show_welcome_and_config():
+    """Show welcome screen and configuration menu when talkito is run without a command"""
+
+    # ASCII Header
+    print("""
+╭─────────────────────────────────────────────────────────────╮
+│   ████████╗ █████╗ ██╗     ██╗  ██╗██╗████████╗ ██████╗     │
+│   ╚══██╔══╝██╔══██╗██║     ██║ ██╔╝██║╚══██╔══╝██╔═══██╗    │
+│      ██║   ███████║██║     █████╔╝ ██║   ██║   ██║   ██║    │
+│      ██║   ██╔══██║██║     ██╔═██╗ ██║   ██║   ██║   ██║    │
+│      ██║   ██║  ██║███████╗██║  ██╗██║   ██║   ╚██████╔╝    │
+│      ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝   ╚═╝    ╚═════╝     │
+╰─────────────────────────────────────────────────────────────╯""")
+
+    print("\n🎯 Welcome to TalkiTo! Let's configure your preferred providers.\n")
+
+    # Check current environment variables
+    current_tts = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', 'auto')
+    current_asr = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER', 'auto')
+
+    print(f"Current preferences:\n  TTS Provider: {current_tts}\n  ASR Provider: {current_asr}\n")
+
+    # Check available providers
+    try:
+        asr_available = True
+    except ImportError:
+        asr_available = False
+
+    accessible_tts = tts.check_tts_provider_accessibility()
+    if asr_available:
+        accessible_asr = asr.check_asr_provider_accessibility()
+    else:
+        accessible_asr = {}
+
+    # TTS Configuration with interactive menu
+    tts_choices = ['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'auto']
+    tts_available = []
+
+    for provider in tts_choices:
+        if provider == 'auto':
+            tts_available.append((provider, True, "Let TalkiTo choose automatically"))
+        else:
+            available = accessible_tts.get(provider, {}).get('available', False)
+            note = accessible_tts.get(provider, {}).get('note', '')
+            tts_available.append((provider, available, note))
+
+    new_tts_provider = show_interactive_menu(
+        "TTS Provider",
+        tts_available,
+        current_tts,
+        test_tts_provider if 'test_tts_provider' in globals() else None
+    )
+
+    # ASR Configuration with interactive menu
+    new_asr_provider = None
+    if asr_available:
+        asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'auto']
+        asr_available_list = []
+
+        for provider in asr_choices:
+            if provider == 'auto':
+                asr_available_list.append((provider, True, "Let TalkiTo choose automatically"))
+            else:
+                available = accessible_asr.get(provider, {}).get('available', False)
+                note = accessible_asr.get(provider, {}).get('note', '')
+                asr_available_list.append((provider, available, note))
+
+        new_asr_provider = show_interactive_menu(
+            "ASR Provider",
+            asr_available_list,
+            current_asr,
+            None  # No test function for ASR providers
+        )
+
+    # Save preferences
+    config_file = '.talkito.env'
+    changes_made = False
+
+    if new_tts_provider is not None and new_tts_provider != current_tts:
+        if dotenv_available:
+            if new_tts_provider and new_tts_provider != 'auto':
+                set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', new_tts_provider, quote_mode="never")
+                print(f"✅ Set TTS provider to: {new_tts_provider}")
+            else:
+                # Remove the key for auto selection
+                env_content = ""
+                if os.path.exists(config_file):
+                    with open(config_file, 'r') as f:
+                        env_content = f.read()
+                    # Remove the line containing TALKITO_PREFERRED_TTS_PROVIDER
+                    lines = env_content.split('\n')
+                    new_lines = [line for line in lines if not line.startswith('TALKITO_PREFERRED_TTS_PROVIDER=')]
+                    with open(config_file, 'w') as f:
+                        f.write('\n'.join(new_lines))
+                print("✅ Set TTS provider to: auto")
+            changes_made = True
+        else:
+            print("⚠️  To save preferences, install python-dotenv: pip install python-dotenv")
+            if new_tts_provider and new_tts_provider != 'auto':
+                print(f"   For now, set manually: export TALKITO_PREFERRED_TTS_PROVIDER={new_tts_provider}")
+            else:
+                print("   For now, unset manually: unset TALKITO_PREFERRED_TTS_PROVIDER")
+
+    if asr_available and new_asr_provider is not None and new_asr_provider != current_asr:
+        if dotenv_available:
+            if new_asr_provider and new_asr_provider != 'auto':
+                set_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER', new_asr_provider, quote_mode="never")
+                print(f"✅ Set ASR provider to: {new_asr_provider}")
+            else:
+                # Remove the key for auto selection
+                env_content = ""
+                if os.path.exists(config_file):
+                    with open(config_file, 'r') as f:
+                        env_content = f.read()
+                    # Remove the line containing TALKITO_PREFERRED_ASR_PROVIDER
+                    lines = env_content.split('\n')
+                    new_lines = [line for line in lines if not line.startswith('TALKITO_PREFERRED_ASR_PROVIDER=')]
+                    with open(config_file, 'w') as f:
+                        f.write('\n'.join(new_lines))
+                print("✅ Set ASR provider to: auto")
+            changes_made = True
+        else:
+            if new_asr_provider and new_asr_provider != 'auto':
+                print(f"   For now, set manually: export TALKITO_PREFERRED_ASR_PROVIDER={new_asr_provider}")
+            else:
+                print("   For now, unset manually: unset TALKITO_PREFERRED_ASR_PROVIDER")
+
+    if changes_made:
+        print(f"\n💾 Preferences saved to {config_file}")
+
+    print("\n" + "─" * 65)
+    print("🚀 Quick Start Examples:")
+    print("  talkito echo 'Hello World!'          # Basic TTS demo")
+    print("  talkito --asr-mode auto-input claude # Voice-enabled Claude")
+    print("  talkito --setup-slack                # Setup Slack integration")
+    print("  talkito --setup-whatsapp             # Setup WhatsApp integration")
+    print("\n📚 For more info: talkito --help")
+    print("─" * 65)
+
+
+def show_interactive_menu(title, options, current_choice, test_function=None):
+    """Show an interactive menu with arrow key navigation"""
+
+    def get_key():
+        """Get a single keypress"""
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            key = sys.stdin.read(1)
+            if key == '\x1b':  # ESC sequence
+                key += sys.stdin.read(2)
+            return key
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Find current selection index
+    selected = 0
+    for i, (provider, available, note) in enumerate(options):
+        if provider == current_choice:
+            selected = i
+            break
+
+    # Display menu header
+    print(f"\n═══ {title} Configuration ═══")
+    print(f"{title} selection (Use ↑↓ arrows, Enter to select, 't' to test, 'q' to quit):")
+
+    # Calculate how many lines the menu will take
+    menu_lines = len(options) + 2  # options + controls line + spacing
+
+    # Display initial menu
+    for i, (provider, available, note) in enumerate(options):
+        cursor = "➤ " if i == selected else "  "
+        status = "✅" if available else "❌"
+        current_marker = " (current)" if provider == current_choice else ""
+        test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
+        print(f"{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
+
+    print("\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+
+    while True:
+        # Get user input
+        key = get_key()
+
+        if key == '\x1b[A':  # Up arrow
+            selected = (selected - 1) % len(options)
+            # Move cursor up to start of menu and redraw
+            print(f'\033[{menu_lines}A', end='')  # Move up
+            for i, (provider, available, note) in enumerate(options):
+                cursor = "➤ " if i == selected else "  "
+                status = "✅" if available else "❌"
+                current_marker = " (current)" if provider == current_choice else ""
+                test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
+                print(f"\033[2K{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
+            print("\033[2K\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+
+        elif key == '\x1b[B':  # Down arrow
+            selected = (selected + 1) % len(options)
+            # Move cursor up to start of menu and redraw
+            print(f'\033[{menu_lines}A', end='')  # Move up
+            for i, (provider, available, note) in enumerate(options):
+                cursor = "➤ " if i == selected else "  "
+                status = "✅" if available else "❌"
+                current_marker = " (current)" if provider == current_choice else ""
+                test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
+                print(f"\033[2K{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
+            print("\033[2K\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+
+        elif key == '\x03':  # Ctrl+C
+            print()  # Just move to next line
+            return None
+        elif key == '\r' or key == '\n':  # Enter
+            provider = options[selected][0]
+            available = options[selected][1]
+            if available:
+                print()  # Just move to next line
+                return provider
+            else:
+                print(f"\n❌ {provider} is not available. Please choose an available provider.")
+
+        elif key == 't' or key == 'T':  # Test
+            provider = options[selected][0]
+            available = options[selected][1]
+            if available and provider != 'auto' and test_function:
+                # Just run the test without screen changes
+                try:
+                    test_function(provider)
+                except Exception:
+                    pass  # Test function handles its own output
+            # Do nothing - no screen changes, just continue
+        elif key == 'q' or key == 'Q':  # Quit
+            print()  # Just move to next line
+            return None
+
+
+def test_tts_provider(provider):
+    """Test a TTS provider by speaking a sample phrase"""
+    test_text = f"Hello! This is {provider} text-to-speech."
+
+    if provider == 'system':
+        # Test system TTS
+        if platform.system() == 'Darwin':  # macOS
+            subprocess.run(['say', test_text], check=True)
+        else:
+            # Try espeak, festival, or flite
+            for cmd in ['espeak', 'festival', 'flite']:
+                if subprocess.run(['which', cmd], capture_output=True).returncode == 0:
+                    if cmd == 'espeak':
+                        subprocess.run(['espeak', test_text], check=True)
+                    elif cmd == 'festival':
+                        subprocess.run(['festival', '--tts'], input=test_text.encode(), check=True)
+                    elif cmd == 'flite':
+                        subprocess.run(['flite', '-t', test_text], check=True)
+                    break
+    else:
+        # Test other providers using talkito's TTS system with worker
+
+        # Set temporary environment variable for provider
+        old_provider = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', None)
+        shared_state = get_shared_state()
+        old_state_provider = shared_state.tts_provider
+
+        try:
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = provider
+            shared_state.set_tts_config(provider=provider)
+
+            # For local models, ensure model is preloaded before testing
+            if provider in ['kittentts', 'kokoro']:
+                tts.preload_local_model(provider)
+
+            # Use direct provider approach to avoid worker synchronization issues
+            provider_instance = tts.create_tts_provider(provider)
+            if provider_instance:
+                success = provider_instance.speak(test_text, use_process_control=False)
+                if not success:
+                    raise Exception("TTS synthesis failed")
+            else:
+                raise Exception("Could not create TTS provider")
+
+        finally:
+            pass  # No worker cleanup needed
+
+            # Restore environment and shared state
+            if old_provider is not None:
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = old_provider
+            elif 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
+                del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
+
+            # Restore shared state
+            shared_state.set_tts_config(provider=old_state_provider)
 
 
 def show_whatsapp_setup():
@@ -567,21 +861,21 @@ async def main_async() -> int:
 def main():
     """Main entry point for the CLI"""
     # Install signal handlers early to handle hangs during initialization
-    import signal
-    from .core import signal_handler
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Check and apply any staged updates first
-    from .update import check_and_apply_staged_update
     check_and_apply_staged_update()
 
     # Handle MCP server mode before entering asyncio context
     args = parse_arguments()
 
+    # Set up logging early if log file specified (before any other operations)
+    if args.log_file:
+        setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
+
     # Handle special commands that don't need async
     if hasattr(args, 'init_claude') and args.init_claude:
-        from .claude import init_claude
         success = init_claude()
         sys.exit(0 if success else 1)
 
@@ -594,10 +888,13 @@ def main():
         sys.exit(0)
 
     if hasattr(args, 'show_update') and args.show_update:
-        from .update import TalkitoUpdater
         updater = TalkitoUpdater()
         success = updater.update(force=args.force_update)
         sys.exit(0 if success else 1)
+
+    if hasattr(args, 'show_welcome') and args.show_welcome:
+        show_welcome_and_config()
+        sys.exit(0)
 
     if args.mcp_server:
         run_mcp_server()
