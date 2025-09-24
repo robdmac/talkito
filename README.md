@@ -1,5 +1,14 @@
 # TalkiTo
 
+<div align="center">
+
+[![GitHub Stars](https://img.shields.io/github/stars/robdmac/talkito?style=social)](https://github.com/robdmac/talkito/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/robdmac/talkito?style=social)](https://github.com/robdmac/talkito/network/members)
+[![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=flat-square)](https://github.com/robdmac/talkito/blob/main/LICENSE)
+[![Discord](https://img.shields.io/discord/1420523410513072198?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/WbP58Tym)
+
+</div>
+
 TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be used as a command-line tool, a web extension, and as a Python library.
 
 ## 🚀 Quick Install
