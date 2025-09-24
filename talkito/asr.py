@@ -40,6 +40,7 @@ import numpy as np
 import platform
 import pyaudio
 import math
+import re
 import soundfile as sf
 import time
 import tempfile
@@ -61,6 +62,8 @@ try:
 except ImportError:
     # python-dotenv not installed, continue without it
     pass
+
+SQUARE_BRACKETS_CLEANER = re.compile(r'\[.*?\]')
 
 # Wrapper to add [ASR] prefix to all log messages
 def log_message(level: str, message: str):
@@ -1562,11 +1565,8 @@ class FasterWhisperProvider(ASRProvider):
                                     text_result = str(raw_result)
                                     segment_count = 1 if text_result.strip() else 0
 
-                                while "[BLANK_AUDIO]" in text_result:
-                                    text_result = text_result.replace("[BLANK_AUDIO]", "").strip()
-
-                                while "[MUSIC PLAYING]" in text_result:
-                                    text_result = text_result.replace("[MUSIC PLAYING]", "").strip()
+                                # Remove sound annotations such as [MUSIC] or [CLOCK TICKING]
+                                text_result = SQUARE_BRACKETS_CLEANER.sub('', text_result).strip()
                                 
                                 log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp final result: text_length={len(text_result)}, segments={segment_count}, content='{text_result}'")
                                 
@@ -2011,7 +2011,7 @@ def select_best_asr_provider(preferred=None, excluded_providers=None) -> str:
 
     # Check if preferred provider is accessible, properly configured, and not excluded
     if preferred and preferred in accessible and preferred not in excluded_providers:
-        if accessible[preferred]["note"]:
+        if not accessible[preferred]['available'] and accessible[preferred]["note"]:
             print(accessible[preferred]["note"])
         if accessible[preferred]['available']:
             # Actually validate the provider including imports and configuration
@@ -2038,6 +2038,15 @@ def select_best_asr_provider(preferred=None, excluded_providers=None) -> str:
         else:
             log_message("WARNING", f"ASR provider {provider} failed validation: {import_error}, trying next")
     
+    # Try local_whisper as ultimate fallback before google (if available and not excluded)
+    if 'local_whisper' not in excluded_providers and accessible.get('local_whisper', {}).get('available'):
+        imports_ok, import_error = check_provider_imports('local_whisper', requested_provider='local_whisper')
+        if imports_ok:
+            log_message("INFO", "Falling back to local_whisper ASR provider")
+            return 'local_whisper'
+        else:
+            log_message("WARNING", f"local_whisper ASR provider failed validation: {import_error}")
+
     # Fall back to google if available and not excluded
     if 'google' not in excluded_providers and accessible.get('google', {}).get('available'):
         imports_ok, import_error = check_provider_imports('google', requested_provider='google')
@@ -2046,7 +2055,7 @@ def select_best_asr_provider(preferred=None, excluded_providers=None) -> str:
             return 'google'
         else:
             log_message("WARNING", f"Google ASR provider failed validation: {import_error}")
-    
+
     # Fall back to google_free if google is excluded but google_free isn't
     if 'google_free' not in excluded_providers:
         imports_ok, import_error = check_provider_imports('google_free', requested_provider='google_free')
@@ -2055,7 +2064,7 @@ def select_best_asr_provider(preferred=None, excluded_providers=None) -> str:
             return 'google_free'
         else:
             log_message("WARNING", f"Google free ASR provider failed validation: {import_error}")
-    
+
     # Last resort: return google_free anyway (it should always work)
     log_message("WARNING", "No fully validated ASR providers available, defaulting to google_free")
     return 'google_free'

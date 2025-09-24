@@ -31,7 +31,9 @@ class Profile:
     # Basic settings
     supported: bool
     name: str
+    warning: Optional[str] = None
     writes_partial_output: bool = False
+    needs_full_lines: Optional[bool] = False
     response_prefix: str = '⏺'
     continuation_prefix: Optional[str] = None
     question_prefix: Optional[str] = None
@@ -56,6 +58,7 @@ class Profile:
     # Input handling
     input_start: List[str] = field(default_factory=list)
     input_mic_replace: Optional[str] = None
+    input_speaker_replace: Optional[str] = None
 
     # Compiled patterns (cached)
     _compiled_raw_skip: List[Pattern] = field(default_factory=list, init=False)
@@ -315,7 +318,7 @@ CLAUDE_PROFILE = Profile(
     name='claude',
     response_prefix='⏺',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
-    question_prefix=r'^\s+Do you',
+    question_prefix=r'^\s*[│]\s+Do you',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
         r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
@@ -346,6 +349,7 @@ CLAUDE_PROFILE = Profile(
     ],
     input_start=['>'],
     input_mic_replace='🎤',
+    input_speaker_replace='📢',
 )
 
 
@@ -378,12 +382,14 @@ CODEX_PROFILE = Profile(
     ],
     input_start=[';3H'],
     input_mic_replace=';3H🎤',
+    input_speaker_replace=';3H📢',
 )
 
 
 OPENCODE_PROFILE = Profile(
     supported=False,
     name='opencode',
+    warning="""There's a bit of a performance issue when running with OpenCode due to a lot of redundant processing caused by handling the partial outputs and it noticeably slows down with TalkiTo running. Feel free to flip the supported boolean to True but perhaps don't use the local whisper asr and tts models when using OpenCode.""",
     writes_partial_output=True,
     response_prefix='',
     continuation_prefix=r'^[A-Z][a-z]',
@@ -427,6 +433,8 @@ OPENCODE_PROFILE = Profile(
 AIDER_PROFILE = Profile(
     supported=False,
     name='aider',
+    warning="""Have a problem with how Aider prints its output to the terminal in a non linear fashion.
+Unlikely to be able to support Aider any time soon.""",
     skip_patterns=COMMON_SKIP_PATTERNS + [
         (3, r'^Main model'),
         (3, r'^Editor model'),
@@ -439,6 +447,21 @@ AIDER_PROFILE = Profile(
     prompt_patterns=[
         r'^\s*>\s*$',  # Aider uses simple > prompt
     ],
+)
+
+
+OLLAMA_PROFILE = Profile(
+    supported=True,
+    name='ollama',
+    warning="""Warning: There is a bug where you cannot ctr-c to stop an ongoing response. Still investigating this.""",
+    needs_full_lines=True,
+    skip_patterns=COMMON_SKIP_PATTERNS + [
+        (3, r'Ctrl \+ d')
+    ],
+    prompt_patterns=[
+        r'>>>',
+    ],
+    input_start=['\x1b', '>>>', '>>>'],
 )
 
 
@@ -507,6 +530,7 @@ PROFILES: Dict[str, Profile] = {
     'claude': CLAUDE_PROFILE,
     'codex': CODEX_PROFILE,
     'aider': AIDER_PROFILE,
+    'ollama': OLLAMA_PROFILE,
     'pipet': PIPET_PROFILE,
     'python': PYTHON_PROFILE,
     'mysql': MYSQL_PROFILE,

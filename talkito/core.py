@@ -83,6 +83,7 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mGKHJ]')
 
 RESET = '\033[0m'
 SPACE_THEN_BACK = b'\xc2\xa0\x1b[D'
+# SPACE_THEN_BACK = b' \x08'
 
 # ANSI Key codes
 RETURN = b'\x1b[B\r'
@@ -150,7 +151,35 @@ ANSI_PATTERN = re.compile(
 
 # Precompiled regex patterns for clean_text() function
 ANSI_ESCAPE_PATTERN = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
-ORPHANED_M_PATTERN = re.compile(r'(?<![a-zA-Z0-9\'])m(?![a-zA-Z])')
+# ORPHANED_PATTERN = re.compile(
+#     r"(?<![a-zA-Z0-9'])"                            # not preceded by word char or '
+#     r"(?<!'\s)"                                # also not preceded by apostrophe + space
+#     r"(?!a\b|I\b|s\b|d\b|ll\b|re\b|ve\b|m\b|t\b)"   # don't nuke a, I, or common contractions
+#     r"[a-zA-Z]"                                     # stray letter
+#     r"(?![a-zA-Z])"                                 # not followed by letter
+# )
+
+# 1) ANSI matcher (CSI, OSC BEL/ST, and 2-byte ESC)
+ANSI_INLINE = r'(?:\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07]*\x07|\x1B\][^\x1B]*\x1B\\|\x1B[@-Z\\-_])'
+
+# 2) Repair broken contractions like: Here' <escapes/spaces> s  -> Here's
+#    Covers: 's, 't, 'd, 'm, 've, 're, 'll  (case-insensitive)
+CONTRACTION_REPAIR = re.compile(
+    rf"(?<=[A-Za-z0-9])'(?:(?:\s|{ANSI_INLINE})+)(s|t|d|m|ve|re|ll)\b",
+    re.IGNORECASE
+)
+
+# 3) Strip ANSI after repair
+ANSI_RE = re.compile(ANSI_INLINE)
+
+# 4) Orphaned single-letter filter (don’t remove valid 'a' or 'I' or contraction tails)
+ORPHANED_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9'])"              # not after word char or apostrophe
+    r"(?!a\b|I\b|d\b|ll\b|re\b|ve\b|m\b|t\b)"   # keep real words & contraction tails
+    r"[A-Za-z]"                       # a single stray letter
+    r"(?![A-Za-z])"                   # not followed by a letter
+)
+
 DASH_LINE_PATTERN = re.compile(r'──+')
 ANSI_NUMBER_M_PATTERN = re.compile(r'(?<![a-zA-Z])\d{1,3}m\b')
 
@@ -243,6 +272,7 @@ class TerminalState:
     # Timer for automatic send_pending_text after delay
     pending_text_timer: Optional['threading.Timer'] = None
     pending_text_timer_lock: threading.Lock = field(default_factory=threading.Lock)
+    terminal_write_lock: threading.Lock = field(default_factory=threading.Lock)
 
 @dataclass 
 class ASRState:
@@ -268,6 +298,7 @@ class ASRState:
 # State instances will be created by TalkitoCore
 active_profile: Optional[Profile] = None  # Will be initialized to default profile
 terminal = None  # Will be set by TalkitoCore
+in_code_block = False  # Track if we're inside a code block (```)
 asr_state: ASRState = ASRState()  # Will be set by TalkitoCore
 
 class OutputBuffer:
@@ -519,9 +550,10 @@ def send_pending_text():
 def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
     """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
-    if line_number < terminal.last_line_number and not active_profile.writes_partial_output:
-        log_message("DEBUG", "queue_output skipping previously seen line number")
-    elif text and text.strip():
+    # if line_number < terminal.last_line_number and not active_profile.writes_partial_output:
+    #     log_message("DEBUG", "queue_output skipping previously seen line number")
+    # elif and text.strip():
+    if text and text.strip():
         # Check if TTS is enabled before accumulating text
         shared_state = get_shared_state()
         if not shared_state.tts_enabled:
@@ -579,8 +611,17 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
 def clean_text(text: str) -> str:
     """Strip ANSI escape codes and terminal control sequences"""
 
-    # First, remove all ANSI escape sequences
     text = _trim_after_cursor_move(text)
+    text = text.replace("’", "'")
+
+    text = re.sub(
+        r"(?<=[A-Za-z0-9])'(?:(?:\s|\x1B\[[0-9;?]*[ -/]*[@-~])+)" +
+        r"(s|t|d|m|ve|re|ll)\b",
+        r"'\1",
+        text,
+        flags=re.IGNORECASE
+    )
+
     text = ANSI_CHAR_PATTERN.sub('', text)
     text = ANSI_PATTERN.sub('', text)
     text = ANSI_ESCAPE_PATTERN.sub('', text)
@@ -594,8 +635,7 @@ def clean_text(text: str) -> str:
     # This handles cases where 'm' appears after whitespace or at start of string
     # but NOT when it's part of a word (like 'am', 'pm', 'them', etc.)
     # Also preserve contractions like "I'm", "don't", etc.
-    text = text.replace("'","'")
-    text = ORPHANED_M_PATTERN.sub('', text)
+    text = ORPHANED_PATTERN.sub('', text)
 
     text = DASH_LINE_PATTERN.sub('', text)
 
@@ -664,17 +704,19 @@ def is_duplicate_screen_content(content: str) -> bool:
     return False
 
 
-def modify_prompt_for_asr(data: bytes, input_prompts, input_mic_replace) -> bytes:
+def modify_prompt_for_asr(data: bytes, input_prompts, input_replace) -> bytes:
     """Modify prompt output to show microphone emoji when ASR is active"""
+    if not input_replace:
+        return data
     try:
         text = data.decode('utf-8', errors='ignore')
         for input_prompt in input_prompts:
             if input_prompt in text:
                 # When we find the prompt, mark that we've seen it
                 asr_state.prompt_detected = True
-                text = text.replace(input_prompt, input_mic_replace)
+                text = text.replace(input_prompt, input_replace, 1)
                 return text.encode('utf-8')
-        log_message("WARNING", f"input prompt {input_prompt} not found in text {text}")
+        # log_message("WARNING", f"input prompt {input_prompt} not found in text {text}")
         return data
     except Exception:
         # If any error occurs, return original data
@@ -1063,12 +1105,11 @@ def _process_buffer_and_queue(cleaned_line: str, line: str, buffer: List[str], l
 def process_line(line: str, buffer: List[str], prev_line: str,
                  skip_duplicates: bool = False, line_number: Optional[int] = None, asr_mode: str = "auto-input") -> Tuple[List[str], str, bool]:
     """Process a single line and queue text internally. Returns (new_buffer, new_prev_line, detected_prompt)"""
+    global in_code_block, comm_manager
 
     log_message("DEBUG", f"Processing line: ['{line}']")
 
     cleaned_line = clean_text(line)
-
-
 
     # Check if this is a question line - these should ALWAYS be spoken
     if active_profile and active_profile.is_question_line(cleaned_line):
@@ -1088,6 +1129,15 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         terminal.previous_line_was_queued = False
         terminal.previous_line_was_skipped = False
         terminal.previous_line_was_queued_space_seperated = False
+
+    # Check for code block start/end (```)
+    if cleaned_line.strip().startswith('```'):
+        in_code_block = not in_code_block
+        log_message("DEBUG", f"Code block mode toggled: {in_code_block}")
+
+    # If we're in a code block, send to comms_manager with verbosity 2
+    if in_code_block:
+        return _skip_line_and_return(buffer, line)
 
     if _should_skip_raw_patterns(line):
         log_message("WARNING", f"Skipped by raw pattern: '{line[:MAX_LINE_PREVIEW]}...'")
@@ -1280,13 +1330,39 @@ def process_pending_resize(master_fd):
             return True
     return False
 
-
-async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int, int, asyncio.subprocess.Process]:
-    """Set up PTY and spawn subprocess for command execution"""
-    master_fd = None
-    slave_fd = None
+def _log_tty_and_pgrp_state(master_fd: int, proc: asyncio.subprocess.Process):
+    """Best-effort logging of process groups and TTY foreground owner."""
     try:
-        master_fd, slave_fd, stdin_flags = setup_pty_with_scrollback()
+        parent_pid = os.getpid()
+        parent_pgrp = os.getpgrp()
+    except Exception:
+        parent_pid = -1
+        parent_pgrp = -1
+    try:
+        child_pid = proc.pid
+        child_pgrp = os.getpgid(proc.pid)
+    except Exception:
+        child_pid = -1
+        child_pgrp = -1
+    # Who is the foreground process group for the PTY?
+    try:
+        fg_pgrp = os.tcgetpgrp(master_fd)
+    except Exception:
+        fg_pgrp = -1
+    # Log it
+    log_message("INFO",
+        f"[signals] parent pid={parent_pid} pgrp={parent_pgrp}; "
+        f"child pid={child_pid} pgrp={child_pgrp}; "
+        f"tty.fg_pgrp={fg_pgrp}"
+    )
+
+async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int]:
+    """Set up PTY and spawn subprocess for command execution"""
+    global current_proc, current_master_fd, _original_tty_attrs
+    slave_fd = None
+    _original_tty_attrs = None
+    try:
+        current_master_fd, slave_fd, stdin_flags = setup_pty_with_scrollback()
 
         env = os.environ.copy()
         env['TERM'] = os.environ.get('TERM', 'xterm-256color')
@@ -1294,17 +1370,24 @@ async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int, int, asy
         env['LINES'] = str(rows)
         env['COLUMNS'] = str(cols - 2 if cols > 2 else cols)
 
-        proc = await asyncio.create_subprocess_exec(
+        current_proc = await asyncio.create_subprocess_exec(
             *cmd,
+            # preexec_fn=os.setsid,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
             env=env
         )
-
-        os.close(slave_fd)
-        slave_fd = None  # Mark as closed
-        return master_fd, slave_fd, stdin_flags, proc
+        # os.tcsetpgrp(master_fd, os.getpgrp())
+        # try:
+        #     os.tcsetpgrp(current_master_fd, os.getpgrp())
+        #     log_message("INFO", f"[signals] Foreground pgrp set to parent {os.getpgrp()}")
+        # except Exception as e:
+        #     log_message("ERROR", f"[signals] Failed to tcsetpgrp: {e}")
+        # os.close(slave_fd)
+        # slave_fd = None  # Mark as closed
+        _log_tty_and_pgrp_state(current_master_fd, current_proc)
+        return slave_fd, stdin_flags
     except Exception:
         # Clean up on error
         if slave_fd is not None:
@@ -1312,9 +1395,9 @@ async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int, int, asy
                 os.close(slave_fd)
             except Exception:
                 pass
-        if master_fd is not None:
+        if current_master_fd is not None:
             try:
-                os.close(master_fd)
+                os.close(current_master_fd)
             except Exception:
                 pass
         raise
@@ -1516,60 +1599,101 @@ def get_visual_length(text):
     # but it should work for our use case
     return len(text_no_zwc)
 
+def trim_to_visual_length(text: str, target_len: int) -> str:
+    """
+    Trim `text` so its visual length (excluding ANSI & zero-width chars)
+    is <= target_len. Preserves all ANSI codes from ANSI_PATTERN.
+    """
+    result = []
+    visual_len = 0
+    i = 0
+    while i < len(text) and visual_len < target_len:
+        # Match any ANSI sequence
+        match = ANSI_PATTERN.match(text, i)
+        if match:
+            result.append(match.group())
+            i = match.end()
+            continue
+
+        char = text[i]
+        if char in ('\u200b', '\u200c', '\u200d'):
+            # Zero-width char, keep but don’t count
+            result.append(char)
+        else:
+            # Normal character (incl. NBSP)
+            result.append(char)
+            visual_len += 1
+        i += 1
+
+    return ''.join(result)
+
+
+def pad_to_visual_length(text: str, target_len: int, pad_char: str = ' ') -> str:
+    """
+    Pad `text` so its visual length == target_len.
+    ANSI codes and zero-width chars are preserved.
+    """
+    current_len = get_visual_length(text)
+    if current_len >= target_len:
+        return text
+    else:
+        return text + (pad_char * (target_len - current_len))
 
 def insert_partial_transcript(data_str, asr_state, active_profile):
     """Insert the partial transcript into the terminal output while preserving formatting. Returns modified data_str."""
     # Find the input start position
-    start_idx = -1
-    if active_profile and active_profile.input_start:
-        for input_start in active_profile.input_start:
-            start_idx = data_str.find(input_start)
-            if start_idx != -1:
-                start_idx += len(input_start)
+    active_input_start = active_profile.input_start[0]
+    if active_input_start not in data_str and len(active_profile.input_start) > 1 and active_profile.input_start[1] in data_str:
+        active_input_start = active_profile.input_start[1]
+    log_message("DEBUG", f"active_input_start = {active_input_start}")
+    start_idx = data_str.find(active_input_start) if active_input_start else -1
+    end_idx = -1
+    if start_idx != -1:
+        start_idx += len(active_input_start)
 
-                # Find the right border on the same line as the input
-                # Look for the next │ after the input start
-                line_end = data_str.find('\r\n', start_idx)
-                if line_end == -1:
-                    line_end = len(data_str)
+        # Find the right border on the same line as the input
+        # Look for the next │ after the input start
+        line_end = data_str.find('\r\n', start_idx)
+        if line_end == -1:
+            line_end = len(data_str)
 
-                # Find the rightmost │ before the line end
-                search_area = data_str[start_idx:line_end]
-                right_border_pos = search_area.rfind('│')
-                if right_border_pos != -1:
-                    # Check for ANSI codes before the │
-                    # Look backwards from the pipe to find where ANSI sequences start
-                    check_start = max(0, right_border_pos - 20)
-                    before_pipe = search_area[check_start:right_border_pos]
+        # Find the rightmost │ before the line end
+        search_area = data_str[start_idx:line_end]
+        right_border_pos = search_area.rfind('│')
+        if right_border_pos != -1:
+            # Check for ANSI codes before the │
+            # Look backwards from the pipe to find where ANSI sequences start
+            check_start = max(0, right_border_pos - 20)
+            before_pipe = search_area[check_start:right_border_pos]
 
-                    # Find all ANSI escape sequences
-                    ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
+            # Find all ANSI escape sequences
+            ansi_matches = list(re.finditer(r'\x1b\[[0-9;]*m', before_pipe))
 
-                    if ansi_matches:
-                        # Find the position where continuous ANSI codes start before the pipe
-                        last_ansi_end = len(before_pipe)
-                        for match in reversed(ansi_matches):
-                            if match.end() == last_ansi_end:
-                                # This ANSI code is adjacent to the previous one (or to the pipe)
-                                last_ansi_end = match.start()
-                            else:
-                                # There's a gap, so ANSI codes are not continuous to the pipe
-                                break
-
-                        if last_ansi_end < len(before_pipe):
-                            # We found ANSI codes that continue to the pipe
-                            end_idx = start_idx + check_start + last_ansi_end
-                        else:
-                            # No continuous ANSI codes before pipe
-                            end_idx = start_idx + right_border_pos
+            if ansi_matches:
+                # Find the position where continuous ANSI codes start before the pipe
+                last_ansi_end = len(before_pipe)
+                for match in reversed(ansi_matches):
+                    if match.end() == last_ansi_end:
+                        # This ANSI code is adjacent to the previous one (or to the pipe)
+                        last_ansi_end = match.start()
                     else:
-                        # No ANSI codes before pipe
-                        end_idx = start_idx + right_border_pos
+                        # There's a gap, so ANSI codes are not continuous to the pipe
+                        break
+
+                if last_ansi_end < len(before_pipe):
+                    # We found ANSI codes that continue to the pipe
+                    end_idx = start_idx + check_start + last_ansi_end
                 else:
-                    # Fallback to finding any │ after start
-                    end_idx = data_str.find('│', start_idx)
-                    if end_idx == -1:
-                        end_idx = line_end
+                    # No continuous ANSI codes before pipe
+                    end_idx = start_idx + right_border_pos
+            else:
+                # No ANSI codes before pipe
+                end_idx = start_idx + right_border_pos
+        else:
+            # Fallback to finding any │ after start
+            end_idx = data_str.find('│', start_idx)
+            if end_idx == -1:
+                end_idx = line_end
     else:
         start_idx = 0  # Fallback if start not in this chunk
 
@@ -1586,9 +1710,9 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
     clean_input = ''
     i = 0
     while i < len(input_area):
-        if input_area[i] == '\x1b' and ANSI_INPUT_PATTERN.match(input_area[i:]):
+        if input_area[i] == '\x1b' and re.match(r'\x1b\[[0-9;]*[mGKHJ]', input_area[i:]):
             # Skip the ANSI sequence
-            match = ANSI_INPUT_PATTERN.match(input_area[i:])
+            match = re.match(r'\x1b\[[0-9;]*[mGKHJ]', input_area[i:])
             i += len(match.group())
         else:
             clean_input += input_area[i]
@@ -1647,16 +1771,9 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
         # if len(partial_to_show) > remaining_space - 1:  # Leave room for '…'
         #     partial_to_show = partial_to_show[:remaining_space - 1] + '…'
 
-        input_start_len = 0
-        matched_start = ""
-        if active_profile and active_profile.input_start:
-            for input_start in active_profile.input_start:
-                idx = data_str.find(input_start)
-                if idx != -1:
-                    input_start_len = len(input_start)
-                    matched_start = input_start
-                    break
-        before_input = data_str[:start_idx - input_start_len] if input_start_len else data_str
+        # Work only within the input line boundaries
+        input_start_len = len(active_input_start) if active_input_start else 0
+        before_input = data_str[:start_idx - input_start_len]
 
         input_content = data_str[start_idx:end_idx]
         after_input = data_str[end_idx:]
@@ -1669,8 +1786,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
         # Debug: Show what we're working with
         log_message("DEBUG", f"Relative pos: {relative_pos}, cursor at: {cursor_marker_start}")
-        log_message("DEBUG",
-                    f"Content at insert point: {repr(input_content[max(0, relative_pos - 5):relative_pos + 10])}")
+        log_message("DEBUG", f"Content at insert point: {repr(input_content[max(0, relative_pos - 5):relative_pos + 10])}")
 
         # Check if relative_pos falls inside an ANSI escape sequence
         i = 0
@@ -1722,8 +1838,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
                 result += char
                 i += 1
                 continue
-            elif char == ' ' and visual_spaces_removed < visual_partial_length:
-                # This is a space we should remove
+            elif char in (' ', '\xa0') and visual_spaces_removed < visual_partial_length:
                 visual_spaces_removed += 1
                 i += 1
                 continue
@@ -1740,22 +1855,20 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
                     f"Visual spaces to remove: {visual_partial_length}, actually removed: {visual_spaces_removed}")
         log_message("DEBUG",
                     f"Visual length check - partial: {visual_partial_length}, new_input visual: {get_visual_length(new_input)}, original visual: {get_visual_length(input_content)}")
-
         # Debug the result
         log_message("DEBUG", f"Result at insert point: {repr(new_input[max(0, relative_pos - 5):relative_pos + 15])}")
 
-        # Ensure we maintain the exact same length
-        if len(new_input) > len(input_content):
-            new_input = new_input[:len(input_content)]
-        elif len(new_input) < len(input_content):
-            # Pad at the end if needed
-            new_input += ' ' * (len(input_content) - len(new_input))
+        #target_visual_len = get_visual_length(input_content)
+        target_visual_len = min(get_visual_length(partial_to_show), remaining_space)
+        new_input = trim_to_visual_length(new_input, target_visual_len)
+        new_input = pad_to_visual_length(new_input, target_visual_len)
 
         # Reconstruct the full string
-        data_str = before_input + matched_start + new_input + after_input
+        data_str = before_input + active_input_start + new_input + after_input
 
-        log_message("DEBUG", f"Input area update: old_len={len(input_content)}, new_len={len(new_input)}")
+        log_message("DEBUG", f"Input area update: old_visual={get_visual_length(input_content)}, new_visual={get_visual_length(new_input)}")
         log_message("DEBUG", f"Inserted partial transcript: '{partial_to_show}' at position {insert_pos}")
+        log_message("DEBUG", f"data_str now [{repr(data_str)}]")
     else:
         log_message("DEBUG", "No space available for partial transcript")
 
@@ -1764,7 +1877,7 @@ def insert_partial_transcript(data_str, asr_state, active_profile):
 
 def handle_partial_transcript(text: str):
     """Handle partial transcript from streaming ASR"""
-    log_message("INFO", f"[ASR PARTIAL] Received partial transcript: '{text}'")
+    log_message("INFO", f"[ASR PARTIAL] handle_partial_transcript Received partial transcript: '{text}'")
     if not asr_state.partial_enabled:
         return
 
@@ -1785,9 +1898,9 @@ def handle_partial_transcript(text: str):
             else:
                 # First partial or other cases - use the original SPACE_THEN_BACK
                 os.write(current_master_fd, SPACE_THEN_BACK)
-                log_message("DEBUG", "Using SPACE_THEN_BACK for partial transcript refresh")
+                log_message("DEBUG", "handle_partial_transcriptUsing SPACE_THEN_BACK for partial transcript refresh")
         except Exception as e:
-            log_message("ERROR", f"Failed to trigger screen update: {e}")
+            log_message("ERROR", f"handle_partial_transcript Failed to trigger screen update: {e}")
 
 
 def handle_dictated_text(text: str):
@@ -2239,15 +2352,9 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     global current_master_fd, current_proc, _original_tty_attrs
 
     # Initialize to ensure cleanup on error
-    master_fd = None
-    proc = None
-    
     try:
         # Set up terminal and spawn process
-        master_fd, slave_fd, stdin_flags, proc = await setup_terminal_for_command(cmd)
-        # Immediately assign to global to ensure cleanup
-        current_master_fd = master_fd
-        current_proc = proc
+        slave_fd, stdin_flags = await setup_terminal_for_command(cmd)
         
         # Initialize recorder if requested
         recorder = SessionRecorder(record_file)
@@ -2290,27 +2397,25 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         # For periodic status updates
         last_status_check = 0
 
-        old_tty_attrs = None
         if sys.stdin.isatty():
-            old_tty_attrs = termios.tcgetattr(sys.stdin)
+            _original_tty_attrs = termios.tcgetattr(sys.stdin)
             # Store globally for signal handler
-            _original_tty_attrs = old_tty_attrs
             tty.setraw(sys.stdin.fileno())
 
         # Main processing loop
         while True:
-            if process_pending_resize(master_fd):
+            if process_pending_resize(current_master_fd):
                 continue
                 
             # Periodic status update for dictation indicator and auto-listen check
             enabled_auto_listen, last_status_check = await periodic_status_check(
-                master_fd, asr_mode, last_status_check)
+                current_master_fd, asr_mode, last_status_check)
 
             # Check if we need to write buffered data
             wlist = [sys.stdout] if len(stdout_buffer) > 0 else []
             
             # Reduced timeout from 0.01 to 0.001 for better responsiveness
-            rlist, wlist_ready, _ = select.select([sys.stdin, master_fd], wlist, [], 0.001)
+            rlist, wlist_ready, _ = select.select([sys.stdin, current_master_fd], wlist, [], 0.001)
             
             # Try to flush buffered output if stdout is writable
             if sys.stdout in wlist_ready:
@@ -2380,15 +2485,15 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         if input_data:
                             recorder.record_event('INPUT', input_data)
                             # Forward to PTY
-                            await async_write(master_fd, input_data)
+                            await async_write(current_master_fd, input_data)
                     except (BlockingIOError, OSError):
                         pass
                 else:
-                    await handle_stdin_input(master_fd, asr_mode)
+                    await handle_stdin_input(current_master_fd, asr_mode)
 
-            if master_fd in rlist or enabled_auto_listen:
+            if current_master_fd in rlist or enabled_auto_listen:
                 try:
-                    data = await async_read(master_fd, PTY_READ_SIZE)
+                    data = await async_read(current_master_fd, PTY_READ_SIZE)
                     if not data:
                         break
 
@@ -2445,7 +2550,6 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
                     # Display partial transcript if available and we're in input area
                     if asr_state.current_partial and in_input:
-                        log_message("DEBUG", f"partial_needs_display {asr_state.current_partial}")
                         data_str = insert_partial_transcript(data_str, asr_state, active_profile)
                         # data_str = data_str.replace('\u200b', ' '*len(asr_state.current_partial))
 
@@ -2457,9 +2561,13 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     # Show microphone emoji if ASR is active
                     show_mic_for_auto = asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input()
                     show_mic_for_tap_to_talk = asr_mode == "tap-to-talk" and asr_state.tap_to_talk_active
-                    
+
+                    # log_message("DEBUG", f"modify_prompt_for_asr against output_data {output_data}")
                     if show_mic_for_auto or show_mic_for_tap_to_talk:
                         output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
+                    # elif tts.is_speaking():
+                    #     output_data = modify_prompt_for_asr(output_data, active_profile.input_start,
+                    #                                         active_profile.input_speaker_replace)
 
                     # Try direct write first
                     try:
@@ -2510,12 +2618,12 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     log_message("ERROR", f"Unexpected error in PTY read loop: {e}")
                     log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
-            if proc.returncode is not None:
+            if current_proc.returncode is not None:
                 if recorder.enabled:
                     # In record mode, drain and record any remaining output
                     try:
                         while True:
-                            data = await async_read(master_fd, PTY_READ_SIZE)
+                            data = await async_read(current_master_fd, PTY_READ_SIZE)
                             if not data:
                                 break
                             recorder.record_event('OUTPUT', data)
@@ -2544,7 +2652,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     except Exception:
                         pass
                 else:
-                    await drain_pty_output(master_fd, line_buffer)
+                    await drain_pty_output(current_master_fd, line_buffer)
                 break
 
         # Process any remaining content after main loop exits
@@ -2591,8 +2699,8 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         # Save recorded data
         recorder.save()
 
-        if proc:
-            await proc.wait()
+        if current_proc:
+            await current_proc.wait()
         
         # Restore stdout to blocking mode
         try:
@@ -2610,33 +2718,33 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         except Exception as e:
             log_message("ERROR", f"Error restoring stdout: {e}")
 
-        return proc.returncode if proc else 1
+        return current_proc.returncode if current_proc else 1
 
     finally:
         # Clean up process if still running
-        if proc is not None and proc.returncode is None:
+        if current_proc is not None and current_proc.returncode is None:
             try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                current_proc.terminate()
+                await asyncio.wait_for(current_proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                current_proc.kill()
+                await current_proc.wait()
             except Exception as e:
                 log_message("ERROR", f"Failed to terminate process: {e}")
         current_proc = None
         
         # Close PTY file descriptor if it was opened
-        if master_fd is not None:
+        if current_master_fd is not None:
             try:
-                os.close(master_fd)
+                os.close(current_master_fd)
                 log_message("INFO", "Closed master_fd in finally block")
             except Exception as e:
                 log_message("ERROR", f"Failed to close master_fd: {e}")
             current_master_fd = None
         
-        if old_tty_attrs is not None:
+        if _original_tty_attrs is not None:
             try:
-                termios.tcsetattr(sys.stdin, termios.TCSANOW, old_tty_attrs)
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, _original_tty_attrs)
                 log_message("INFO", "Restored terminal attributes in finally block")
             except Exception as e:
                 log_message("ERROR", f"Failed to restore terminal attributes in finally: {e}")
@@ -2650,8 +2758,9 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         
         # Ensure cursor is visible
         try:
-            sys.stdout.write('\033[?25h')  # Show cursor
-            sys.stdout.flush()
+            with terminal.terminal_write_lock:
+                sys.stdout.write('\033[?25h')  # Show cursor
+                sys.stdout.flush()
         except Exception:
             pass
 
@@ -2689,10 +2798,18 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         except Exception:
             pass
     
-    while b'\n' in line_buffer and not detected_prompt:
+    while len(line_buffer) > 0:
         nl_pos = line_buffer.find(b'\n')
-        line_bytes = line_buffer[:nl_pos]
-        line_buffer = line_buffer[nl_pos + 1:]
+        if nl_pos == -1:
+            if active_profile.needs_full_lines:
+                break
+            # No newline found, process remaining buffer and exit
+            line_bytes = line_buffer
+            line_buffer = b''
+        else:
+            # Newline found, process line and continue
+            line_bytes = line_buffer[:nl_pos]
+            line_buffer = line_buffer[nl_pos + 1:]
         
         line = line_bytes.decode('utf-8', errors='ignore')
 
@@ -2705,10 +2822,10 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             log_message("INFO", f"Processing line {line_idx} (action={action}, row={cursor_row}): '{line.strip()}'")
         
         # Check if this is a Ctrl-C prompt from Claude
-        if "Press Ctrl-C again to exit" in line:
-            log_message("INFO", "Detected Ctrl-C prompt - stopping all TTS")
-            # Use skip_all instead of stop_tts_immediately to avoid shutting down the TTS system
-            tts.skip_all()
+        # if "Press Ctrl-C again to exit" in line:
+        #     log_message("INFO", "Detected Ctrl-C prompt - stopping all TTS")
+        #     # Use skip_all instead of stop_tts_immediately to avoid shutting down the TTS system
+        #     tts.skip_all()
         
         # Only process lines that have been added or modified
         if action in ['added', 'modified']:
@@ -2730,7 +2847,7 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             asr_state.refresh_spaces_added = 0  # Reset refresh spaces for new prompt
             log_message("INFO", "Detected prompt")
             check_and_enable_auto_listen(asr_mode)
-    
+
     return line_buffer, text_buffer, prev_line, cursor_row, detected_prompt
 
 
@@ -2764,8 +2881,9 @@ def cleanup_terminal():
     
     # Also ensure cursor is visible
     try:
-        sys.stdout.write('\033[?25h')  # Show cursor
-        sys.stdout.flush()
+        with terminal.terminal_write_lock:
+            sys.stdout.write('\033[?25h')  # Show cursor
+            sys.stdout.flush()
     except Exception:
         pass
     
@@ -2783,6 +2901,11 @@ atexit.register(cleanup_terminal)
 
 def signal_handler(signum, frame=None):
     """Handle shutdown signals"""
+    global current_proc
+    try:
+        log_message("INFO", f"[signals] Handler fired: signum={signum} pid={os.getpid()} pgrp={os.getpgrp()}")
+    except Exception:
+        pass
     log_message("INFO", f"Received signal {signum} - stopping TTS immediately")
     # For Ctrl-C, implement a fast exit path
     if signum == signal.SIGINT:
@@ -2792,20 +2915,28 @@ def signal_handler(signum, frame=None):
                 termios.tcsetattr(sys.stdin, termios.TCSANOW, _original_tty_attrs)
             except Exception:
                 pass
-        
+
         # Ensure cursor is visible
         try:
-            sys.stdout.write('\033[?25h')  # Show cursor
-            sys.stdout.flush()
+            with terminal.terminal_write_lock:
+                sys.stdout.write('\033[?25h')  # Show cursor
+                sys.stdout.flush()
         except Exception:
             pass
-        
+
+        if current_proc:
+            try:
+                # Forcefully kill Ollama’s process group
+                os.killpg(os.getpgid(current_proc.pid), signal.SIGKILL)
+            except Exception as e:
+                log_message("ERROR", f"Failed to kill child: {e}")
+
         # Stop TTS immediately
         try:
             stop_tts_immediately()
         except Exception as e:
             log_message("ERROR", f"Failed to stop TTS immediately: {e}")
-        
+
         # Quick ASR cleanup to prevent model destructor errors
         if ASR_AVAILABLE:
             try:
@@ -2813,10 +2944,18 @@ def signal_handler(signum, frame=None):
                 asr.stop_dictation()  # This will call _cleanup_whisper_model()
             except Exception:
                 pass
-        
+
+        try:
+            # Send SIGINT to the child's process group
+            os.killpg(os.getpgid(current_proc.pid), signal.SIGINT)
+            log_message("INFO", f"Forwarded SIGINT to child pid {current_proc.pid}")
+            return
+        except Exception as e:
+            log_message("ERROR", f"Failed to forward SIGINT: {e}")
+
         # Quick terminal cleanup
         cleanup_terminal()
-        
+
         # Exit immediately with SIGINT code
         os._exit(130)  # type: ignore[attr-defined]
     
@@ -2831,8 +2970,9 @@ def signal_handler(signum, frame=None):
     
     # Ensure cursor is visible
     try:
-        sys.stdout.write('\033[?25h')  # Show cursor
-        sys.stdout.flush()
+        with terminal.terminal_write_lock:
+            sys.stdout.write('\033[?25h')  # Show cursor
+            sys.stdout.flush()
     except Exception:
         pass
     
@@ -3257,12 +3397,16 @@ async def run_with_talkito(command: List[str], args) -> int:
         Exit code of the command
     """
     # Set up signal handlers (if not already installed)
-    current_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGINT, current_sigint)  # Restore current handler
-    if current_sigint == signal.SIG_DFL:
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGWINCH, debounced_winch_handler)
+    try:
+        current_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, current_sigint)  # Restore current handler
+        if current_sigint == signal.SIG_DFL:
+            log_message("DEBUG", "Installing signal handlers at the start of run_with_talkito")
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGWINCH, debounced_winch_handler)
+    except Exception as e:
+        log_message("ERROR", f"Failed to re-install signal handlers: {e}")
 
     # Handle TTS disable
     if args.disable_tts:
@@ -3281,8 +3425,13 @@ async def run_with_talkito(command: List[str], args) -> int:
         core.active_profile = profile
 
     if not profile.supported:
-        print(f"Sorry, TalkiTo does not support {args.profile}. Please get in touch with me if you want to help resolve this.")
+        print(f"Sorry, TalkiTo does not currently work with {profile.name}.")
+        if profile.warning:
+            print("\n"+profile.warning+"\n")
+        print("Please get in touch with me if you want to help resolve this!")
         exit(0)
+    elif profile.warning:
+        print(profile.warning)
     
     # Ensure we have at least a default profile
     if core.active_profile is None:

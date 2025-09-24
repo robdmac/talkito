@@ -33,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import warnings
 from collections import deque
 from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
@@ -42,6 +43,8 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
+
+from .state import get_shared_state
 
 # Import centralized logging utilities
 try:
@@ -97,13 +100,6 @@ def patch_phonemizer_espeak_api():
 
 # Call this BEFORE importing KittenTTS/Kokoro/etc.
 patch_phonemizer_espeak_api()
-
-# Import shared state
-try:
-    from .state import get_shared_state
-    SHARED_STATE_AVAILABLE = True
-except ImportError:
-    SHARED_STATE_AVAILABLE = False
 
 # Try to load .env files if available
 try:
@@ -295,11 +291,9 @@ def preload_local_model(provider: str):
                     
                     # Update shared state with fallback provider
                     try:
-                        if SHARED_STATE_AVAILABLE:
-                            from .state import get_shared_state
-                            shared_state = get_shared_state()
-                            shared_state.set_tts_config(provider=fallback_provider)
-                            log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                        shared_state = get_shared_state()
+                        shared_state.set_tts_config(provider=fallback_provider)
+                        log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
                     except Exception as e:
                         log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
                     
@@ -316,11 +310,9 @@ def preload_local_model(provider: str):
                     
                     # Update shared state with fallback provider
                     try:
-                        if SHARED_STATE_AVAILABLE:
-                            from .state import get_shared_state
-                            shared_state = get_shared_state()
-                            shared_state.set_tts_config(provider=fallback_provider)
-                            log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+                        shared_state = get_shared_state()
+                        shared_state.set_tts_config(provider=fallback_provider)
+                        log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
                     except Exception as e:
                         log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
                     
@@ -342,6 +334,8 @@ def preload_local_model(provider: str):
 
 def get_cached_local_model(provider: str, timeout: float = 10.0):
     """Get cached local model, waiting for background loading if needed."""
+    global _local_model_cache, _local_model_provider, _local_model_loading, _local_model_error
+
     start_time = time.time()
     need_to_preload = False
 
@@ -351,11 +345,21 @@ def get_cached_local_model(provider: str, timeout: float = 10.0):
             if _local_model_error and not _local_model_loading:
                 print(f"Error loading {provider} model: {_local_model_error}")
                 return None
-            
+
             # Check if we have the right model cached
             if _local_model_provider == provider and _local_model_cache is not None:
                 return _local_model_cache
-            
+
+            # If we have a different provider cached, clear it to load the new one
+            if (_local_model_provider is not None and
+                _local_model_provider != provider and
+                _local_model_cache is not None and
+                not _local_model_loading):
+                log_message("INFO", f"Switching from {_local_model_provider} to {provider}, clearing cache")
+                _local_model_cache = None
+                _local_model_provider = None
+                _local_model_error = None
+
             # Check if not loading and not cached - this means no one started loading
             if not _local_model_loading:
                 print(f"{provider} model not loaded and no background loading in progress. Starting now...")
@@ -374,45 +378,44 @@ def get_cached_local_model(provider: str, timeout: float = 10.0):
 
 def get_tts_config():
     """Get TTS configuration from shared state or module globals."""
-    if SHARED_STATE_AVAILABLE:
-        try:
-            state = get_shared_state()
-            config = {
-                'provider': state.tts_provider or tts_provider,
-                'voice': None,
-                'region': None,
-                'language': None,
-                'rate': state.tts_rate,
-                'pitch': state.tts_pitch
-            }
-            
-            # Map provider-specific voice settings
-            if state.tts_provider == 'openai':
-                config['voice'] = state.tts_voice or openai_voice
-            elif state.tts_provider in ['aws', 'polly']:
-                config['voice'] = state.tts_voice or polly_voice
-                config['region'] = state.tts_region or polly_region
-            elif state.tts_provider == 'azure':
-                config['voice'] = state.tts_voice or azure_voice
-                config['region'] = state.tts_region or azure_region
-            elif state.tts_provider == 'gcloud':
-                config['voice'] = state.tts_voice or gcloud_voice
-                config['language'] = state.tts_language or gcloud_language_code
-            elif state.tts_provider == 'elevenlabs':
-                config['voice'] = state.tts_voice or elevenlabs_voice_id
-            elif state.tts_provider == 'deepgram':
-                config['voice'] = state.tts_voice or deepgram_voice_model
-            elif state.tts_provider == 'kittentts':
-                config['voice'] = state.tts_voice or kittentts_voice
-                config['model'] = state.tts_model or kittentts_model
-            elif state.tts_provider == 'kokoro':
-                config['voice'] = state.tts_voice or kokoro_voice
-                config['language'] = state.tts_language or kokoro_language
-                config['speed'] = float(state.tts_rate or kokoro_speed)
-            
-            return config
-        except Exception:
-            pass
+    try:
+        state = get_shared_state()
+        config = {
+            'provider': state.tts_provider or tts_provider,
+            'voice': None,
+            'region': None,
+            'language': None,
+            'rate': state.tts_rate,
+            'pitch': state.tts_pitch
+        }
+
+        # Map provider-specific voice settings
+        if state.tts_provider == 'openai':
+            config['voice'] = state.tts_voice or openai_voice
+        elif state.tts_provider in ['aws', 'polly']:
+            config['voice'] = state.tts_voice or polly_voice
+            config['region'] = state.tts_region or polly_region
+        elif state.tts_provider == 'azure':
+            config['voice'] = state.tts_voice or azure_voice
+            config['region'] = state.tts_region or azure_region
+        elif state.tts_provider == 'gcloud':
+            config['voice'] = state.tts_voice or gcloud_voice
+            config['language'] = state.tts_language or gcloud_language_code
+        elif state.tts_provider == 'elevenlabs':
+            config['voice'] = state.tts_voice or elevenlabs_voice_id
+        elif state.tts_provider == 'deepgram':
+            config['voice'] = state.tts_voice or deepgram_voice_model
+        elif state.tts_provider == 'kittentts':
+            config['voice'] = state.tts_voice or kittentts_voice
+            config['model'] = state.tts_model or kittentts_model
+        elif state.tts_provider == 'kokoro':
+            config['voice'] = state.tts_voice or kokoro_voice
+            config['language'] = state.tts_language or kokoro_language
+            config['speed'] = float(state.tts_rate or kokoro_speed)
+
+        return config
+    except Exception:
+        pass
     
     # Fallback to module globals
     return {
@@ -505,7 +508,7 @@ class AudioPlaybackThread(threading.Thread):
     def run(self):
         """Run the audio playback in this thread."""
         try:
-            success = self._play_audio_blocking()
+            success = self._play_audio()
             # Notify playback control that this thread is done
             with self.playback_control.lock:
                 if self.playback_control.current_playback_thread == self:
@@ -529,7 +532,7 @@ class AudioPlaybackThread(threading.Thread):
                 except Exception:
                     pass
 
-    def _play_audio_blocking(self) -> bool:
+    def _play_audio(self) -> bool:
         """Play audio file using an available system player (blocking version)."""
         path = Path(self.audio_path)
         if not path.exists():
@@ -614,6 +617,7 @@ class AudioPlaybackThread(threading.Thread):
         # Store process in playback control for skip handling
         with self.playback_control.lock:
             self.playback_control.current_process = self.process
+            log_message("DEBUG", f"Starting audio player process {self.process.pid}")
 
         try:
             # Poll + allow cooperative interruption
@@ -624,6 +628,10 @@ class AudioPlaybackThread(threading.Thread):
                         self.process.wait(timeout=0.25)
                     except Exception:
                         self.process.kill()
+                    # Clean up current_process reference
+                    with self.playback_control.lock:
+                        if self.playback_control.current_process == self.process:
+                            self.playback_control.current_process = None
                     return False
 
                 # Check playback control skip flags
@@ -634,11 +642,24 @@ class AudioPlaybackThread(threading.Thread):
                             self.process.wait(timeout=0.25)
                         except Exception:
                             self.process.kill()
+                        # Clean up current_process reference
+                        if self.playback_control.current_process == self.process:
+                            self.playback_control.current_process = None
                         return False
 
                 time.sleep(0.01)
-            return self.process.returncode == 0
+
+            # Process finished normally - clean up current_process reference
+            success = self.process.returncode == 0
+            with self.playback_control.lock:
+                if self.playback_control.current_process == self.process:
+                    self.playback_control.current_process = None
+            return success
         except Exception:
+            # Clean up current_process reference on exception
+            with self.playback_control.lock:
+                if self.playback_control.current_process == self.process:
+                    self.playback_control.current_process = None
             return False
 
 class PlaybackControl:
@@ -978,6 +999,7 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     """Play audio file using non-blocking threaded playback.
     Returns immediately after starting the playback thread.
     """
+    log_message("DEBUG", "_play_audio_file")
     if not use_process_control:
         # For backward compatibility, if process control is disabled,
         # fall back to the old blocking behavior
@@ -1093,6 +1115,7 @@ def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True)
     if use_process_control:
         with playback_control.lock:
             playback_control.current_process = process
+            log_message("DEBUG", "audio process started via original method")
 
     try:
         # Poll + allow cooperative interruption
@@ -1111,6 +1134,7 @@ def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True)
     finally:
         if use_process_control:
             with playback_control.lock:
+                log_message("DEBUG", "audio process ended")
                 playback_control.current_process = None
 
 
@@ -1229,7 +1253,6 @@ class TTSProvider(ABC):
             return self.config[key]
         
         # Then check shared state
-        from .state import get_shared_state
         shared_state = get_shared_state()
         if hasattr(shared_state, 'tts') and hasattr(shared_state.tts, key):
             return getattr(shared_state.tts, key)
@@ -1649,13 +1672,17 @@ def speak_text(text: str, engine: str, needs_skip: bool = False) -> bool:
     if disable_tts:
         return True
 
+    # Get TTS provider from shared state or fallback to global
+    config = get_tts_config()
+    current_provider = config.get('provider') or tts_provider or 'system'
+
     # Use provider classes directly
-    provider = create_tts_provider(tts_provider)
+    provider = create_tts_provider(current_provider)
     if provider:
         try:
             return provider.speak(text, use_process_control=True, needs_skip=needs_skip)
         except Exception as e:
-            log_message("ERROR", f"TTS provider {tts_provider} failed: {e}")
+            log_message("ERROR", f"TTS provider {current_provider} failed: {e}")
             return False
 
     return speak_with_default(text, engine)
@@ -1728,7 +1755,7 @@ def speak_with_default(text, engine):
             kwargs['preexec_fn'] = os.setsid
         
         process = subprocess.Popen(cmd, **kwargs)
-        log_message("DEBUG", f"Started {engine} process with PID: {process.pid}")
+        log_message("DEBUG", f"Started {engine} audio process with PID: {process.pid}")
         with playback_control.lock:
             playback_control.current_process = process
         
@@ -1738,10 +1765,12 @@ def speak_with_default(text, engine):
                 # For stdin-based engines, we can't easily poll, so just communicate
                 stdout, stderr = process.communicate(input=kwargs["input"])
             else:
+                log_message("DEBUG", "Poll process with timeout to check for interruptions")
                 # Poll process with timeout to check for interruptions
                 while process.poll() is None:
                     # Check if we should stop
                     if shutdown_event.is_set() or playback_control.skip_current or playback_control.skip_all:
+                        log_message("DEBUG", ";looks like we should stop")
                         process.terminate()
                         try:
                             process.wait(timeout=0.1)
@@ -1755,6 +1784,7 @@ def speak_with_default(text, engine):
             return False
         finally:
             with playback_control.lock:
+                log_message("DEBUG", "audio process is now none")
                 playback_control.current_process = None
                 
     except Exception as e:
@@ -1877,11 +1907,10 @@ def tts_worker(engine: str):
             # Resume ASR input after speaking (but only for appropriate modes)
             try:
                 from . import asr
-                from .state import get_shared_state
-                
+
                 if hasattr(asr, 'set_ignore_input'):
                     # Small delay to ensure TTS audio has fully finished
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                     
                     # Get current ASR mode from shared state
                     shared_state = get_shared_state()
@@ -1901,6 +1930,7 @@ def tts_worker(engine: str):
             continue
         except Exception as e:
             log_message("ERROR", f"TTS worker error: {e}")
+            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
 def _retry_delayed_speech(speech_item: SpeechItem, callback: Optional[Callable[[str], None]] = None, forced: bool = False):
     global _delayed_timer, _delayed_speech_item, last_queued_text
@@ -1947,11 +1977,10 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
     global highest_spoken_line_number, last_queued_text, last_queue_time, _delayed_timer, _delayed_speech_item
 
     # Check shared state if available
-    if SHARED_STATE_AVAILABLE:
-        shared_state = get_shared_state()
-        if not shared_state.tts_enabled:
-            log_message("DEBUG", "TTS disabled in shared state, not queueing speech")
-            return ""
+    shared_state = get_shared_state()
+    if not shared_state.tts_enabled:
+        log_message("DEBUG", "TTS disabled in shared state, not queueing speech")
+        return ""
 
     # Log the original text before any filtering
     log_message("INFO", f"queue_for_speech received: '{text}' (exception_match={exception_match})")
@@ -2008,10 +2037,8 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                 return ""
 
         # Check if we're in tool use mode (between PreToolUse and PostToolUse hooks)
-        in_tool_use = False
-        if SHARED_STATE_AVAILABLE:
-            shared_state = get_shared_state()
-            in_tool_use = shared_state.get_in_tool_use()
+        shared_state = get_shared_state()
+        in_tool_use = shared_state.get_in_tool_use()
 
         # Skip similarity checks if we're in tool use mode (prompting the user)
         if not (in_tool_use and "Do you " in speakable_text):
@@ -2150,9 +2177,6 @@ def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
             return False
         time.sleep(0.1)
     
-    # Wait a bit more for audio buffer to play out
-    time.sleep(SPEECH_BUFFER_TIME)
-    
     log_message("INFO", "All TTS finished")
     return True
 
@@ -2245,6 +2269,7 @@ def stop_tts_immediately():
             except Exception as e:
                 log_message("ERROR", f"Error stopping TTS process: {e}")
             finally:
+                log_message("DEBUG", "audio process finished")
                 playback_control.current_process = None
 
 
@@ -2328,15 +2353,13 @@ def is_paused() -> bool:
 
 def is_speaking() -> bool:
     """Check if TTS is speaking or recently finished."""
-    # Check if actively speaking
-    if current_speech_item is not None:
-        return True
-    
+
     # Check if TTS process is still running
     with playback_control.lock:
         if playback_control.current_process is not None:
             if playback_control.current_process.poll() is None:
                 # Process is still running
+                log_message("INFO", "TTS playback is still running")
                 return True
     
     # Check if we recently finished speaking (audio might still be playing)
@@ -2479,13 +2502,8 @@ def select_best_tts_provider(excluded_providers=None) -> str:
     excluded_providers = excluded_providers or set()
     
     # Check shared state first
-    state_provider = None
-    if SHARED_STATE_AVAILABLE:
-        try:
-            state = get_shared_state()
-            state_provider = state.tts_provider
-        except Exception:
-            pass
+    state = get_shared_state()
+    state_provider = state.tts_provider
 
     preferred = state_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
 
@@ -2513,6 +2531,14 @@ def select_best_tts_provider(excluded_providers=None) -> str:
         else:
             log_message("WARNING", f"TTS provider {provider} failed validation, trying next")
     
+    # Try kokoro as ultimate fallback before system (if available and not excluded)
+    if 'kokoro' not in excluded_providers and accessible.get('kokoro', {}).get('available'):
+        if validate_provider_config('kokoro'):
+            log_message("INFO", "Falling back to kokoro TTS provider")
+            return 'kokoro'
+        else:
+            log_message("WARNING", "Kokoro TTS provider failed validation")
+
     # Fall back to system if available and not excluded
     if 'system' not in excluded_providers and accessible.get('system', {}).get('available'):
         if validate_provider_config('system'):
@@ -2520,7 +2546,7 @@ def select_best_tts_provider(excluded_providers=None) -> str:
             return 'system'
         else:
             log_message("WARNING", "System TTS provider failed validation")
-    
+
     # Last resort: return system anyway (it should always work)
     log_message("WARNING", "No fully validated TTS providers available, defaulting to system")
     return 'system'
@@ -2658,7 +2684,6 @@ def configure_tts_from_args(args) -> bool:
         # Background preloading started earlier in initialization
     
     # Update shared state with the actually working provider
-    from .state import get_shared_state
     shared_state = get_shared_state()
     shared_state.set_tts_config(provider=tts_provider)
     
@@ -2707,7 +2732,7 @@ if __name__ == "__main__":
                 print("Error: No TTS engine found on this system")
                 exit(1)
         else:
-            engine = 'cloud'  # Use cloud engine for external providers
+            engine = tts_provider  # Use the actual provider name as engine
         
         # Start the TTS worker for interactive mode
         start_tts_worker(engine)
@@ -2740,7 +2765,7 @@ if __name__ == "__main__":
                 print("Error: No TTS engine found on this system")
                 exit(1)
         else:
-            engine = 'cloud'  # Use cloud engine for external providers
+            engine = tts_provider  # Use the actual provider name as engine
         
         # Start the TTS worker
         start_tts_worker(engine)
