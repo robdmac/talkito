@@ -316,6 +316,7 @@ COMMON_SKIP_PATTERNS = [
 CLAUDE_PROFILE = Profile(
     supported=True,
     name='claude',
+    needs_full_lines=True,
     response_prefix='⏺',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'^\s*[│]\s+Do you',
