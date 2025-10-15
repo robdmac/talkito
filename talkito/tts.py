@@ -27,7 +27,6 @@ import re
 import requests
 import shutil
 import signal
-import soundfile as sf
 import subprocess
 import sys
 import tempfile
@@ -65,9 +64,13 @@ def patch_phonemizer_espeak_api():
     import os
     from importlib import import_module
 
-    # Import the wrapper class
-    wrapper = import_module('phonemizer.backend.espeak.wrapper')
-    EspeakWrapper = wrapper.EspeakWrapper
+    try:
+        # Import the wrapper class
+        wrapper = import_module('phonemizer.backend.espeak.wrapper')
+        EspeakWrapper = wrapper.EspeakWrapper
+    except ImportError:
+        # phonemizer not installed - skip patching (only needed for KittenTTS/Kokoro)
+        return
 
     # Provide missing methods as no-ops that set env vars + class attributes
     if not hasattr(EspeakWrapper, 'set_data_path'):
@@ -485,7 +488,7 @@ TTS_PROVIDERS = {
         'model_var': 'kittentts_model',
         'voice_var': 'kittentts_voice',
         'display_name': 'KittenTTS',
-        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile',
+        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer',
         'config_keys': ['model', 'voice']
     },
     'kokoro': {
@@ -494,7 +497,7 @@ TTS_PROVIDERS = {
         'voice_var': 'kokoro_voice',
         'speed_var': 'kokoro_speed',
         'display_name': 'KokoroTTS',
-        'install': 'pip install kokoro>=0.9.4 soundfile',
+        'install': 'pip install kokoro>=0.9.4 soundfile phonemizer',
         'config_keys': ['language', 'voice', 'speed']
     }
 }
@@ -938,7 +941,7 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
                 import kittentts  # noqa: F401 # Just check package availability
             kittentts_available = True
         except ImportError:
-            kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile)"
+            kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer)"
     
     accessible["kittentts"] = {
         "available": kittentts_available,
@@ -965,7 +968,7 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
             kokoro_available = True
         except Exception as e:
             # Catch all exceptions, not just ImportError (e.g., AttributeError from EspeakWrapper)
-            kokoro_note = f"Kokoro package error: {str(e)}" if not isinstance(e, ImportError) else "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile)"
+            kokoro_note = f"Kokoro package error: {str(e)}" if not isinstance(e, ImportError) else "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile phonemizer)"
         log_message("INFO", f"KokoroTTS availability check completed - available: {kokoro_available}")
     
     accessible["kokoro"] = {
@@ -1436,6 +1439,7 @@ class KittenTTSProvider(TTSProvider):
 
     def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
         try:
+            import soundfile as sf
             m = get_cached_local_model('kittentts', timeout=10.0)
             if m is None:
                 raise RuntimeError("KittenTTS model unavailable")
@@ -1474,6 +1478,7 @@ class KokoroTTSProvider(TTSProvider):
             # Concatenate all audio chunks
             import numpy as np
             if audio_chunks:
+                import soundfile as sf
                 full_audio = np.concatenate(audio_chunks)
                 buf = io.BytesIO()
                 sf.write(buf, full_audio, 24000, format='WAV')
@@ -2482,7 +2487,7 @@ def configure_tts_provider(args):
             print("Error: KittenTTS dependencies not installed")
             print("Please install with:")
             print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-            print("  pip install soundfile")
+            print("  pip install soundfile phonemizer")
             return False
         
         if args.voice:
@@ -2663,7 +2668,7 @@ def configure_tts_from_args(args) -> bool:
             print("Error: KittenTTS dependencies not installed")
             print("Please install with:")
             print("  pip install kittentts")
-            print("  pip install soundfile")
+            print("  pip install soundfile phonemizer")
             return False
         
         if args.tts_voice:

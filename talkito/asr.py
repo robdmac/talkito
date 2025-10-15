@@ -41,7 +41,6 @@ import platform
 import pyaudio
 import math
 import re
-import soundfile as sf
 import time
 import tempfile
 from typing import Optional, Callable, Dict, Any, Tuple
@@ -1401,6 +1400,7 @@ class FasterWhisperProvider(ASRProvider):
             # faster-whisper expects audio as float32 array
             try:
                 # Try to read with soundfile first
+                import soundfile as sf
                 audio_array, sample_rate = sf.read(tmp_path, dtype='float32')
             except ImportError:
                 log_message("DEBUG", "soundfile not available, using numpy fallback")
