@@ -52,6 +52,7 @@ class TalkitoState:
     asr_language: Optional[str] = None
     asr_model: Optional[str] = None
     asr_mode: str = 'auto-input'
+    asr_source_file: Optional[str] = None  # File path for file: mode
     
     # Communication modes
     whatsapp_mode_active: bool = False

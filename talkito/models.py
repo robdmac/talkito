@@ -25,6 +25,60 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from huggingface_hub.utils import LocalEntryNotFoundError
 from typing import Callable, Optional
 
+
+def patch_hf_hub_with_timeout(connect_timeout: float = 5.0, read_timeout: float = 30.0):
+    """
+    Monkey patch huggingface_hub to use timeouts for network requests.
+
+    This prevents hf_hub_download from hanging indefinitely when there's
+    a network connection but no internet access.
+
+    Args:
+        connect_timeout: Timeout for establishing connection (seconds)
+        read_timeout: Timeout for reading data (seconds)
+    """
+    try:
+        import requests
+        from huggingface_hub import file_download
+
+        # Get the original get_hf_file_metadata and hf_hub_download functions
+        original_get_session = getattr(file_download, 'get_session', None)
+
+        if original_get_session:
+            def patched_get_session(*args, **kwargs):
+                """Patched version that sets default timeouts on requests."""
+                session = original_get_session(*args, **kwargs)
+
+                # Monkey patch the request method to always include timeout
+                original_request = session.request
+
+                def request_with_timeout(*req_args, **req_kwargs):
+                    # Only add timeout if not already specified
+                    if 'timeout' not in req_kwargs:
+                        req_kwargs['timeout'] = (connect_timeout, read_timeout)
+                    return original_request(*req_args, **req_kwargs)
+
+                session.request = request_with_timeout
+                return session
+
+            file_download.get_session = patched_get_session
+
+        # Also patch the constants module if available
+        try:
+            from huggingface_hub import constants
+            if hasattr(constants, 'DEFAULT_REQUEST_TIMEOUT'):
+                constants.DEFAULT_REQUEST_TIMEOUT = (connect_timeout, read_timeout)
+        except (ImportError, AttributeError):
+            pass
+
+    except ImportError:
+        # If requests or huggingface_hub internals changed, silently skip patching
+        pass
+
+
+# Apply the patch when module is imported
+patch_hf_hub_with_timeout()
+
 def ask_user_consent(provider: str, model_name: str) -> bool:
     """Ask user for consent to download a model."""
     # Auto-approve if environment variable is set

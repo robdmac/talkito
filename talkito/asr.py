@@ -252,8 +252,9 @@ def check_provider_imports(provider: str, requested_provider: str = None) -> Tup
                     # Ask user for consent and download if approved
                     try:
                         def create_model():
-                            # Use int8 for better compatibility, especially on macOS
-                            compute_type = 'int8' if platform.system() == 'Darwin' else 'float16'
+                            # Use int8 for better compatibility, especially on macOS and CPU-only environments
+                            default_compute_type = 'int8' if platform.system() == 'Darwin' else 'float16'
+                            compute_type = os.environ.get('WHISPER_COMPUTE_TYPE', default_compute_type)
                             return WhisperModel(model_name, device='cpu', compute_type=compute_type)
                         
                         decorated_func = with_download_progress('local_whisper', model_name, create_model)
@@ -2412,10 +2413,46 @@ class DictationEngine:
         with self.pause_lock:
             if self.is_paused:
                 return False
-        
+
         result = self.recognition_active and (time.time() - self.last_recognition_time < 2.0)
         # log_message("DEBUG", f"is_recognizing: recognition_active={self.recognition_active}, time_since_last={time.time() - self.last_recognition_time:.1f}s, result={result}")
         return result
+
+    def process_audio_file(self, audio_file_path: str, delay: float = 0.1):
+        """This function exists just for end to end testing. It allowes delayed processing of an audio file in leu of a mic input"""
+        import threading
+
+        def _process_file():
+            """Internal function to process the file after delay"""
+            log_message("INFO", f"Processing audio file: {audio_file_path}")
+
+            try:
+                with sr.AudioFile(audio_file_path) as source:
+                    # Read the entire audio file
+                    audio = self.recognizer.record(source)
+                    log_message("DEBUG", f"Audio file loaded, processing with {self.provider_config.provider}")
+
+                    # Process using the provider's recognize method
+                    text = self.provider.recognize(audio)
+
+                    if text:
+                        log_message("INFO", f"Transcribed from file: {text}")
+                        # Call the text callback with the transcribed text
+                        if self.text_callback:
+                            self.text_callback(text)
+                    else:
+                        log_message("WARNING", "No transcription result from audio file")
+
+            except Exception as e:
+                log_message("ERROR", f"Error processing audio file: {e}")
+                import traceback
+                log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+
+        # Schedule processing after delay using Timer (non-blocking)
+        log_message("INFO", f"Scheduled audio file processing in {delay}s: {audio_file_path}")
+        timer = threading.Timer(delay, _process_file)
+        timer.daemon = True
+        timer.start()
 
 
 # Simplified configuration functions

@@ -54,6 +54,9 @@ except ImportError:
     def _base_log_message(level: str, message: str, logger_name: str = None):
         print(f"[{level}] {message}")
 
+# def patch_hf_hub_download():
+
+
 def patch_phonemizer_espeak_api():
     """
     Make official phonemizer behave like the fork for loaders that call
@@ -1164,6 +1167,7 @@ def _write_temp_audio(audio_bytes: bytes, ext: str) -> str:
 def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True, needs_skip: bool = False) -> bool:
     """Synthesize audio via provider function and play it."""
     try:
+        log_message("DEBUG", "synthesize_and_play")
         result = synthesize_func(text)
         if not result or not isinstance(result, tuple) or len(result) != 2:
             log_message("ERROR", f"Synthesizer returned unexpected result: {result!r}")
@@ -1464,6 +1468,7 @@ class KokoroTTSProvider(TTSProvider):
             # Kokoro returns a generator, we need to process all chunks
             audio_chunks = []
             for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
+                log_message("DEBUG", f"Appending audio chunk {i}")
                 audio_chunks.append(audio)
 
             # Concatenate all audio chunks
