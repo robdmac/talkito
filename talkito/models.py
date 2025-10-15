@@ -20,64 +20,37 @@
 
 import os
 import sys
-
-from huggingface_hub import hf_hub_download, snapshot_download
-from huggingface_hub.utils import LocalEntryNotFoundError
+from pathlib import Path
 from typing import Callable, Optional
 
+# Configure HuggingFace Hub timeouts via environment variables BEFORE any imports
+# These are used by huggingface_hub when it loads its constants module
+def _configure_hf_timeouts():
+    """Configure HuggingFace Hub timeouts based on whether models are likely cached."""
+    # Import only constants to get the cache directory (respects HF_HUB_CACHE, HUGGINGFACE_HUB_CACHE, HF_HOME env vars)
+    from huggingface_hub import constants
 
-def patch_hf_hub_with_timeout(connect_timeout: float = 5.0, read_timeout: float = 30.0):
-    """
-    Monkey patch huggingface_hub to use timeouts for network requests.
+    cache_dir = Path(constants.HF_HUB_CACHE)
 
-    This prevents hf_hub_download from hanging indefinitely when there's
-    a network connection but no internet access.
+    if cache_dir.exists():
+        cached_models = list(cache_dir.glob("models--*"))
+        has_cache = len(cached_models) > 0
+    else:
+        has_cache = False
 
-    Args:
-        connect_timeout: Timeout for establishing connection (seconds)
-        read_timeout: Timeout for reading data (seconds)
-    """
-    try:
-        import requests
-        from huggingface_hub import file_download
+    # If we have cached models, use shorter timeout for HEAD requests (checking for updates)
+    # If no cache, use longer timeout to allow first download
+    etag_timeout = '3' if has_cache else '10'
 
-        # Get the original get_hf_file_metadata and hf_hub_download functions
-        original_get_session = getattr(file_download, 'get_session', None)
+    # Set environment variables (these are read by huggingface_hub.constants on import)
+    os.environ.setdefault('HF_HUB_ETAG_TIMEOUT', etag_timeout)  # HEAD request timeout
+    os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '30')      # Actual download timeout
 
-        if original_get_session:
-            def patched_get_session(*args, **kwargs):
-                """Patched version that sets default timeouts on requests."""
-                session = original_get_session(*args, **kwargs)
+_configure_hf_timeouts()
 
-                # Monkey patch the request method to always include timeout
-                original_request = session.request
-
-                def request_with_timeout(*req_args, **req_kwargs):
-                    # Only add timeout if not already specified
-                    if 'timeout' not in req_kwargs:
-                        req_kwargs['timeout'] = (connect_timeout, read_timeout)
-                    return original_request(*req_args, **req_kwargs)
-
-                session.request = request_with_timeout
-                return session
-
-            file_download.get_session = patched_get_session
-
-        # Also patch the constants module if available
-        try:
-            from huggingface_hub import constants
-            if hasattr(constants, 'DEFAULT_REQUEST_TIMEOUT'):
-                constants.DEFAULT_REQUEST_TIMEOUT = (connect_timeout, read_timeout)
-        except (ImportError, AttributeError):
-            pass
-
-    except ImportError:
-        # If requests or huggingface_hub internals changed, silently skip patching
-        pass
-
-
-# Apply the patch when module is imported
-patch_hf_hub_with_timeout()
+# NOW import huggingface_hub (after env vars are set)
+from huggingface_hub import hf_hub_download, snapshot_download  # noqa: E402
+from huggingface_hub.utils import LocalEntryNotFoundError  # noqa: E402
 
 def ask_user_consent(provider: str, model_name: str) -> bool:
     """Ask user for consent to download a model."""

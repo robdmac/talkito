@@ -20,6 +20,9 @@
 
 # ruff: noqa: E402
 
+# Apply huggingface_hub timeout patch FIRST before any other imports that might use it
+from . import models  # noqa: F401
+
 # Suppress deprecation warnings early
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
