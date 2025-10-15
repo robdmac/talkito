@@ -124,10 +124,9 @@ def parse_arguments():
     
     # ASR options
     asr_group = parser.add_argument_group('ASR options')
-    asr_group.add_argument('--asr-mode', type=str, 
-                           choices=['off', 'auto-input', 'tap-to-talk'],
+    asr_group.add_argument('--asr-mode', type=str,
                            default='tap-to-talk',
-                           help='ASR mode (default: tap-to-talk)')
+                           help='ASR mode: off, auto-input, tap-to-talk, or file:<path> for testing (default: tap-to-talk)')
     asr_group.add_argument('--asr-provider', type=str,
                            choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
                            help='ASR provider to use')
@@ -315,7 +314,20 @@ async def run_talkito_command(args) -> int:
 
     # Set ASR and TTS modes in shared state so they're available for status display
     shared_state = get_shared_state()
-    shared_state.asr_mode = args.asr_mode
+
+    # Parse ASR mode - check for file: prefix
+    asr_mode_value = args.asr_mode
+    if asr_mode_value.startswith('file:'):
+        # Extract file path and optional delay: file:path or file:path:delay
+        parts = asr_mode_value[5:].split(':', 1)  # Remove 'file:' prefix and split
+        shared_state.asr_source_file = parts[0]
+        shared_state.asr_file_delay = float(parts[1]) if len(parts) > 1 else 0.1
+        shared_state.asr_mode = 'file'
+    else:
+        shared_state.asr_mode = asr_mode_value
+        shared_state.asr_source_file = None
+        shared_state.asr_file_delay = 0.1
+
     shared_state.tts_mode = tts_mode
 
     # Special handling for 'claude' command

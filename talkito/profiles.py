@@ -308,7 +308,7 @@ COMMON_SKIP_PATTERNS = [
     (4, r'\(node:'),
     (4, r'^\['),
     (4, r'⏵⏵ auto-accept edits'),
-    (4, r'===|▀▀▀▀'),
+    (4, r'===|▀▀▀▀|………|╌╌'),
 ]
 
 
@@ -325,7 +325,7 @@ CLAUDE_PROFILE = Profile(
         r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
     ],
     exception_patterns=[
-        (0, r'Welcome to Claude Code'),       # ✻ Welcome to Claude Code
+        (0, r'Claude Code'),       # ✻ Welcome to Claude Code
         (0, r'^⏺')
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
