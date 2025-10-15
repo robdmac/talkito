@@ -124,7 +124,7 @@ ALT_SCREEN_SEQUENCES = [
 ]
 
 # ANSI escape code pattern - comprehensive
-ANSI_CHAR_PATTERN = re.compile(r'(?:\x1B\[[0-9;?]*[a-zA-Z])+([A-Za-z0-9])(?=(?:\x1B\[[0-9;?]*[a-zA-Z])|$)')
+ANSI_CHAR_PATTERN = re.compile(r'(?:\x1B\[[0-9;?]*[a-zA-Z])+([A-Za-z])(?=(?:\x1B\[[0-9;?]*[a-zA-Z])|$)')
 ANSI_MOVE_LINE_PATTERN = re.compile(r'\x1B\[(\d+);(\d+)[Hf]')
 ANSI_PATTERN = re.compile(
     r'(\x1B\[[0-9;]*[a-zA-Z]|'  # Standard codes
@@ -172,12 +172,12 @@ CONTRACTION_REPAIR = re.compile(
 # 3) Strip ANSI after repair
 ANSI_RE = re.compile(ANSI_INLINE)
 
-# 4) Orphaned single-letter filter (don’t remove valid 'a' or 'I' or contraction tails)
+# 4) Orphaned single-letter filter (don't remove valid 'a' or 'I' or contraction tails)
 ORPHANED_PATTERN = re.compile(
     r"(?<![A-Za-z0-9'])"              # not after word char or apostrophe
     r"(?!a\b|I\b|d\b|ll\b|re\b|ve\b|m\b|t\b)"   # keep real words & contraction tails
     r"[A-Za-z]"                       # a single stray letter
-    r"(?![A-Za-z])"                   # not followed by a letter
+    r"(?![A-Za-z0-9])"                # not followed by a letter or digit (preserves v2.0.13)
 )
 
 DASH_LINE_PATTERN = re.compile(r'──+')
@@ -497,13 +497,17 @@ def send_pending_text():
         log_message("DEBUG", f"send_pending_text [{pending_text}]")
         log_message("DEBUG", f"last_sent_text {terminal.last_sent_text}")
 
-        # Check for duplicate sends
+        # Check for duplicate sends (but allow questions and exceptions through)
         if pending_text.strip() == terminal.last_sent_text.strip():
-            log_message("DEBUG", f"Skipping duplicate send: '{pending_text}'")
-            terminal.pending_speech_text.clear()
-            terminal.pending_text_should_skip = False
-            terminal.pending_text_exception_match = False
-            return
+            # Don't skip if this is a question or exception match - these should always be spoken
+            if not terminal.pending_text_exception_match:
+                log_message("DEBUG", f"Skipping duplicate send: '{pending_text}'")
+                terminal.pending_speech_text.clear()
+                terminal.pending_text_should_skip = False
+                terminal.pending_text_exception_match = False
+                return
+            else:
+                log_message("DEBUG", f"Allowing duplicate send because it's a question/exception: '{pending_text}'")
         
         # Check the stored skip decision
         if terminal.pending_text_should_skip:
@@ -622,7 +626,7 @@ def clean_text(text: str) -> str:
         flags=re.IGNORECASE
     )
 
-    text = ANSI_CHAR_PATTERN.sub('', text)
+    text = ANSI_CHAR_PATTERN.sub('', text)  # Remove ANSI sequences with orphaned letters
     text = ANSI_PATTERN.sub('', text)
     text = ANSI_ESCAPE_PATTERN.sub('', text)
     text = text.replace('\x1B', '')
@@ -1370,14 +1374,20 @@ async def setup_terminal_for_command(cmd: List[str]) -> Tuple[int, int]:
         env['LINES'] = str(rows)
         env['COLUMNS'] = str(cols - 2 if cols > 2 else cols)
 
-        current_proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            # preexec_fn=os.setsid,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env=env
-        )
+        try:
+            current_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                # preexec_fn=os.setsid,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env
+            )
+        except FileNotFoundError as e:
+            log_message("ERROR", f"Command not found: {cmd[0]}")
+            log_message("ERROR", f"Full command: {' '.join(cmd)}")
+            log_message("ERROR", f"Make sure '{cmd[0]}' is installed and in your PATH")
+            raise RuntimeError(f"Command '{cmd[0]}' not found. Please install it first.") from e
         # os.tcsetpgrp(master_fd, os.getpgrp())
         # try:
         #     os.tcsetpgrp(current_master_fd, os.getpgrp())
@@ -2088,21 +2098,29 @@ def ensure_asr_initialized():
             
             # Start ASR with the standard callbacks
             engine = asr.start_dictation(handle_dictated_text, handle_partial_transcript, config=asr_config)
-            
+
             # Get the actual provider that was initialized
             actual_provider = engine.provider_config.provider if engine and engine.provider_config else asr_provider
-            
-            # Start in paused state so auto-input logic can manage it
-            asr.set_ignore_input(True)
-            log_message("INFO", f"ASR initialized and paused for auto-input management with provider: {actual_provider}")
-            
+
+            # Check if we're in file mode
+            if shared_state.asr_mode == 'file' and shared_state.asr_source_file:
+                delay = getattr(shared_state, 'asr_file_delay', 0.1)
+                log_message("INFO", f"ASR in file mode, processing audio file: {shared_state.asr_source_file} (delay: {delay}s)")
+                # Process the audio file directly instead of starting continuous listening
+                engine.process_audio_file(shared_state.asr_source_file, delay=delay)
+                log_message("INFO", f"ASR file processing complete with provider: {actual_provider}")
+            else:
+                # Start in paused state so auto-input logic can manage it
+                asr.set_ignore_input(True)
+                log_message("INFO", f"ASR initialized and paused for auto-input management with provider: {actual_provider}")
+
             # Update shared state with the actual provider that was successfully initialized
             shared_state.set_asr_initialized(True, provider=actual_provider)
-            
+
             # Reset ASR state for clean startup
             if asr_state:
                 asr_state.asr_auto_started = False
-                
+
             return True
             
         except Exception as e:

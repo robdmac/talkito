@@ -9,7 +9,7 @@
 
 </div>
 
-TalkiTo lets developers talk, slack and whatsapp with AI code editors. It can be used as a command-line tool, a web extension, and as a Python library.
+TalkiTo lets developers talk, slack and whatsapp with Claude Code and OpenAI Codex. It can be used as a command-line tool, a web extension, and as a Python library.
 
 ## 🚀 Quick Install
 
