@@ -211,15 +211,94 @@ _delayed_items_lock = threading.Lock()
 _delayed_timer = None
 _delayed_speech_item: Optional[SpeechItem] = None
 
+# Provider registry for metadata (install instructions, env vars, etc.)
+TTS_PROVIDERS = {
+    'openai': {
+        'env_var': 'OPENAI_API_KEY',
+        'voice_var': 'openai_voice',
+        'display_name': 'OpenAI',
+        'install': 'pip install openai',
+        'config_keys': ['voice']
+    },
+    'aws': {
+        'env_var': None,  # AWS uses multiple env vars or config files
+        'env_name': 'AWS credentials',
+        'voice_var': 'polly_voice',
+        'region_var': 'polly_region',
+        'display_name': 'AWS Polly',
+        'install': 'pip install boto3',
+        'config_keys': ['voice', 'region']
+    },
+    'azure': {
+        'env_var': 'AZURE_SPEECH_KEY',
+        'voice_var': 'azure_voice',
+        'region_var': 'azure_region',
+        'display_name': 'Microsoft Azure',
+        'install': 'pip install azure-cognitiveservices-speech',
+        'config_keys': ['voice', 'region']
+    },
+    'gcloud': {
+        'env_var': 'GOOGLE_APPLICATION_CREDENTIALS',
+        'voice_var': 'gcloud_voice',
+        'language_var': 'gcloud_language_code',
+        'display_name': 'Google Cloud',
+        'install': 'pip install google-cloud-texttospeech',
+        'config_keys': ['voice', 'language']
+    },
+    'elevenlabs': {
+        'env_var': 'ELEVENLABS_API_KEY',
+        'voice_var': 'elevenlabs_voice_id',
+        'model_var': 'elevenlabs_model_id',
+        'display_name': 'ElevenLabs',
+        'install': 'pip install requests',
+        'config_keys': ['voice', 'model']
+    },
+    'deepgram': {
+        'env_var': 'DEEPGRAM_API_KEY',
+        'model_var': 'deepgram_voice_model',
+        'display_name': 'Deepgram',
+        'install': 'pip install deepgram-sdk',
+        'config_keys': ['model']
+    },
+    'kittentts': {
+        'env_var': None,  # KittenTTS doesn't need an API key
+        'model_var': 'kittentts_model',
+        'voice_var': 'kittentts_voice',
+        'display_name': 'KittenTTS',
+        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer',
+        'config_keys': ['model', 'voice']
+    },
+    'kokoro': {
+        'env_var': None,  # Kokoro doesn't need an API key
+        'language_var': 'kokoro_language',
+        'voice_var': 'kokoro_voice',
+        'speed_var': 'kokoro_speed',
+        'display_name': 'KokoroTTS',
+        'install': 'pip install kokoro>=0.9.4 soundfile phonemizer',
+        'config_keys': ['language', 'voice', 'speed']
+    }
+}
+
 
 def _create_model_instance(provider: str):
     """Create model instance for the specified provider."""
     if provider == 'kokoro':
+        # First check if kokoro module is installed
+        try:
+            with suppress_ai_warnings():
+                import kokoro  # noqa: F401
+        except ImportError:
+            install_cmd = TTS_PROVIDERS['kokoro']['install']
+            raise ImportError(
+                f"Kokoro TTS module is not installed. "
+                f"Install it with: {install_cmd}"
+            )
+
         # Check if spaCy model is available
         from .models import check_spacy_model_consent
         if not check_spacy_model_consent('kokoro'):
             raise RuntimeError("spaCy language model required for kokoro but download was declined")
-        
+
         with suppress_ai_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
             from kokoro import KPipeline
@@ -231,9 +310,20 @@ def _create_model_instance(provider: str):
             return KPipeline(lang_code='en-us', repo_id=repo_id)
         
     elif provider == 'kittentts':
+        # First check if kittentts module is installed
+        try:
+            with suppress_ai_warnings():
+                import kittentts  # noqa: F401
+        except ImportError:
+            install_cmd = TTS_PROVIDERS['kittentts']['install']
+            raise ImportError(
+                f"KittenTTS module is not installed. "
+                f"Install it with: {install_cmd}"
+            )
+
         with suppress_ai_warnings():
             from kittentts import KittenTTS
-        
+
         # Model creation - consent was already obtained in main thread
         model_name = kittentts_model
         log_message("DEBUG", f"KittenTTS(model_name) with model_name = {model_name}")
@@ -434,75 +524,6 @@ def get_tts_config():
         'rate': None,
         'pitch': None
     }
-
-
-# Provider registry for metadata (install instructions, env vars, etc.)
-TTS_PROVIDERS = {
-    'openai': {
-        'env_var': 'OPENAI_API_KEY',
-        'voice_var': 'openai_voice',
-        'display_name': 'OpenAI',
-        'install': 'pip install openai',
-        'config_keys': ['voice']
-    },
-    'aws': {
-        'env_var': None,  # AWS uses multiple env vars or config files
-        'env_name': 'AWS credentials',
-        'voice_var': 'polly_voice',
-        'region_var': 'polly_region',
-        'display_name': 'AWS Polly',
-        'install': 'pip install boto3',
-        'config_keys': ['voice', 'region']
-    },
-    'azure': {
-        'env_var': 'AZURE_SPEECH_KEY',
-        'voice_var': 'azure_voice',
-        'region_var': 'azure_region',
-        'display_name': 'Microsoft Azure',
-        'install': 'pip install azure-cognitiveservices-speech',
-        'config_keys': ['voice', 'region']
-    },
-    'gcloud': {
-        'env_var': 'GOOGLE_APPLICATION_CREDENTIALS',
-        'voice_var': 'gcloud_voice',
-        'language_var': 'gcloud_language_code',
-        'display_name': 'Google Cloud',
-        'install': 'pip install google-cloud-texttospeech',
-        'config_keys': ['voice', 'language']
-    },
-    'elevenlabs': {
-        'env_var': 'ELEVENLABS_API_KEY',
-        'voice_var': 'elevenlabs_voice_id',
-        'model_var': 'elevenlabs_model_id',
-        'display_name': 'ElevenLabs',
-        'install': 'pip install requests',
-        'config_keys': ['voice', 'model']
-    },
-    'deepgram': {
-        'env_var': 'DEEPGRAM_API_KEY',
-        'model_var': 'deepgram_voice_model',
-        'display_name': 'Deepgram',
-        'install': 'pip install deepgram-sdk',
-        'config_keys': ['model']
-    },
-    'kittentts': {
-        'env_var': None,  # KittenTTS doesn't need an API key
-        'model_var': 'kittentts_model',
-        'voice_var': 'kittentts_voice',
-        'display_name': 'KittenTTS',
-        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer',
-        'config_keys': ['model', 'voice']
-    },
-    'kokoro': {
-        'env_var': None,  # Kokoro doesn't need an API key
-        'language_var': 'kokoro_language',
-        'voice_var': 'kokoro_voice',
-        'speed_var': 'kokoro_speed',
-        'display_name': 'KokoroTTS',
-        'install': 'pip install kokoro>=0.9.4 soundfile phonemizer',
-        'config_keys': ['language', 'voice', 'speed']
-    }
-}
 
 class AudioPlaybackThread(threading.Thread):
     """Thread for non-blocking audio playback."""
@@ -943,7 +964,8 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
                 import kittentts  # noqa: F401 # Just check package availability
             kittentts_available = True
         except ImportError:
-            kittentts_note = "Requires KittenTTS package (pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer)"
+            install_cmd = TTS_PROVIDERS['kittentts']['install']
+            kittentts_note = f"Requires KittenTTS package ({install_cmd})"
     
     accessible["kittentts"] = {
         "available": kittentts_available,
@@ -970,7 +992,11 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
             kokoro_available = True
         except Exception as e:
             # Catch all exceptions, not just ImportError (e.g., AttributeError from EspeakWrapper)
-            kokoro_note = f"Kokoro package error: {str(e)}" if not isinstance(e, ImportError) else "Requires KokoroTTS package (pip install kokoro>=0.9.4 soundfile phonemizer)"
+            if isinstance(e, ImportError):
+                install_cmd = TTS_PROVIDERS['kokoro']['install']
+                kokoro_note = f"Requires KokoroTTS package ({install_cmd})"
+            else:
+                kokoro_note = f"Kokoro package error: {str(e)}"
         log_message("INFO", f"KokoroTTS availability check completed - available: {kokoro_available}")
     
     accessible["kokoro"] = {
@@ -1214,11 +1240,22 @@ def validate_provider_config(provider: str) -> bool:
         print(f"Please set it with: export {env_var}='your-api-key'")
         return False
     
-    # Skip validation for local providers - they'll be validated during actual model loading
-    # This avoids expensive import operations during startup
+    # For local providers, validate that the module is installed (but don't load the model yet)
+    # This is lightweight - just checks if the module exists
     if provider in ['kittentts', 'kokoro']:
-        log_message("DEBUG", f"Skipping validation for local provider {provider} - will validate during model loading")
-        return True
+        try:
+            with suppress_ai_warnings():
+                if provider == 'kokoro':
+                    import kokoro  # noqa: F401
+                elif provider == 'kittentts':
+                    import kittentts  # noqa: F401
+            log_message("DEBUG", f"Local provider {provider} module is installed")
+            return True
+        except ImportError:
+            install_cmd = TTS_PROVIDERS[provider]['install']
+            print(f"Error: {provider} module is not installed.")
+            print(f"Install it with: {install_cmd}")
+            return False
     
     # Special case for AWS Polly - check AWS credentials
     if provider in ['aws', 'polly']:
@@ -2492,10 +2529,9 @@ def configure_tts_provider(args):
             with suppress_ai_warnings():
                 from kittentts import KittenTTS  # noqa: F401
         except ImportError:
+            install_cmd = TTS_PROVIDERS['kittentts']['install']
             print("Error: KittenTTS dependencies not installed")
-            print("Please install with:")
-            print("  pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl")
-            print("  pip install soundfile phonemizer")
+            print(f"Please install with: {install_cmd}")
             return False
         
         if args.voice:
@@ -2673,10 +2709,9 @@ def configure_tts_from_args(args) -> bool:
             with suppress_ai_warnings():
                 from kittentts import KittenTTS  # noqa: F401
         except ImportError:
+            install_cmd = TTS_PROVIDERS['kittentts']['install']
             print("Error: KittenTTS dependencies not installed")
-            print("Please install with:")
-            print("  pip install kittentts")
-            print("  pip install soundfile phonemizer")
+            print(f"Please install with: {install_cmd}")
             return False
         
         if args.tts_voice:
