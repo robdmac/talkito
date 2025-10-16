@@ -27,18 +27,17 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, module='google.rp
 
 # Suppress absl and gRPC warnings
 import os
+import sys
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logging if used
 
 import atexit
-import speech_recognition as sr
 import threading
 import queue
 import argparse
 import numpy as np
 import platform
-import pyaudio
 import math
 import re
 import time
@@ -48,6 +47,81 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import importlib
 from contextlib import contextmanager
+
+
+# Keep global references to prevent garbage collection of callbacks
+_alsa_error_handler = None
+_jack_error_handler = None
+_jack_info_handler = None
+
+# Suppress ALSA/JACK warnings by installing custom error handlers
+def _suppress_alsa_jack_warnings():
+    """Suppress ALSA and JACK library warnings by monkey-patching error handlers."""
+    global _alsa_error_handler, _jack_error_handler, _jack_info_handler
+
+    try:
+        import ctypes
+
+        # === ALSA Suppression ===
+        # Define the error handler function type for ALSA
+        ALSA_ERROR_HANDLER = ctypes.CFUNCTYPE(
+            None,
+            ctypes.c_char_p,  # filename
+            ctypes.c_int,      # line
+            ctypes.c_char_p,  # function
+            ctypes.c_int,      # err
+            ctypes.c_char_p   # fmt
+        )
+
+        # Create a no-op error handler for ALSA
+        def alsa_error_handler(filename, line, function, err, fmt):
+            pass  # Silently ignore all ALSA errors
+
+        # Store as global to prevent garbage collection (critical!)
+        _alsa_error_handler = ALSA_ERROR_HANDLER(alsa_error_handler)
+
+        # Try to load ALSA library and set custom error handler
+        try:
+            asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+            asound.snd_lib_error_set_handler(_alsa_error_handler)
+        except (OSError, AttributeError):
+            # ALSA library not found or function not available - that's fine
+            pass
+
+        # === JACK Suppression ===
+        # Define the error/info handler function type for JACK
+        JACK_HANDLER = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
+
+        # Create no-op handlers for JACK
+        def jack_error_handler(msg):
+            pass  # Silently ignore JACK errors
+
+        def jack_info_handler(msg):
+            pass  # Silently ignore JACK info
+
+        # Store as globals to prevent garbage collection
+        _jack_error_handler = JACK_HANDLER(jack_error_handler)
+        _jack_info_handler = JACK_HANDLER(jack_info_handler)
+
+        # Try to load JACK library and set custom handlers
+        try:
+            jack = ctypes.cdll.LoadLibrary('libjack.so.0')
+            jack.jack_set_error_function(_jack_error_handler)
+            jack.jack_set_info_function(_jack_info_handler)
+        except (OSError, AttributeError):
+            # JACK library not found or functions not available - that's fine
+            pass
+
+    except Exception:
+        # If anything fails, just continue without suppression
+        pass
+
+# Install ALSA and JACK error handlers before importing audio libraries
+_suppress_alsa_jack_warnings()
+
+# Import audio libraries
+import speech_recognition as sr
+import pyaudio
 
 from .logs import log_message as _base_log_message
 
@@ -392,7 +466,7 @@ class AudioCaptureThread:
                     if self.is_active_check():
                         log_message("ERROR", f"Error capturing audio: {e}")
                     break
-            
+
             log_message("INFO", f"Audio capture thread ending for {self.provider_name}")
 
 
@@ -905,7 +979,7 @@ class HoundifyProvider(ASRProvider):
             client.setLocation(37.388309, -121.973968)
             listener = StreamingListener()
             client.start(listener)
-            
+
             with microphone as source:
                 bytes_sent = 0
                 chunks_sent = 0
@@ -963,7 +1037,6 @@ class HoundifyProvider(ASRProvider):
                         if engine.is_active:
                             log_message("ERROR", f"Error streaming to Houndify: {e}")
                         break
-                
         except Exception as e:
             log_message("ERROR", f"Houndify streaming error: {e}")
         finally:
@@ -1487,10 +1560,10 @@ class FasterWhisperProvider(ASRProvider):
             FRAMES_TO_ACCUMULATE = int(RATE * TRANSCRIPTION_WINDOW_DURATION / CHUNK)
             
             log_message("INFO", f"[LOCAL_WHISPER] Audio config - pyaudio_frame_size: {CHUNK} samples (~{CHUNK/RATE*1000:.0f}ms), transcription_window: {TRANSCRIPTION_WINDOW_DURATION}s, frames_to_accumulate: {FRAMES_TO_ACCUMULATE}")
-            
+
             # Initialize PyAudio
             p = pyaudio.PyAudio()
-            
+
             # Open stream with optimized buffer size
             stream = p.open(format=FORMAT,
                           channels=CHANNELS,
@@ -2279,22 +2352,22 @@ class DictationEngine:
                     # Check ignore status before capture
                     with _ignore_input_lock:
                         ignore_status = _ignore_input
-                    
+
                     log_message("DEBUG", f"[ASR PHRASE] About to listen, ignore_input={ignore_status}")
                     audio = self.recognizer.listen(
                         source,
                         timeout=0.5,
                         phrase_time_limit=self.phrase_time_limit
                     )
-                    
+
                     # Check ignore status after capture (might have changed during listen)
                     with _ignore_input_lock:
                         ignore_status_after = _ignore_input
-                    
+
                     if ignore_status_after:
                         log_message("DEBUG", "[ASR PHRASE] Audio captured but ignoring due to ignore_input=True - discarding")
                         continue
-                    
+
                     self.audio_queue.put(audio)
                     log_message("DEBUG", f"[ASR PHRASE] Captured and queued audio phrase (queue size: {self.audio_queue.qsize()})")
                 except sr.WaitTimeoutError:
