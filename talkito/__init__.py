@@ -18,7 +18,7 @@
 
 # ruff: noqa: E402
 
-from .__version__ import __version__, __author__, __email__, __license__
+from .__version__ import __version__, __author__, __license__
 
 import warnings
 warnings.filterwarnings("ignore", message=r".*in sys\.modules.*talkito\.(asr|tts|mcp|comms|profiles).*", category=RuntimeWarning)
@@ -88,8 +88,7 @@ except ImportError:
 __all__ = [
     # Version info
     "__version__",
-    "__author__", 
-    "__email__",
+    "__author__",
     "__license__",
     
     # Modules
