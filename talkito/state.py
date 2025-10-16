@@ -599,7 +599,10 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         # Format as a one-line summary
         # Show green only if both initialized AND enabled
         tts_display = f"TTS {status['tts']['mode']}"
-        if tts_override or (status["tts"]["initialized"] and status["tts"]["enabled"]):
+        # Always show red if TTS mode is 'off', regardless of override
+        if status['tts']['mode'] == 'off':
+            tts_emoji = "🔴"
+        elif tts_override or (status["tts"]["initialized"] and status["tts"]["enabled"]):
             tts_emoji = "🟢"
             tts_display += f" → {status['tts']['provider']}"
         else:
