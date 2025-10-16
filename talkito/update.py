@@ -20,13 +20,13 @@
 
 import json
 import os
-import pkg_resources
 import shutil
 import sys
 import subprocess
 import tempfile
 import threading
 import time
+from importlib.metadata import distribution, PackageNotFoundError
 from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
@@ -98,18 +98,28 @@ class TalkitoUpdater:
 
         try:
             # Check if talkito is installed via pip (look at pip metadata)
-            dist = pkg_resources.get_distribution('talkito')
-            
+            dist = distribution('talkito')
+
             # If we find the distribution, check if it's an editable install
-            if hasattr(dist, 'location') and dist.location:
+            # Get the location from metadata (files or direct_url.json)
+            location = None
+            try:
+                # Try to get location from dist-info
+                if dist.files:
+                    # Get the parent directory of the first file
+                    location = str(dist.locate_file('').parent)
+            except Exception:
+                pass
+
+            if location:
                 # Editable installs have location pointing to source directory
-                if dist.location == str(self.install_dir.parent):
+                if location == str(self.install_dir.parent):
                     return 'editable'
                 # Regular pip installs point to site-packages
-                elif 'site-packages' in str(dist.location):
+                elif 'site-packages' in location:
                     return 'pip'
-                    
-        except pkg_resources.DistributionNotFound:
+
+        except PackageNotFoundError:
             # Not installed via pip, check other methods
             pass
         
