@@ -25,32 +25,38 @@ from typing import Callable, Optional
 
 # Configure HuggingFace Hub timeouts via environment variables BEFORE any imports
 # These are used by huggingface_hub when it loads its constants module
+_hf_configured = False
+
 def _configure_hf_timeouts():
     """Configure HuggingFace Hub timeouts based on whether models are likely cached."""
-    # Import only constants to get the cache directory (respects HF_HUB_CACHE, HUGGINGFACE_HUB_CACHE, HF_HOME env vars)
-    from huggingface_hub import constants
+    global _hf_configured
+    if _hf_configured:
+        return
 
-    cache_dir = Path(constants.HF_HUB_CACHE)
+    try:
+        # Import only constants to get the cache directory (respects HF_HUB_CACHE, HUGGINGFACE_HUB_CACHE, HF_HOME env vars)
+        from huggingface_hub import constants
 
-    if cache_dir.exists():
-        cached_models = list(cache_dir.glob("models--*"))
-        has_cache = len(cached_models) > 0
-    else:
-        has_cache = False
+        cache_dir = Path(constants.HF_HUB_CACHE)
 
-    # If we have cached models, use shorter timeout for HEAD requests (checking for updates)
-    # If no cache, use longer timeout to allow first download
-    etag_timeout = '3' if has_cache else '10'
+        if cache_dir.exists():
+            cached_models = list(cache_dir.glob("models--*"))
+            has_cache = len(cached_models) > 0
+        else:
+            has_cache = False
 
-    # Set environment variables (these are read by huggingface_hub.constants on import)
-    os.environ.setdefault('HF_HUB_ETAG_TIMEOUT', etag_timeout)  # HEAD request timeout
-    os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '30')      # Actual download timeout
+        # If we have cached models, use shorter timeout for HEAD requests (checking for updates)
+        # If no cache, use longer timeout to allow first download
+        etag_timeout = '3' if has_cache else '10'
 
-_configure_hf_timeouts()
+        # Set environment variables (these are read by huggingface_hub.constants on import)
+        os.environ.setdefault('HF_HUB_ETAG_TIMEOUT', etag_timeout)  # HEAD request timeout
+        os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '30')      # Actual download timeout
 
-# NOW import huggingface_hub (after env vars are set)
-from huggingface_hub import hf_hub_download, snapshot_download  # noqa: E402
-from huggingface_hub.utils import LocalEntryNotFoundError  # noqa: E402
+        _hf_configured = True
+    except ImportError:
+        # huggingface_hub not installed - skip configuration
+        pass
 
 def ask_user_consent(provider: str, model_name: str) -> bool:
     """Ask user for consent to download a model."""
