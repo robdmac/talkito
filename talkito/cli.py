@@ -73,8 +73,8 @@ from .templates import SLACK_BOT_MANIFEST
 from .update import check_and_apply_staged_update, TalkitoUpdater
 
 # Check Python version
-if sys.version_info < (3, 8):
-    print("Error: Python 3.8 or higher required", file=sys.stderr)
+if sys.version_info < (3, 10):
+    print("Error: Python 3.10 or higher required", file=sys.stderr)
     print("Your version:", sys.version, file=sys.stderr)
     sys.exit(1)
 

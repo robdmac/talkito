@@ -20,11 +20,11 @@
 
 import argparse
 import io
+import json
 import queue
 import os
 import random
 import re
-import requests
 import shutil
 import signal
 import subprocess
@@ -34,6 +34,8 @@ import threading
 import time
 import traceback
 import warnings
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from collections import deque
 from typing import Optional, List, Tuple, Deque, Dict, Any, Callable
 from difflib import SequenceMatcher
@@ -1403,13 +1405,15 @@ class ElevenLabsProvider(TTSProvider):
                 'similarity_boost': 0.5
             }
         }
-        
-        response = requests.post(url, json=data, headers=headers)
-        
-        if response.status_code == 200:
-            return response.content, ".mp3"
-        
-        return None
+
+        try:
+            req = Request(url,
+                         data=json.dumps(data).encode('utf-8'),
+                         headers={**headers, 'Content-Type': 'application/json'})
+            with urlopen(req) as response:
+                return response.read(), ".mp3"
+        except HTTPError:
+            return None
 
 
 class DeepgramProvider(TTSProvider):
@@ -1428,11 +1432,15 @@ class DeepgramProvider(TTSProvider):
             'Accept': 'audio/mpeg',
             'Content-Type': 'application/json',
         }
-        response = requests.post(url, json={'text': text}, headers=headers)
-        if response.ok:
-            return response.content, ".mp3"
-        log_message("ERROR", f"Deepgram error {response.status_code}: {response.text}")
-        return None
+        try:
+            req = Request(url,
+                         data=json.dumps({'text': text}).encode('utf-8'),
+                         headers=headers)
+            with urlopen(req) as response:
+                return response.read(), ".mp3"
+        except HTTPError as e:
+            log_message("ERROR", f"Deepgram error {e.code}: {e.read().decode('utf-8', errors='ignore')}")
+            return None
 
 class KittenTTSProvider(TTSProvider):
     """KittenTTS provider implementation."""

@@ -18,5 +18,4 @@
 
 __version__ = "0.1.1"
 __author__ = "Robert Macrae"
-__email__ = "rob.d.macrae@gmail.com"
 __license__ = "AGPL-3.0-or-later"
