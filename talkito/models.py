@@ -132,6 +132,9 @@ def _hf_cached(repo_id: str, filename: Optional[str] = None,
                cache_dir: Optional[str] = None) -> bool:
     """Return True if a repo (or specific file) is already present in the local HF cache."""
     try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+        from huggingface_hub.utils import LocalEntryNotFoundError
+
         if filename:
             hf_hub_download(repo_id=repo_id, filename=filename, revision=revision, local_files_only=True, cache_dir=cache_dir)
         else:
