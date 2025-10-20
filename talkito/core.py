@@ -183,6 +183,10 @@ ORPHANED_PATTERN = re.compile(
 DASH_LINE_PATTERN = re.compile(r'──+')
 ANSI_NUMBER_M_PATTERN = re.compile(r'(?<![a-zA-Z])\d{1,3}m\b')
 
+# Pattern to filter OSC response sequences from stdin (terminal responses to queries)
+# This prevents terminal responses (like color queries) from appearing as user input
+OSC_RESPONSE_PATTERN = re.compile(rb'\x1B\][0-9]+;[^\x07]*\x07')
+
 # Precompiled regex patterns for other frequent operations
 BOX_CONTENT_PATTERN = re.compile(r'│\s*([^│]+)\s*│')
 BOX_SEPARATOR_PATTERN = re.compile(r'^[─═╌╍]+$')
@@ -1552,6 +1556,12 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
     try:
         input_data = await async_read(sys.stdin.fileno(), 4096)
         if input_data:
+            # Filter out OSC response sequences (terminal responses to queries like color info)
+            # These are responses from the terminal, not actual user input
+            input_data = OSC_RESPONSE_PATTERN.sub(b'', input_data)
+            if not input_data:
+                return  # Nothing left after filtering
+
             # Check for tap-to-talk keys in tap-to-talk mode (optimized for minimal interference)
             if asr_mode == "tap-to-talk":
                 # Fast path: only process backtick, let everything else pass through immediately
@@ -2501,9 +2511,12 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     try:
                         input_data = await async_read(sys.stdin.fileno(), 4096)
                         if input_data:
-                            recorder.record_event('INPUT', input_data)
-                            # Forward to PTY
-                            await async_write(current_master_fd, input_data)
+                            # Filter out OSC response sequences (terminal responses)
+                            input_data = OSC_RESPONSE_PATTERN.sub(b'', input_data)
+                            if input_data:
+                                recorder.record_event('INPUT', input_data)
+                                # Forward to PTY
+                                await async_write(current_master_fd, input_data)
                     except (BlockingIOError, OSError):
                         pass
                 else:
@@ -3053,8 +3066,18 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
 
     log_message("DEBUG", "Set up TTS engine")
     # Set up TTS engine
+    # Check shared state first - early initialization may have already selected a provider
+    shared_state = get_shared_state()
+
+    # Use provider from shared state if it was set during early initialization
+    if shared_state.tts_provider and shared_state.tts_provider != args.tts_provider:
+        log_message("INFO", f"Using TTS provider from early initialization: {shared_state.tts_provider} (overriding args: {args.tts_provider})")
+        args.tts_provider = shared_state.tts_provider
+
     if args and args.tts_provider != 'system':
         if not tts.configure_tts_from_args(args):
+            print("Error: Failed to configure TTS provider", file=sys.stderr)
+            sys.stderr.flush()
             raise RuntimeError("Failed to configure TTS provider")
         engine = "cloud"
     else:
@@ -3062,6 +3085,8 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
         if engine == "auto":
             engine = tts.detect_tts_engine()
             if engine == "none":
+                print("Error: No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS", file=sys.stderr)
+                sys.stderr.flush()
                 raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
 
     # Start TTS worker
@@ -3074,7 +3099,6 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
     start_background_update_checker()
 
     # Update shared state for TTS initialization
-    from .state import get_shared_state
     shared_state = get_shared_state()
 
     # Get the actual provider that was configured
@@ -3119,7 +3143,6 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
                 log_message("INFO", f"Communication manager initialized with providers: {providers}")
                 
                 # Update shared state with configured providers  
-                from .state import get_shared_state
                 shared_state = get_shared_state()
                 
                 if comm_manager:
@@ -3457,8 +3480,18 @@ async def run_with_talkito(command: List[str], args) -> int:
 
     log_message("DEBUG", "Set up TTS engine")
     # Set up TTS engine
+    # Check shared state first - early initialization may have already selected a provider
+    shared_state = get_shared_state()
+
+    # Use provider from shared state if it was set during early initialization
+    if shared_state.tts_provider and shared_state.tts_provider != args.tts_provider:
+        log_message("INFO", f"Using TTS provider from early initialization: {shared_state.tts_provider} (overriding args: {args.tts_provider})")
+        args.tts_provider = shared_state.tts_provider
+
     if args and args.tts_provider != 'system':
         if not tts.configure_tts_from_args(args):
+            print("Error: Failed to configure TTS provider", file=sys.stderr)
+            sys.stderr.flush()
             raise RuntimeError("Failed to configure TTS provider")
         engine = "cloud"
     else:
@@ -3466,6 +3499,8 @@ async def run_with_talkito(command: List[str], args) -> int:
         if engine == "auto":
             engine = tts.detect_tts_engine()
             if engine == "none":
+                print("Error: No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS", file=sys.stderr)
+                sys.stderr.flush()
                 raise RuntimeError("No TTS engine found. Please install espeak, festival, flite (Linux) or use macOS")
     
     # Start TTS worker
@@ -3478,7 +3513,6 @@ async def run_with_talkito(command: List[str], args) -> int:
     start_background_update_checker()
     
     # Update shared state for TTS initialization
-    from .state import get_shared_state
     shared_state = get_shared_state()
     
     # Get the actual provider that was configured

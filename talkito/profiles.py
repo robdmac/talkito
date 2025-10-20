@@ -372,9 +372,9 @@ CODEX_PROFILE = Profile(
     skip_patterns=COMMON_SKIP_PATTERNS + [
         (2, r'^    '),
         (3, r'talkito:'),
-        (3, r'^•\s+'),
         (3, r'^\s*[└□✔]'),
         (3, r'• Ran'),
+        (3, r'^› '),
         (4, r'^✨⬆️'),
         (4, r'^[A-Za-z][a-z]'),
     ],
