@@ -295,6 +295,7 @@ COMMON_SKIP_PATTERNS = [
     (3, r'⎿'),  # subheadings underneath an edit block like "Wrote 122 lines to x.py"
     (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('),
     (3, r'^[^A-Za-z0-9]*[A-Za-z][a-z]+(?:-[a-z]+)*(?:\.\.\.|…|\.)'),
+    (3, r'^∴'),
 
     (4, r'^\^C '),
     (4, r'^░█'),
@@ -323,6 +324,7 @@ CLAUDE_PROFILE = Profile(
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
         r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
+        r'\x1b\[48;5;237m\x1b\[38;5;231m',    # User input (bg:237, fg:231)
     ],
     exception_patterns=[
         (0, r'Claude Code'),       # ✻ Welcome to Claude Code
