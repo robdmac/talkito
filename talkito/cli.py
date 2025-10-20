@@ -853,6 +853,7 @@ async def main_async() -> int:
         return 130  # Standard exit code for Ctrl+C
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        sys.stderr.flush()
         return 1
     finally:
         # Clean up only if not interrupted
