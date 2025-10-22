@@ -44,7 +44,7 @@ source venv/bin/activate
 brew install portaudio
 
 # Install package (normal install - gets updates via git pull)
-pip install ".[all]"
+pip install .
 
 # Run this in a directory you want to use claude with
 talkito claude
@@ -66,7 +66,7 @@ source venv/bin/activate
 brew install portaudio
 
 # Install in development mode (editable install)
-pip install -e ".[all]"
+pip install -e .
 
 # Run this in a directory you want to use claude with
 talkito claude
@@ -196,8 +196,8 @@ except KeyboardInterrupt:
 Talkito includes an MCP (Model Context Protocol) server that allows AI applications to use TTS and ASR capabilities:
 
 ```bash
-# Install with MCP support
-pip install talkito[mcp]
+# Install TalkiTo (includes MCP support)
+pip install talkito
 
 # Run as MCP server
 talkito --mcp-server

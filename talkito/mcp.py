@@ -34,30 +34,12 @@ import random
 import traceback
 from urllib.parse import urlparse
 
-# Load environment variables early
-try:
-    from dotenv import load_dotenv
-    # Load .env first (takes precedence)
-    load_dotenv()
-    # Also load .talkito.env (won't override existing vars from .env)
-    load_dotenv('.talkito.env')
-except ImportError:
-    pass
-
 # Import talkito functionality
-from . import tts
-from . import comms
+from . import asr, comms, tts
 from .comms import SlackProvider, TwilioWhatsAppProvider
 from .core import ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
-
-# Check if ASR is available
-try:
-    from . import asr
-    ASR_AVAILABLE = True
-except ImportError:
-    ASR_AVAILABLE = False
 
 # Global logging setup - set from command line args
 _log_file_path = None
@@ -309,7 +291,7 @@ def _cleanup():
     shared_state = get_shared_state()
     
     # Stop ASR if initialized
-    if shared_state.asr_initialized and ASR_AVAILABLE:
+    if shared_state.asr_initialized:
         try:
             asr.stop_dictation()
             shared_state.set_asr_initialized(False)
@@ -765,9 +747,6 @@ async def _enable_asr_internal() -> str:
     try:
         _ensure_logging_restored()
         log_message("INFO", "enable_asr called")
-        
-        if not ASR_AVAILABLE:
-            return "❌ ASR not available. Install with: pip install talkito[asr]"
         
         # Simply toggle the state - let core handle initialization
         from .state import _shared_state
@@ -1530,11 +1509,6 @@ async def start_voice_input(language: str = "en-US", provider: str = None) -> st
         global _asr_initialized
         log_message("INFO", f"start_voice_input called with language: {language}, provider: {provider}")
         
-        if not ASR_AVAILABLE:
-            error_msg = "Error: ASR not available. Install with: pip install talkito[asr]"
-            log_message("ERROR", f"start_voice_input error: {error_msg}")
-            return error_msg
-        
         # Select provider if not specified
         if provider is None:
             provider = asr.select_best_asr_provider()
@@ -1596,11 +1570,6 @@ async def stop_voice_input() -> str:
     """
     try:
         global _asr_initialized
-        
-        if not ASR_AVAILABLE:
-            result = "ASR not available"
-            log_message("INFO", f"stop_voice_input returning: {result}")
-            return result
         
         if _asr_initialized:
             asr.stop_dictation()
@@ -2491,9 +2460,9 @@ async def get_voice_status_resource() -> str:
         shared_state = get_shared_state()
         lines = [
             "ASR Status:",
-            f"  Available: {ASR_AVAILABLE}",
+            "  Available: True",
             f"  Initialized: {shared_state.asr_initialized}",
-            f"  Is Listening: {asr.is_dictation_active() if ASR_AVAILABLE and shared_state.asr_initialized else False}",
+            f"  Is Listening: {asr.is_dictation_active() if shared_state.asr_initialized else False}",
             f"  Recent Results: {len(_dictation_callback_results)}",
         ]
         if _last_dictated_text:
@@ -2506,9 +2475,6 @@ async def get_voice_status_resource() -> str:
 async def get_available_asr_providers() -> str:
     """Get list of available ASR providers with accessibility status"""
     try:
-        if not ASR_AVAILABLE:
-            return "ASR not available - install with: pip install talkito[asr]"
-        
         accessible = asr.check_asr_provider_accessibility()
         
         lines = ["ASR Providers (✓ = accessible, ✗ = needs configuration):"]

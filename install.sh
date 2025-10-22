@@ -100,9 +100,9 @@ install_talkito() {
     echo "   Upgrading pip..."
     pip install --quiet --upgrade pip
     
-    # Install talkito with all features
-    echo "   Installing talkito with all features..."
-    pip install --quiet -e ".[all]"
+    # Install talkito (all features included by default)
+    echo "   Installing talkito..."
+    pip install --quiet -e .
     
     # Create a wrapper script
     echo "   Creating launcher script..."

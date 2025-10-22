@@ -4,10 +4,101 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from typing import Optional, Dict, Any, Callable, List
 from dataclasses import dataclass, field
 from .logs import log_message
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _parse_assignment(raw_line: str) -> Optional[tuple[str, str]]:
+    line = raw_line.strip()
+    if not line or line.startswith('#'):
+        return None
+    if line.startswith("export "):
+        line = line[7:].strip()
+    if "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if not key:
+        return None
+    return key, value.strip()
+
+
+def _parse_key(line: str) -> Optional[str]:
+    assignment = _parse_assignment(line)
+    return assignment[0] if assignment else None
+
+
+def load_dotenv(path: str = ".env", override: bool = False) -> bool:
+    env_path = Path(path)
+    if not env_path.exists():
+        return False
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        assignment = _parse_assignment(raw_line)
+        if not assignment:
+            continue
+        key, value = assignment
+        value = _strip_quotes(value)
+        if not override and key in os.environ:
+            continue
+        os.environ[key] = value
+    return True
+
+
+def set_key(path: str, key: str, value: Optional[str]) -> tuple[str, Optional[str], bool]:
+    env_path = Path(path)
+    lines = []
+    found = False
+    file_existed = env_path.exists()
+
+    if file_existed:
+        with env_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.rstrip("\n")
+                parsed_key = _parse_key(line.strip())
+                if parsed_key == key:
+                    found = True
+                    if value is not None:
+                        lines.append(f"{key}={value}")
+                else:
+                    lines.append(line)
+
+    if not found and value is not None:
+        lines.append(f"{key}={value}")
+
+    if not lines and not file_existed and value is None:
+        return key, None, True
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    content = ("\n".join(lines) + "\n") if lines else ""
+    with env_path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+
+    return key, value, True
+
+
+def unset_key(path: str, key: str) -> tuple[str, None, bool]:
+    return set_key(path, key, None)
+
+
+# Load environment configuration on module import
+load_dotenv()
+load_dotenv('.talkito.env')
+
+
+def _import_asr():
+    from . import asr as _asr
+    return _asr
 
 
 @dataclass
@@ -472,18 +563,15 @@ def initialize_providers_early(args):
     log_message("INFO", f"initialize_providers_early called with args: {type(args)} [start_time={start_time}]")
     
     # Clear any cached provider validation results for fresh start
+    asr_module = None
     try:
-        from . import asr
-        if hasattr(asr, 'clear_provider_cache'):
-            asr.clear_provider_cache()
+        asr_module = _import_asr()
+        if hasattr(asr_module, 'clear_provider_cache'):
+            asr_module.clear_provider_cache()
     except Exception:
         pass
-        
+
     from . import tts
-    try:
-        from . import asr
-    except ImportError:
-        asr = None
 
     shared_state = get_shared_state()
 
@@ -527,7 +615,9 @@ def initialize_providers_early(args):
         log_message("INFO", f"Found asr_provider in args: {requested_asr_provider}")
     preferred = requested_asr_provider or os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
     log_message("INFO", f"Starting ASR provider selection for: {preferred}")
-    shared_state.asr_provider = asr.select_best_asr_provider(preferred)
+    if asr_module is None:
+        asr_module = _import_asr()
+    shared_state.asr_provider = asr_module.select_best_asr_provider(preferred)
     log_message("INFO", f"ASR provider selection completed: {shared_state.asr_provider} [{time.time() - step_start:.3f}s]")
     
     # Start preloading local whisper models early for local_whisper provider
@@ -535,7 +625,7 @@ def initialize_providers_early(args):
         try:
             preload_start = time.time()
             log_message("INFO", f"Starting early ASR model preloading for: {shared_state.asr_provider}")
-            asr.preload_local_asr_model()
+            asr_module.preload_local_asr_model()
             log_message("INFO", f"Early ASR model preloading started for {shared_state.asr_provider} [{time.time() - preload_start:.3f}s]")
         except Exception as preload_e:
             log_message("ERROR", f"Early ASR model preloading failed for {shared_state.asr_provider}: {preload_e}")
@@ -554,13 +644,7 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
     try:
         # Import needed modules
         from . import tts
-        try:
-            from . import asr
-            ASR_AVAILABLE = True
-        except ImportError:
-            asr = None
-            ASR_AVAILABLE = False
-        
+        asr_module = _import_asr()
         # Import provider types if comms_manager is provided
         if comms_manager:
             from .comms import SlackProvider, TwilioWhatsAppProvider
@@ -577,11 +661,11 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
                 "provider": configured_tts_provider or shared_state.get_tts_provider() or "system"
             },
             "asr": {
-                "available": ASR_AVAILABLE,
+                "available": True,
                 "initialized": shared_state.get_asr_initialized(),
                 "enabled": shared_state.get_asr_enabled(),
                 "mode": shared_state.asr_mode,
-                "is_listening": asr.is_dictation_active() if ASR_AVAILABLE and shared_state.get_asr_initialized() else False,
+                "is_listening": asr_module.is_dictation_active() if shared_state.get_asr_initialized() else False,
                 "provider": configured_asr_provider or shared_state.get_asr_provider() or "google"
             },
             "whatsapp": {
