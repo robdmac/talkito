@@ -340,6 +340,7 @@ CLAUDE_PROFILE = Profile(
         # Level 3: Filter unless -vvv (tool calling details, implementation details)
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'talkito:'),
+        (3, r'^│'),
 
         (4, r'^\s*>\s*'),
     ],

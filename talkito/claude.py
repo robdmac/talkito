@@ -27,8 +27,9 @@ import threading
 import time
 
 from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
-from .state import get_status_summary, show_tap_to_talk_notification_once
+from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config
 from .logs import log_message
+from .core import build_comms_config
 
 
 TALKITO_PERMISSIONS = [
@@ -675,29 +676,10 @@ def apply_claude_tool_filter():
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
-    # Force state initialization by importing and accessing it
-    # from .state import get_shared_state
-    # shared_state = get_shared_state()  # This ensures the state singleton is initialized and loaded
-    
-    # Build comms config to check what's configured
-    # comms_config = build_comms_config(args)
-    #
-    # # Update shared state with configured providers from args/env
-    # if comms_config:
-    #     # Check if providers are configured
-    #     has_whatsapp = bool(comms_config.twilio_whatsapp_number and comms_config.whatsapp_recipients)
-    #     has_slack = bool(comms_config.slack_bot_token and comms_config.slack_app_token and comms_config.slack_channel)
-    #
-    #     # Update shared state
-    #     shared_state.communication.whatsapp_enabled = has_whatsapp
-    #     shared_state.communication.slack_enabled = has_slack
-    #
-    #     # Also update recipients/channels
-    #     if has_whatsapp and comms_config.whatsapp_recipients:
-    #         shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
-    #     if has_slack and comms_config.slack_channel:
-    #         shared_state.communication.slack_channel = comms_config.slack_channel
-    
+    # Preview communication configuration for status banner
+    comms_config = build_comms_config(args)
+    sync_communication_state_from_config(comms_config)
+
     # Show one-time notification about tap-to-talk change if needed
     show_tap_to_talk_notification_once()
     
@@ -708,7 +690,7 @@ def print_configuration_status(args):
     )
 
     # Print with the same format but add the note about .talkito.env
-    print(f"╭ {status}")
+    print(status)
 
 
 if __name__ == "__main__":

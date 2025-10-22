@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from . import asr, comms, tts
 from .profiles import get_profile, Profile
 from .logs import setup_logging, get_logger, log_message, restore_stderr, is_logging_enabled
-from .state import get_shared_state
+from .state import get_shared_state, sync_communication_state_from_config
 from .tts import stop_tts_immediately
 
 # Configuration
@@ -3111,21 +3111,18 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
                 comm_manager = comms.setup_communication(providers=providers, config=comms_config)
                 log_message("INFO", f"Communication manager initialized with providers: {providers}")
                 
-                # Update shared state with configured providers  
-                shared_state = get_shared_state()
-                
                 if comm_manager:
-                    # Check which providers are actually configured
                     has_whatsapp = any(isinstance(p, comms.TwilioWhatsAppProvider) for p in comm_manager.providers)
                     has_slack = any(isinstance(p, comms.SlackProvider) for p in comm_manager.providers)
-                    
-                    # Update communication config in shared state
-                    shared_state.communication.whatsapp_enabled = has_whatsapp
-                    shared_state.communication.slack_enabled = has_slack
-                    
-                    # Set channel info for Slack
+
+                    sync_communication_state_from_config(
+                        comms_config,
+                        slack_configured=has_slack,
+                        whatsapp_configured=has_whatsapp,
+                    )
+
                     if has_slack and hasattr(comms_config, 'slack_channel') and comms_config.slack_channel:
-                        shared_state.communication.slack_channel = comms_config.slack_channel
+                        shared_state = get_shared_state()
                         shared_state.set_slack_mode(True)
                         log_message("INFO", f"Slack mode activated for channel: {comms_config.slack_channel}")
             else:
@@ -3519,21 +3516,15 @@ async def run_with_talkito(command: List[str], args) -> int:
         
         # Update shared state with configured providers
         if comm_manager:
-            shared_state = get_shared_state()
-            # Check which providers are actually configured
             has_whatsapp = any(isinstance(p, comms.TwilioWhatsAppProvider) for p in comm_manager.providers)
             has_slack = any(isinstance(p, comms.SlackProvider) for p in comm_manager.providers)
-            
-            # Update communication config in shared state
-            shared_state.communication.whatsapp_enabled = has_whatsapp
-            shared_state.communication.slack_enabled = has_slack
-            
-            # Also update recipients/channels if available from config
-            if has_whatsapp and comms_config and hasattr(comms_config, 'whatsapp_recipients') and comms_config.whatsapp_recipients:
-                shared_state.communication.whatsapp_to_number = comms_config.whatsapp_recipients[0]
-            if has_slack and comms_config and hasattr(comms_config, 'slack_channel') and comms_config.slack_channel:
-                shared_state.communication.slack_channel = comms_config.slack_channel
-            
+
+            sync_communication_state_from_config(
+                comms_config,
+                slack_configured=has_slack,
+                whatsapp_configured=has_whatsapp,
+            )
+
             # Save the state
             from .state import save_shared_state
             save_shared_state()

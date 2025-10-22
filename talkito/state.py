@@ -6,9 +6,12 @@ import threading
 import time
 from pathlib import Path
 
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, Callable, List, TYPE_CHECKING
 from dataclasses import dataclass, field
 from .logs import log_message
+
+if TYPE_CHECKING:
+    from .comms import CommsConfig
 
 
 def _strip_quotes(value: str) -> str:
@@ -99,6 +102,76 @@ load_dotenv('.talkito.env')
 def _import_asr():
     from . import asr as _asr
     return _asr
+
+
+def _resolve_comm_config_bool(config: "CommsConfig", attr_name: str, fallback_fields: List[str]) -> bool:
+    """Resolve boolean flags for communication configuration.
+
+    This prefers explicit *_enabled flags but falls back to checking supporting fields
+    so we can infer configuration without fully initializing providers.
+    """
+    if config is None:
+        return False
+
+    explicit_flag = getattr(config, attr_name, None)
+    if explicit_flag is not None:
+        return bool(explicit_flag)
+
+    return all(getattr(config, field, None) for field in fallback_fields)
+
+
+def sync_communication_state_from_config(
+    comms_config: Optional["CommsConfig"],
+    *,
+    slack_configured: Optional[bool] = None,
+    whatsapp_configured: Optional[bool] = None,
+) -> None:
+    """Update shared communication state based on a CommsConfig.
+
+    The optional *_configured overrides allow callers to record the actual provider
+    status when available (e.g., after CommunicationManager initialization).
+    """
+    shared_state = get_shared_state()
+    comm_state = shared_state.communication
+
+    # Determine WhatsApp configuration
+    has_whatsapp = whatsapp_configured
+    if has_whatsapp is None:
+        has_whatsapp = _resolve_comm_config_bool(
+            comms_config,
+            "whatsapp_enabled",
+            ["twilio_whatsapp_number", "whatsapp_recipients"],
+        )
+    comm_state.whatsapp_enabled = bool(has_whatsapp)
+
+    if has_whatsapp and comms_config:
+        recipients = getattr(comms_config, "whatsapp_recipients", None) or []
+        comm_state.whatsapp_to_number = recipients[0] if recipients else None
+    else:
+        comm_state.whatsapp_to_number = None
+
+    # Determine Slack configuration
+    has_slack = slack_configured
+    if has_slack is None:
+        has_slack = _resolve_comm_config_bool(
+            comms_config,
+            "slack_enabled",
+            ["slack_bot_token", "slack_channel"],
+        )
+    comm_state.slack_enabled = bool(has_slack)
+
+    if has_slack and comms_config:
+        comm_state.slack_channel = getattr(comms_config, "slack_channel", None)
+    else:
+        comm_state.slack_channel = None
+
+    log_message(
+        "DEBUG",
+        f"[STATE] sync_communication_state_from_config slack_enabled={comm_state.slack_enabled} "
+        f"whatsapp_enabled={comm_state.whatsapp_enabled} "
+        f"slack_channel={comm_state.slack_channel} "
+        f"whatsapp_to={comm_state.whatsapp_to_number}",
+    )
 
 
 @dataclass
