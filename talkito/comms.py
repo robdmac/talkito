@@ -45,16 +45,6 @@ except ImportError:
     SHARED_STATE_AVAILABLE = False
     get_shared_state = None
 
-# Try to load .env files if available
-try:
-    from dotenv import load_dotenv
-    # Load .env first (takes precedence)
-    load_dotenv()
-    # Also load .talkito.env (won't override existing vars from .env)
-    load_dotenv('.talkito.env')
-except ImportError:
-    pass
-
 # Optional imports for providers
 try:
     from twilio.rest import Client as TwilioClient

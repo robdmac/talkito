@@ -109,16 +109,6 @@ def patch_phonemizer_espeak_api():
 # Call this BEFORE importing KittenTTS/Kokoro/etc.
 patch_phonemizer_espeak_api()
 
-# Try to load .env files if available
-try:
-    from dotenv import load_dotenv
-    # Load .env first (takes precedence)
-    load_dotenv()
-    # Also load .talkito.env (won't override existing vars from .env)
-    load_dotenv('.talkito.env')
-except ImportError:
-    # python-dotenv not installed, continue without it
-    pass
 
 @dataclass
 class SpeechItem:
@@ -2217,20 +2207,22 @@ def wait_for_tts_to_finish(timeout: Optional[float] = None) -> bool:
     """Wait for TTS queue to finish, return True if completed."""
     start_time = time.time()
     
-    # Wait for queue to empty
-    while not tts_queue.empty():
-        if timeout and (time.time() - start_time) > timeout:
-            return False
-        time.sleep(0.1)
-    
-    # Wait for current item to finish speaking
+    # Keep waiting while there is any work outstanding
     while True:
+        queue_empty = tts_queue.empty()
         with _state_lock:
-            if current_speech_item is None:
-                break
+            active_item = current_speech_item
+        with playback_control.lock:
+            process_active = playback_control.current_process is not None
+            thread_active = playback_control.current_playback_thread is not None
+
+        if queue_empty and active_item is None and not process_active and not thread_active:
+            break
+
         if timeout and (time.time() - start_time) > timeout:
             return False
-        time.sleep(0.1)
+
+        time.sleep(0.05)
     
     log_message("INFO", "All TTS finished")
     return True

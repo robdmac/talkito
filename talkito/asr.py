@@ -27,7 +27,6 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, module='google.rp
 
 # Suppress absl and gRPC warnings
 import os
-import sys
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logging if used
@@ -124,17 +123,10 @@ import speech_recognition as sr
 import pyaudio
 
 from .logs import log_message as _base_log_message
+from .state import load_dotenv
 
-# Try to load .env files if available
-try:
-    from dotenv import load_dotenv
-    # Load .env first (takes precedence)
-    load_dotenv()
-    # Also load .talkito.env (won't override existing vars from .env)
-    load_dotenv('.talkito.env')
-except ImportError:
-    # python-dotenv not installed, continue without it
-    pass
+load_dotenv()
+load_dotenv('.talkito.env')
 
 SQUARE_BRACKETS_CLEANER = re.compile(r'\[.*?\]')
 

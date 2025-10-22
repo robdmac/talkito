@@ -40,23 +40,11 @@ from difflib import SequenceMatcher
 from typing import Optional, List, Tuple, Dict, Union, Deque, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from . import tts
+from . import asr, comms, tts
 from .profiles import get_profile, Profile
 from .logs import setup_logging, get_logger, log_message, restore_stderr, is_logging_enabled
 from .state import get_shared_state
 from .tts import stop_tts_immediately
-
-try:
-    from . import asr
-    ASR_AVAILABLE = True
-except ImportError:
-    ASR_AVAILABLE = False
-
-try:
-    from . import comms
-    COMMS_AVAILABLE = True
-except ImportError:
-    COMMS_AVAILABLE = False
 
 # Configuration
 TTS_ENGINE = "auto"  # Options: auto, espeak, festival, say, flite
@@ -1429,7 +1417,7 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
     if current_time - last_check_time > check_interval:
         # Check shared state and stop ASR if it's been disabled
         shared_state = get_shared_state()
-        if ASR_AVAILABLE and asr_state.asr_auto_started and not shared_state.asr_enabled:
+        if asr_state.asr_auto_started and not shared_state.asr_enabled:
             try:
                 log_message("INFO", "ASR disabled in shared state, stopping dictation")
                 asr.stop_dictation()
@@ -1444,7 +1432,7 @@ async def periodic_status_check(master_fd: int, asr_mode: str,
             enabled_auto_listen = process_tap_to_talk_state()
         else:
             # Full processing for auto-input mode
-            if ASR_AVAILABLE and asr_state.asr_auto_started:
+            if asr_state.asr_auto_started:
                 # Check if TTS is speaking and stop ASR if needed
                 if asr.is_recognizing() and tts.is_speaking():
                     try:
@@ -2010,9 +1998,6 @@ def check_tap_to_talk_timeout():
 
 def process_tap_to_talk_state():
     """Lightweight tap-to-talk state processing (extracted from check_and_enable_auto_listen for performance)"""
-    if not ASR_AVAILABLE:
-        return False
-        
     # Tap-to-talk mode: keep streaming session alive but pause/unpause processing
     if not asr_state.asr_auto_started:
         # Initialize ASR streaming session once (stays running)
@@ -2046,9 +2031,6 @@ def process_tap_to_talk_state():
 
 def ensure_asr_cleanup():
     """Ensure ASR is properly cleaned up when MCP disables ASR or errors occur."""
-    if not ASR_AVAILABLE:
-        return
-        
     shared_state = get_shared_state()
     
     # Check if ASR should be cleaned up
@@ -2076,9 +2058,6 @@ def ensure_asr_cleanup():
 
 def ensure_asr_initialized():
     """Ensure ASR is initialized if it's enabled but not yet initialized; returns True if ASR was newly initialized."""
-    if not ASR_AVAILABLE:
-        return False
-        
     shared_state = get_shared_state()
     
     # Check if ASR should be initialized
@@ -2189,9 +2168,6 @@ def ensure_tts_state_sync():
 
 def ensure_comms_initialized():
     """Ensure communication channels are initialized based on shared state"""
-    if not COMMS_AVAILABLE:
-        return False
-        
     global comm_manager
     shared_state = get_shared_state()
     
@@ -2252,9 +2228,6 @@ def ensure_comms_initialized():
 
 def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
     """Check if conditions are met to auto-enable ASR based on mode"""
-    if not ASR_AVAILABLE:
-        return False
-    
     # First ensure ASR state is correct (initialize if needed, cleanup if disabled)
     ensure_asr_initialized()
     ensure_asr_cleanup()
@@ -2285,7 +2258,7 @@ def check_and_enable_auto_listen(asr_mode: str = "auto-input"):
         
     # Log the current state for debugging
     is_tts_speaking = tts.is_speaking()
-    is_asr_recognizing = asr.is_recognizing() if ASR_AVAILABLE else False
+    is_asr_recognizing = asr.is_recognizing()
     
     log_message("DEBUG", f"check_and_enable_auto_listen: mode={asr_mode}, waiting_for_input={asr_state.waiting_for_input}, "
                         f"is_tts_speaking={is_tts_speaking}, is_asr_recognizing={is_asr_recognizing}, "
@@ -2718,11 +2691,10 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             log_message("ERROR", f"Failed to re-install signal handlers: {e}")
 
         # Stop ASR if it was running
-        if ASR_AVAILABLE:
-            try:
-                asr.stop_dictation()
-            except Exception:
-                pass
+        try:
+            asr.stop_dictation()
+        except Exception:
+            pass
 
         # Log final buffer statistics
         log_message("INFO", f"Command completed. Total lines in buffer: {output_buffer.get_line_count()}")
@@ -2969,12 +2941,10 @@ def signal_handler(signum, frame=None):
             log_message("ERROR", f"Failed to stop TTS immediately: {e}")
 
         # Quick ASR cleanup to prevent model destructor errors
-        if ASR_AVAILABLE:
-            try:
-                from . import asr
-                asr.stop_dictation()  # This will call _cleanup_whisper_model()
-            except Exception:
-                pass
+        try:
+            asr.stop_dictation()  # This will call _cleanup_whisper_model()
+        except Exception:
+            pass
 
         try:
             # Send SIGINT to the child's process group
@@ -3011,11 +2981,10 @@ def signal_handler(signum, frame=None):
     cleanup_terminal()
     
     # Then stop services gracefully
-    if ASR_AVAILABLE:
-        try:
-            asr.stop_dictation()
-        except Exception:
-            pass
+    try:
+        asr.stop_dictation()
+    except Exception:
+        pass
     
     try:
         tts.shutdown_tts()
@@ -3126,7 +3095,7 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
     log_message("INFO", f"Replaying recorded session: {args.replay} with verbosity level {verbosity}")
     
     # Set up communications if configured - this was missing from replay!
-    if comms_config and COMMS_AVAILABLE:
+    if comms_config:
         log_message("INFO", "Setting up communication manager for replay session")
         try:
             # Extract enabled providers from config
@@ -3165,10 +3134,7 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
             log_message("ERROR", f"Failed to set up communication manager: {e}")
             # Don't fail the replay if communication setup fails
     else:
-        if not COMMS_AVAILABLE:
-            log_message("DEBUG", "Communication libraries not available")
-        else:
-            log_message("DEBUG", "No communication config provided for replay")
+        log_message("DEBUG", "No communication config provided for replay")
     
     # Set the disable_tts flag in tts module if requested
     if disable_tts:
@@ -3527,18 +3493,17 @@ async def run_with_talkito(command: List[str], args) -> int:
     log_message("DEBUG", "set_tts_initialized")
     shared_state.set_tts_initialized(True, tts_provider)
     
-    if ASR_AVAILABLE:
-        if shared_state.asr_mode != 'off':
-            # Enable ASR in shared state - centralized functions will handle initialization
-            log_message("INFO", f"Enabling ASR for {shared_state.asr_mode} mode")
-            shared_state.set_asr_enabled(True)
-        else:
-            # Explicitly disable ASR when mode is 'off'
-            log_message("INFO", "Disabling ASR due to --asr-mode off")
-            shared_state.set_asr_enabled(False)
+    if shared_state.asr_mode != 'off':
+        # Enable ASR in shared state - centralized functions will handle initialization
+        log_message("INFO", f"Enabling ASR for {shared_state.asr_mode} mode")
+        shared_state.set_asr_enabled(True)
+    else:
+        # Explicitly disable ASR when mode is 'off'
+        log_message("INFO", "Disabling ASR due to --asr-mode off")
+        shared_state.set_asr_enabled(False)
     
     # Set up communications if configured
-    if comms_config and COMMS_AVAILABLE:
+    if comms_config:
         global comm_manager
         # Extract enabled providers from config
         providers = []
@@ -3594,3 +3559,83 @@ def wrap_command(command: List[str], **kwargs):
     except KeyboardInterrupt:
         signal_handler(signal.SIGINT)
         return 130  # Standard exit code for SIGINT
+
+
+def parse_test_arguments():
+    """Parse command-line arguments for process_line testing"""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Test talkito process_line function',
+        usage='python -m talkito.core [options] <line_to_test>'
+    )
+    parser.add_argument('line', nargs='+',
+                       help='Line of text to test with process_line')
+    parser.add_argument('--log-file', type=str, default='~/.talkito.log',
+                       help='Log file path (default: ~/.talkito.log)')
+    parser.add_argument('--profile', '-p', type=str, default='default',
+                       help='Profile to use for testing (default: default)')
+    parser.add_argument('--verbosity', '-v', type=int, default=2,
+                       help='Verbosity level (0-2, default: 2)')
+    parser.add_argument('--line-number', type=int, default=1,
+                       help='Line number to use for testing (default: 1)')
+    parser.add_argument('--asr-mode', type=str, default='auto-input',
+                       choices=['auto-input', 'tap-to-talk', 'off'],
+                       help='ASR mode for testing (default: auto-input)')
+    return parser.parse_args()
+
+
+def test_process_line():
+    """Main entry point for process_line testing"""
+    args = parse_test_arguments()
+
+    # Initialize minimal state required for process_line
+    global terminal, active_profile, asr_state, verbosity_level
+
+    # Initialize terminal state
+    if terminal is None:
+        terminal = TerminalState()
+
+    # Initialize ASR state
+    if asr_state is None:
+        asr_state = ASRState()
+
+    # Set up profile
+    active_profile = get_profile(args.profile)
+
+    # Set verbosity level
+    verbosity_level = args.verbosity
+
+    # Set up logging
+    import os
+    log_path = os.path.expanduser(args.log_file)
+    setup_logging(log_path)
+
+    # Get the test line
+    test_line = ' '.join(args.line)
+
+    print(f"Testing line: {test_line}")
+    print(f"Profile: {args.profile}, Verbosity: {verbosity_level}")
+    print("-" * 80)
+
+    # Call process_line with empty initial state
+    buffer = []
+    prev_line = ""
+
+    new_buffer, new_prev_line, detected_prompt = process_line(
+        test_line,
+        buffer,
+        prev_line,
+        skip_duplicates=False,
+        line_number=args.line_number,
+        asr_mode=args.asr_mode
+    )
+
+    print("\nResult:")
+    print(f"  Buffer: \n{new_buffer}\n")
+    print(f"  Prev line: \n{new_prev_line}\n")
+    print(f"  Detected prompt: \n{detected_prompt}\n")
+    print(f"\nCheck {log_path} for detailed processing logs")
+
+
+if __name__ == '__main__':
+    test_process_line()

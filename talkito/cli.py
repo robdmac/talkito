@@ -33,17 +33,14 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
-# Try to load .env files if available
-try:
-    from dotenv import load_dotenv, set_key
-    # Load .env first (takes precedence)
-    load_dotenv()
-    # Also load .talkito.env (won't override existing vars from .env)
-    load_dotenv('.talkito.env')
-    dotenv_available = True
-except ImportError:
-    # python-dotenv not installed, continue without it
-    dotenv_available = False
+from .state import (
+    get_shared_state,
+    get_status_summary,
+    initialize_providers_early,
+    show_tap_to_talk_notification_once,
+    set_key,
+    unset_key,
+)
 
 import os
 import argparse
@@ -68,7 +65,6 @@ from .core import replay_recorded_session, run_with_talkito, signal_handler, Tal
 from .claude import init_claude, run_claude_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
-from .state import get_shared_state, get_status_summary, initialize_providers_early, show_tap_to_talk_notification_once
 from .templates import SLACK_BOT_MANIFEST
 from .update import check_and_apply_staged_update, TalkitoUpdater
 
@@ -287,7 +283,7 @@ async def run_talkito_command(args) -> int:
         if not provider_valid:
             # Don't fallback to system - just let the provider selection logic handle it
             # The system might not have a working system TTS (e.g., Linux without espeak/festival/flite)
-            print(f"No fallback TTS provider available. TTS will be disabled.")
+            print("No fallback TTS provider available. TTS will be disabled.")
             # Clear the invalid provider so select_best_tts_provider() can choose an alternative
             args.tts_provider = None
             args.disable_tts = True  # Explicitly disable TTS
@@ -554,53 +550,22 @@ def show_welcome_and_config():
     changes_made = False
 
     if new_tts_provider is not None and new_tts_provider != current_tts:
-        if dotenv_available:
-            if new_tts_provider and new_tts_provider != 'auto':
-                set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', new_tts_provider, quote_mode="never")
-                print(f"✅ Set TTS provider to: {new_tts_provider}")
-            else:
-                # Remove the key for auto selection
-                env_content = ""
-                if os.path.exists(config_file):
-                    with open(config_file, 'r') as f:
-                        env_content = f.read()
-                    # Remove the line containing TALKITO_PREFERRED_TTS_PROVIDER
-                    lines = env_content.split('\n')
-                    new_lines = [line for line in lines if not line.startswith('TALKITO_PREFERRED_TTS_PROVIDER=')]
-                    with open(config_file, 'w') as f:
-                        f.write('\n'.join(new_lines))
-                print("✅ Set TTS provider to: auto")
-            changes_made = True
+        if new_tts_provider and new_tts_provider != 'auto':
+            set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', new_tts_provider)
+            print(f"✅ Set TTS provider to: {new_tts_provider}")
         else:
-            print("⚠️  To save preferences, install python-dotenv: pip install python-dotenv")
-            if new_tts_provider and new_tts_provider != 'auto':
-                print(f"   For now, set manually: export TALKITO_PREFERRED_TTS_PROVIDER={new_tts_provider}")
-            else:
-                print("   For now, unset manually: unset TALKITO_PREFERRED_TTS_PROVIDER")
+            unset_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER')
+            print("✅ Set TTS provider to: auto")
+        changes_made = True
 
     if asr_available and new_asr_provider is not None and new_asr_provider != current_asr:
-        if dotenv_available:
-            if new_asr_provider and new_asr_provider != 'auto':
-                set_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER', new_asr_provider, quote_mode="never")
-                print(f"✅ Set ASR provider to: {new_asr_provider}")
-            else:
-                # Remove the key for auto selection
-                env_content = ""
-                if os.path.exists(config_file):
-                    with open(config_file, 'r') as f:
-                        env_content = f.read()
-                    # Remove the line containing TALKITO_PREFERRED_ASR_PROVIDER
-                    lines = env_content.split('\n')
-                    new_lines = [line for line in lines if not line.startswith('TALKITO_PREFERRED_ASR_PROVIDER=')]
-                    with open(config_file, 'w') as f:
-                        f.write('\n'.join(new_lines))
-                print("✅ Set ASR provider to: auto")
-            changes_made = True
+        if new_asr_provider and new_asr_provider != 'auto':
+            set_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER', new_asr_provider)
+            print(f"✅ Set ASR provider to: {new_asr_provider}")
         else:
-            if new_asr_provider and new_asr_provider != 'auto':
-                print(f"   For now, set manually: export TALKITO_PREFERRED_ASR_PROVIDER={new_asr_provider}")
-            else:
-                print("   For now, unset manually: unset TALKITO_PREFERRED_ASR_PROVIDER")
+            unset_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER')
+            print("✅ Set ASR provider to: auto")
+        changes_made = True
 
     if changes_made:
         print(f"\n💾 Preferences saved to {config_file}")

@@ -373,8 +373,16 @@ CODEX_PROFILE = Profile(
         (2, r'^    '),
         (3, r'talkito:'),
         (3, r'^\s*[└□✔]'),
+        (3, r'^[^\s•]'),  # Skip lines not starting with space/tab or •
         (3, r'• Ran'),
+        (3, r'• Explored'),
+        (3, r'• Edited'),
+        (3, r'• Added'),
         (3, r'^› '),
+        (3, r'esc to '),
+        (3, r'\? for shortcuts'),
+        (3, r'^>>'),
+
         (4, r'^✨⬆️'),
         (4, r'^[A-Za-z][a-z]'),
     ],

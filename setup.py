@@ -32,60 +32,28 @@ def get_version():
         exec(compile(f.read(), version_file, "exec"), version_locals)
     return version_locals["__version__"]
 
-# Core dependencies (minimal for basic functionality)
+# Core dependencies (full feature set)
 install_requires = [
-    # No core dependencies - talkito works with just Python stdlib
+    "SpeechRecognition>=3.8.1",
+    "pyaudio>=0.2.11",
+    "openai>=1.0.0",
+    "boto3>=1.26.0",
+    "amazon-transcribe>=0.6.0",
+    "azure-cognitiveservices-speech>=1.24.0",
+    "google-cloud-texttospeech>=2.14.0",
+    "google-cloud-speech>=2.20.0",
+    "elevenlabs>=0.2.0",
+    "assemblyai>=0.5.0",
+    "deepgram-sdk>=2.0.0",
+    "twilio>=8.0.0",
+    "slack-sdk>=3.19.0",
+    "flask>=2.0.0",
+    "waitress>=2.0.0",
+    "kokoro>=0.9.4",
+    "soundfile>=0.12.0",
+    "numpy<2.0",
+    "fastmcp>=0.1.0",
 ]
-
-# Optional dependencies for enhanced functionality
-extras_require = {
-    # ASR support
-    "asr": [
-        "SpeechRecognition>=3.8.1",
-        "pyaudio>=0.2.11",
-    ],
-    # Cloud TTS providers
-    "openai": ["openai>=1.0.0"],
-    "aws": ["boto3>=1.26.0", "amazon-transcribe>=0.6.0"],
-    "azure": ["azure-cognitiveservices-speech>=1.24.0"],
-    "gcloud": ["google-cloud-texttospeech>=2.14.0", "google-cloud-speech>=2.20.0"],
-    "elevenlabs": ["elevenlabs>=0.2.0"],
-    "kokoro": ["kokoro>=0.9.4", "soundfile>=0.12.0", "numpy<2.0"],
-    # ASR providers
-    "assemblyai": ["assemblyai>=0.5.0"],
-    "deepgram": ["deepgram-sdk>=2.0.0"],
-    # Communication providers
-    "twilio": ["twilio>=8.0.0"],
-    "slack": ["slack-sdk>=3.19.0"],
-    "comms": ["twilio>=8.0.0", "flask>=2.0.0", "python-dotenv>=0.19.0", "waitress>=2.0.0"],
-    # MCP server
-    "mcp": ["fastmcp"],
-    # Utilities
-    "env": ["python-dotenv>=0.19.0"],
-    # All optional dependencies
-    "all": [
-        "SpeechRecognition>=3.8.1",
-        "pyaudio>=0.2.11",
-        "openai>=1.0.0",
-        "boto3>=1.26.0",
-        "amazon-transcribe>=0.6.0",
-        "azure-cognitiveservices-speech>=1.24.0",
-        "google-cloud-texttospeech>=2.14.0",
-        "google-cloud-speech>=2.20.0",
-        "elevenlabs>=0.2.0",
-        "kokoro>=0.9.4",
-        "soundfile>=0.12.0",
-        "numpy<2.0",
-        "assemblyai>=0.5.0",
-        "deepgram-sdk>=2.0.0",
-        "twilio>=8.0.0",
-        "slack-sdk>=3.19.0",
-        "flask>=2.0.0",
-        "waitress>=2.0.0",
-        "python-dotenv>=0.19.0",
-        "fastmcp"
-    ],
-}
 
 setup(
     name="talkito",
@@ -120,7 +88,6 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=install_requires,
-    extras_require=extras_require,
     entry_points={
         "console_scripts": [
             "talkito=talkito.cli:main",
