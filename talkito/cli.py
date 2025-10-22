@@ -40,6 +40,7 @@ from .state import (
     show_tap_to_talk_notification_once,
     set_key,
     unset_key,
+    sync_communication_state_from_config,
 )
 
 import os
@@ -61,7 +62,7 @@ from typing import List, Optional, Union, Tuple
 from . import __version__
 from . import asr
 from . import tts
-from .core import replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
+from .core import build_comms_config, replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
 from .claude import init_claude, run_claude_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
@@ -256,6 +257,10 @@ def print_configuration_status(args):
     shared_state = get_shared_state()
     shared_state.asr_mode = args.asr_mode
     shared_state.tts_mode = tts_mode
+    
+    # Preview communication configuration so status summary reflects upcoming providers
+    comms_config = build_comms_config(args)
+    sync_communication_state_from_config(comms_config)
     
     # Show one-time notification about tap-to-talk change if needed
     show_tap_to_talk_notification_once()
