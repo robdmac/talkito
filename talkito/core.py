@@ -181,6 +181,7 @@ BOX_SEPARATOR_PATTERN = re.compile(r'^[─═╌╍]+$')
 PROMPT_PATTERN = re.compile(r'^\s*[>\$#]\s*$')
 SENTENCE_END_PATTERN = re.compile(r'[.!?]$')
 ANSI_SIMPLE_PATTERN = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+BLOCK_DRAWING_PATTERN = re.compile(r'[\u2580-\u259F]+')  # Remove Unicode block drawing characters
 
 # Additional precompiled patterns for performance
 FILE_PATH_FILTER_PATTERN = re.compile(r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$')
@@ -637,6 +638,9 @@ def clean_text(text: str) -> str:
 
     # Also remove patterns like "2m" or "22m" that might be left from ANSI codes
     text = ANSI_NUMBER_M_PATTERN.sub('', text)
+
+    # Remove Unicode block drawing characters (▘▘ ▝▝ etc.)
+    text = BLOCK_DRAWING_PATTERN.sub('', text)
 
     # Filter out non-printable characters
     return ''.join(char for char in text if ord(char) >= 32 or char in '\n\t')
@@ -2405,6 +2409,21 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
 
         # Main processing loop
         while True:
+            # Capture runtime ASR mode changes (e.g., toggled via MCP)
+            shared_state = get_shared_state()
+            shared_mode = getattr(shared_state, 'asr_mode', None) or asr_mode
+            if shared_mode != asr_mode:
+                log_message("INFO", f"[CORE] Runtime ASR mode change detected: {asr_mode} -> {shared_mode}")
+                asr_mode = shared_mode
+                # Reset tap-to-talk state whenever mode changes to avoid stale flags
+                if asr_state:
+                    asr_state.tap_to_talk_active = False
+                    asr_state.tap_to_talk_redraw_triggered = False
+                    asr_state.tap_to_talk_last_press = 0
+                    asr_state.tap_to_talk_last_release = time.time()
+                # Ensure dictation engine respects new mode
+                ensure_asr_initialized()
+
             if process_pending_resize(current_master_fd):
                 continue
                 

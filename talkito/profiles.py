@@ -327,7 +327,7 @@ CLAUDE_PROFILE = Profile(
         r'\x1b\[48;5;237m\x1b\[38;5;231m',    # User input (bg:237, fg:231)
     ],
     exception_patterns=[
-        (0, r'Claude Code'),       # ✻ Welcome to Claude Code
+        (0, r'Claude Code v'),       # ✻ Welcome to Claude Code
         (0, r'^⏺')
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
@@ -341,6 +341,7 @@ CLAUDE_PROFILE = Profile(
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
         (3, r'talkito:'),
         (3, r'^│'),
+        (3, r'^\s*/'),
 
         (4, r'^\s*>\s*'),
     ],
@@ -379,6 +380,7 @@ CODEX_PROFILE = Profile(
         (3, r'• Explored'),
         (3, r'• Edited'),
         (3, r'• Added'),
+        (3, r'• Updated'),
         (3, r'^› '),
         (3, r'esc to '),
         (3, r'\? for shortcuts'),

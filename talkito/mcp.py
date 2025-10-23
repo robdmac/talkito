@@ -24,6 +24,7 @@ from typing import Any
 import asyncio
 import os
 import argparse
+from types import SimpleNamespace
 from fastmcp import FastMCP, Context
 from mcp import types
 import queue
@@ -96,6 +97,28 @@ AVAILABLE_VOICES = {
         ('yoZ06aMxZJJ28mfd3POQ', 'Sam'),
     ],
     'deepgram': ['aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en'],
+    'kittentts': ['expr-voice-2-m', 'expr-voice-2-f', 'expr-voice-3-m', 'expr-voice-3-f', 'expr-voice-4-m', 'expr-voice-4-f', 'expr-voice-5-m', 'expr-voice-5-f'],
+    'kokoro': [
+        # American English
+        'af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky',
+        'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa',
+        # British English
+        'bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily', 'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis',
+        # Japanese
+        'jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo',
+        # Mandarin Chinese
+        'zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian', 'zm_yunxi', 'zm_yunxia', 'zm_yunyang',
+        # Spanish
+        'ef_dora', 'em_alex', 'em_santa',
+        # French
+        'ff_siwis',
+        # Hindi
+        'hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi',
+        # Italian
+        'if_sara', 'im_nicola',
+        # Brazilian Portuguese
+        'pf_dora', 'pm_alex', 'pm_santa',
+    ],
     'system': []  # System voices depend on the OS
 }
 
@@ -748,9 +771,24 @@ async def _enable_asr_internal() -> str:
         _ensure_logging_restored()
         log_message("INFO", "enable_asr called")
         
+        # Ensure ASR mode is set to something usable before enabling
+        shared_state = get_shared_state()
+        if shared_state.asr_mode == 'off':
+            fallback_mode = 'tap-to-talk'
+            log_message("INFO", f"ASR mode is 'off' - switching to {fallback_mode} before enabling")
+            from .state import set_asr_mode_thread_safe
+            set_asr_mode_thread_safe(fallback_mode)
+            shared_state = get_shared_state()
+        
         # Simply toggle the state - let core handle initialization
         from .state import _shared_state
         _shared_state.set_asr_enabled(True)
+
+        # Ensure local whisper preload starts if we skipped it earlier
+        shared_state = get_shared_state()
+        if shared_state.asr_provider == 'local_whisper':
+            log_message("INFO", "Triggering local Whisper preload after enabling ASR")
+            asr.preload_local_asr_model(shared_state.asr_model)
         
         log_message("INFO", "ASR enabled (core will handle initialization)")
         
@@ -793,49 +831,113 @@ async def _disable_asr_internal() -> str:
 async def _change_tts_internal(provider: str = "system", voice: str = None, region: str = None, language: str = None, rate: float = None, pitch: float = None) -> str:
     """Internal function to disable ASR"""
     try:
-        # Build config dict
-        tts_config = {'provider': provider}
-        if voice:
-            tts_config['voice'] = voice
-        if region:
-            tts_config['region'] = region
-        if language:
-            tts_config['language'] = language
-        if rate is not None:
-            tts_config['rate'] = rate
-        if pitch is not None:
-            tts_config['pitch'] = pitch
-
-        # Configure TTS
-        if provider != 'system':
-            if not tts.configure_tts_from_dict(tts_config):
-                error_msg = f"Failed to configure TTS provider: {provider}"
-                log_message("ERROR", f"configure_tts error: {error_msg}")
-                return error_msg
-
-        # Update shared state with new configuration
         from .state import set_tts_config_thread_safe
-        set_tts_config_thread_safe(provider=provider, voice=voice, region=region,
-                                   language=language, rate=rate, pitch=pitch)
+
+        # Capture current configuration for sensible fallbacks
+        existing_config = tts.get_tts_config()
+
+        def _provider_defaults(name: str) -> dict[str, Any]:
+            defaults: dict[str, Any] = {}
+            if name in ('aws', 'polly'):
+                defaults['voice'] = tts.polly_voice
+                defaults['region'] = tts.polly_region
+            elif name == 'openai':
+                defaults['voice'] = tts.openai_voice
+            elif name == 'azure':
+                defaults['voice'] = tts.azure_voice
+                defaults['region'] = tts.azure_region
+            elif name == 'gcloud':
+                defaults['voice'] = tts.gcloud_voice
+                defaults['language'] = tts.gcloud_language_code
+            elif name == 'elevenlabs':
+                defaults['voice'] = tts.elevenlabs_voice_id
+            elif name == 'deepgram':
+                defaults['voice'] = tts.deepgram_voice_model
+            elif name == 'kittentts':
+                defaults['voice'] = tts.kittentts_voice
+                defaults['model'] = tts.kittentts_model
+            elif name == 'kokoro':
+                defaults['voice'] = tts.kokoro_voice
+                defaults['language'] = tts.kokoro_language
+                defaults['rate'] = tts.kokoro_speed
+            return defaults
+
+        defaults = _provider_defaults(provider)
+
+        desired_model = defaults.get('model') or existing_config.get('model')
+        desired_voice = voice or defaults.get('voice') or existing_config.get('voice')
+        desired_region = region or defaults.get('region') or existing_config.get('region')
+        desired_language = language or defaults.get('language') or existing_config.get('language')
+        defaults_rate = defaults.get('rate')
+        desired_rate = rate if rate is not None else (defaults_rate if defaults_rate is not None else existing_config.get('rate'))
+        desired_pitch = pitch if pitch is not None else existing_config.get('pitch')
+
+        final_provider = provider
+
+        if provider != 'system':
+            config_args = SimpleNamespace(
+                tts_provider=provider,
+                tts_voice=desired_voice,
+                tts_region=desired_region,
+                tts_language=desired_language,
+                tts_rate=desired_rate,
+                tts_pitch=desired_pitch,
+            )
+
+            if not tts.configure_tts_from_args(config_args):
+                raise RuntimeError(f"Failed to configure TTS provider: {provider}")
+
+            final_provider = tts.tts_provider or provider
+            # Refresh resolved values from current module globals in case they were updated
+            refreshed_defaults = _provider_defaults(final_provider)
+            desired_model = refreshed_defaults.get('model', desired_model)
+            desired_voice = refreshed_defaults.get('voice', desired_voice)
+            desired_region = refreshed_defaults.get('region', desired_region)
+            desired_language = refreshed_defaults.get('language', desired_language)
+            refreshed_rate = refreshed_defaults.get('rate')
+            if rate is None and refreshed_rate is not None:
+                desired_rate = refreshed_rate
+        else:
+            tts.tts_provider = 'system'
+
+        # Update shared state with the final configuration
+        set_tts_config_thread_safe(provider=final_provider, voice=desired_voice, region=desired_region,
+                                   language=desired_language, model=desired_model, rate=desired_rate, pitch=desired_pitch)
+
+        # Verify the config was set
+        log_message("DEBUG", f"After set_tts_config_thread_safe, provider={final_provider}")
+        verify_config = tts.get_tts_config()
+        log_message("DEBUG", f"Verified get_tts_config() returns: {verify_config}")
+
+        # Also verify shared state directly
+        verify_state = get_shared_state()
+        log_message("DEBUG", f"Verified shared_state.tts_provider: {verify_state.tts_provider}")
 
         # Restart TTS worker with new config
         if get_shared_state().tts_initialized:
             tts.shutdown_tts()
+            # Clear the queue to remove any leftover __SHUTDOWN__ messages
+            tts.reset_tts_cache()
 
-        engine = provider if provider != 'system' else tts.detect_tts_engine()
+        # For local models, preload the model before starting the worker
+        if final_provider in ['kittentts', 'kokoro']:
+            log_message("INFO", f"Preloading {final_provider} model...")
+            tts.preload_local_model(final_provider)
+
+        engine = final_provider if final_provider != 'system' else tts.detect_tts_engine()
         tts.start_tts_worker(engine, auto_skip_tts=_auto_skip_tts)
 
-        config_parts = [f"provider={provider}"]
-        if voice:
-            config_parts.append(f"voice={voice}")
-        if region:
-            config_parts.append(f"region={region}")
-        if language:
-            config_parts.append(f"language={language}")
-        if rate is not None:
-            config_parts.append(f"rate={rate}")
-        if pitch is not None:
-            config_parts.append(f"pitch={pitch}")
+        config_parts = [f"provider={final_provider}"]
+        if desired_voice:
+            config_parts.append(f"voice={desired_voice}")
+        if desired_region:
+            config_parts.append(f"region={desired_region}")
+        if desired_language:
+            config_parts.append(f"language={desired_language}")
+        if desired_rate is not None:
+            config_parts.append(f"rate={desired_rate}")
+        if desired_pitch is not None:
+            config_parts.append(f"pitch={desired_pitch}")
 
         result = f"Configured TTS: {', '.join(config_parts)}"
         log_message("INFO", f"configure_tts result: {result}")
@@ -1037,7 +1139,7 @@ async def change_tts(provider: str = "system", voice: str = None, region: str = 
     Change TTS provider
 
     Args:
-        provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs)
+        provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs, deepgram, kittentts, kokoro)
         voice: Voice name (provider-specific)
         region: Region for cloud providers
         language: Language code (e.g., en-US)
@@ -1057,9 +1159,9 @@ async def change_tts(provider: str = "system", voice: str = None, region: str = 
 async def configure_tts(provider: str = "system", voice: str = None, region: str = None, language: str = None, rate: float = None, pitch: float = None) -> str:
     """
     Configure TTS provider
-    
+
     Args:
-        provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs)
+        provider: TTS provider (system, openai, aws, polly, azure, gcloud, elevenlabs, deepgram, kittentts, kokoro)
         voice: Voice name (provider-specific)
         region: Region for cloud providers
         language: Language code (e.g., en-US)
@@ -3203,7 +3305,10 @@ def main():
         
         # Save logging state before FastMCP messes with it
         _save_logging_state()
-        
+
+        # Mark MCP server as running in shared state
+        get_shared_state().set_mcp_server_running(True)
+
         # Try to use the newer FastMCP API with port configuration
         try:
             if args.transport == 'stdio':
@@ -3226,6 +3331,7 @@ def main():
             app.run(transport=args.transport)
         
         # This line only executes after the server shuts down
+        get_shared_state().set_mcp_server_running(False)
         print("Talkito MCP server has stopped.", file=sys.stderr)
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Don't print the traceback for expected interruptions
@@ -3236,7 +3342,7 @@ def main():
     except Exception as e:
         # Only print error details for unexpected exceptions
         print(f"Talkito MCP SSE server error: {e}", file=sys.stderr)
-        
+
         # If it's a port binding error, try the next port
         if "address already in use" in str(e) and not args.port:
             print("\nPort 8000 is in use. Try specifying a different port:", file=sys.stderr)
@@ -3245,12 +3351,13 @@ def main():
             # Only re-raise if it's not a known error
             raise
     finally:
+        get_shared_state().set_mcp_server_running(False)
         _cleanup()
 
 if __name__ == "__main__":
     # Check Python version
-    if sys.version_info < (3, 8):
-        print("Error: Python 3.8 or higher required", file=sys.stderr)
+    if sys.version_info < (3, 10):
+        print("Error: Python 3.10 or higher required", file=sys.stderr)
         sys.exit(1)
     
     main()
