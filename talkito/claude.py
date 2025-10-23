@@ -27,7 +27,7 @@ import threading
 import time
 
 from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
-from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config
+from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config, get_shared_state
 from .logs import log_message
 from .core import build_comms_config
 
@@ -606,9 +606,16 @@ async def run_claude_extensions(args) -> int:
                     log_message("WARNING", f"[CLAUDE_HYBRID] MCP server health check timeout after {time.time() - health_check_start:.3f}s")
                     # Fall back to small sleep if health check fails
                     time.sleep(0.5)
+
+                # Mark MCP server as running (port is listening even if health check had issues)
+                get_shared_state().set_mcp_server_running(True)
         else:
             # Server signaled ready - give it a tiny bit more time to be safe
             time.sleep(0.2)
+
+        # Mark MCP server as running in shared state
+        get_shared_state().set_mcp_server_running(True)
+
         log_message("INFO", "[CLAUDE_HYBRID] restoring logging")
         # Restore logging after FastMCP has messed with it
         if args.log_file:

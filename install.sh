@@ -59,7 +59,7 @@ install_system_deps() {
                 sudo apk add --no-cache python3 py3-pip portaudio-dev git
             else
                 echo -e "${YELLOW}⚠️  Could not detect package manager. Please install these manually:${NC}"
-                echo "   - Python 3.8+"
+                echo "   - Python 3.10+"
                 echo "   - pip3"
                 echo "   - portaudio development files"
                 echo "   - git"
@@ -131,14 +131,14 @@ check_requirements() {
     # Check Python version
     if ! command_exists python3; then
         echo -e "${RED}❌ Python 3 is required but not found${NC}"
-        echo "   Please install Python 3.8 or higher"
+        echo "   Please install Python 3.10 or higher"
         exit 1
     fi
     
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    REQUIRED_VERSION="3.8"
+    REQUIRED_VERSION="3.10"
     
-    if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 8) else 1)"; then
+    if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)"; then
         echo -e "${RED}❌ Python $REQUIRED_VERSION or higher is required (found $PYTHON_VERSION)${NC}"
         exit 1
     fi

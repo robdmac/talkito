@@ -292,12 +292,15 @@ def _create_model_instance(provider: str):
         with suppress_ai_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
             from kokoro import KPipeline
-        
+
         # Model creation - consent was already obtained in main thread
         repo_id = 'hexgrad/Kokoro-82M'
+        log_message("DEBUG", f"About to create KPipeline(lang_code='en-us', repo_id='{repo_id}')")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            return KPipeline(lang_code='en-us', repo_id=repo_id)
+            pipeline = KPipeline(lang_code='en-us', repo_id=repo_id)
+        log_message("DEBUG", "KPipeline created successfully")
+        return pipeline
         
     elif provider == 'kittentts':
         # First check if kittentts module is installed
@@ -325,24 +328,27 @@ def _create_model_instance(provider: str):
 def _load_model_background(provider: str):
     """Load model in background thread."""
     global _local_model_cache, _local_model_provider, _local_model_loading, _local_model_error
-    
+
     try:
         log_message("INFO", f"Background loading {provider} model...")
+        log_message("DEBUG", f"About to call _create_model_instance({provider})")
         model = _create_model_instance(provider)
-        
+        log_message("DEBUG", f"_create_model_instance({provider}) returned successfully")
+
         with _local_model_cache_lock:
             _local_model_cache = model
             _local_model_provider = provider
             _local_model_loading = False
             _local_model_error = None
-            
+
         log_message("INFO", f"{provider} model loaded successfully in background")
-        
+
     except Exception as e:
         with _local_model_cache_lock:
             _local_model_loading = False
             _local_model_error = f"{provider} model loading failed: {e}"
         log_message("ERROR", f"Background {provider} model loading failed: {e}")
+        log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
 
 def preload_local_model(provider: str):
@@ -1188,7 +1194,6 @@ def _write_temp_audio(audio_bytes: bytes, ext: str) -> str:
 def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = True, needs_skip: bool = False) -> bool:
     """Synthesize audio via provider function and play it."""
     try:
-        log_message("DEBUG", "synthesize_and_play")
         result = synthesize_func(text)
         if not result or not isinstance(result, tuple) or len(result) != 2:
             log_message("ERROR", f"Synthesizer returned unexpected result: {result!r}")
@@ -1725,9 +1730,11 @@ def speak_text(text: str, engine: str, needs_skip: bool = False) -> bool:
     provider = create_tts_provider(current_provider)
     if provider:
         try:
-            return provider.speak(text, use_process_control=True, needs_skip=needs_skip)
+            result = provider.speak(text, use_process_control=True, needs_skip=needs_skip)
+            return result
         except Exception as e:
             log_message("ERROR", f"TTS provider {current_provider} failed: {e}")
+            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
             return False
 
     return speak_with_default(text, engine)

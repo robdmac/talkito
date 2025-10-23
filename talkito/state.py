@@ -208,6 +208,7 @@ class TalkitoState:
     tts_voice: Optional[str] = None
     tts_region: Optional[str] = None
     tts_language: Optional[str] = None
+    tts_model: Optional[str] = None
     tts_rate: Optional[float] = None
     tts_pitch: Optional[float] = None
     tts_mode: str = 'auto-skip'
@@ -230,7 +231,10 @@ class TalkitoState:
     
     # Hook tracking
     in_tool_use: bool = False  # True between PreToolUse and PostToolUse hooks
-    
+
+    # MCP server tracking
+    mcp_server_running: bool = False
+
     # One-time notifications
     tap_to_talk_notification_shown: bool = False
     
@@ -326,7 +330,8 @@ class TalkitoState:
     
     def set_tts_config(self, provider: Optional[str] = None, voice: Optional[str] = None, 
                        region: Optional[str] = None, language: Optional[str] = None,
-                       rate: Optional[float] = None, pitch: Optional[float] = None):
+                       model: Optional[str] = None, rate: Optional[float] = None,
+                       pitch: Optional[float] = None):
         """Set TTS configuration"""
         with self._lock:
             if provider is not None:
@@ -337,6 +342,8 @@ class TalkitoState:
                 self.tts_region = region
             if language is not None:
                 self.tts_language = language
+            if model is not None:
+                self.tts_model = model
             if rate is not None:
                 self.tts_rate = rate
             if pitch is not None:
@@ -376,6 +383,7 @@ class TalkitoState:
                 'tts_voice': self.tts_voice,
                 'tts_region': self.tts_region,
                 'tts_language': self.tts_language,
+                'tts_model': self.tts_model,
                 'tts_rate': self.tts_rate,
                 'tts_pitch': self.tts_pitch,
                 'tts_mode': self.tts_mode,
@@ -446,6 +454,21 @@ class TalkitoState:
         with self._lock:
             self.in_tool_use = in_use
 
+    def get_mcp_server_running(self) -> bool:
+        """Thread-safe getter for mcp_server_running"""
+        with self._lock:
+            return self.mcp_server_running
+
+    def set_mcp_server_running(self, running: bool):
+        """Set MCP server running state (thread-safe)"""
+        with self._lock:
+            old_value = self.mcp_server_running
+            self.mcp_server_running = running
+            changed = old_value != running
+
+        if changed:
+            self._trigger_callbacks('mcp_server_changed', running=running)
+
 
 class SharedStateManager:
     """Singleton manager for shared Talkito state"""
@@ -490,6 +513,8 @@ class SharedStateManager:
                         self.state.tts_region = data['tts_region']
                     if 'tts_language' in data:
                         self.state.tts_language = data['tts_language']
+                    if 'tts_model' in data:
+                        self.state.tts_model = data['tts_model']
                     if 'tts_rate' in data:
                         self.state.tts_rate = data['tts_rate']
                     if 'tts_pitch' in data:
@@ -566,10 +591,11 @@ class SharedStateManager:
     # Thread-safe state mutation methods
     def set_tts_config(self, provider: Optional[str] = None, voice: Optional[str] = None,
                        region: Optional[str] = None, language: Optional[str] = None,
-                       rate: Optional[float] = None, pitch: Optional[float] = None):
+                       model: Optional[str] = None, rate: Optional[float] = None,
+                       pitch: Optional[float] = None):
         """Thread-safe TTS configuration update"""
         with self._lock:
-            self.state.set_tts_config(provider, voice, region, language, rate, pitch)
+            self.state.set_tts_config(provider, voice, region, language, model, rate, pitch)
             self.save_state()
     
     def set_tts_enabled(self, enabled: bool):
@@ -589,6 +615,12 @@ class SharedStateManager:
         """Thread-safe ASR configuration update"""
         with self._lock:
             self.state.set_asr_config(provider, language, model)
+            self.save_state()
+    
+    def set_asr_mode(self, mode: str):
+        """Thread-safe ASR mode update"""
+        with self._lock:
+            self.state.asr_mode = mode
             self.save_state()
     
     def set_asr_initialized(self, initialized: bool, provider: Optional[str] = None):
@@ -648,6 +680,9 @@ def initialize_providers_early(args):
 
     shared_state = get_shared_state()
 
+    # Capture desired ASR mode before initialization logic potentially overrides it
+    requested_asr_mode = getattr(args, 'asr_mode', None) if hasattr(args, 'asr_mode') else None
+    
     # Trigger TTS provider selection (this will run availability checks and downloads)
     # Check both command line args and environment variable (same as ASR)
     step_start = time.time()
@@ -695,13 +730,16 @@ def initialize_providers_early(args):
     
     # Start preloading local whisper models early for local_whisper provider
     if shared_state.asr_provider == 'local_whisper':
-        try:
-            preload_start = time.time()
-            log_message("INFO", f"Starting early ASR model preloading for: {shared_state.asr_provider}")
-            asr_module.preload_local_asr_model()
-            log_message("INFO", f"Early ASR model preloading started for {shared_state.asr_provider} [{time.time() - preload_start:.3f}s]")
-        except Exception as preload_e:
-            log_message("ERROR", f"Early ASR model preloading failed for {shared_state.asr_provider}: {preload_e}")
+        if requested_asr_mode == 'off':
+            log_message("INFO", "Skipping PyWhisper preload - ASR mode requested as 'off'")
+        else:
+            try:
+                preload_start = time.time()
+                log_message("INFO", f"Starting early ASR model preloading for: {shared_state.asr_provider}")
+                asr_module.preload_local_asr_model()
+                log_message("INFO", f"Early ASR model preloading started for {shared_state.asr_provider} [{time.time() - preload_start:.3f}s]")
+            except Exception as preload_e:
+                log_message("ERROR", f"Early ASR model preloading failed for {shared_state.asr_provider}: {preload_e}")
     else:
         log_message("INFO", f"Skipping PyWhisper preload - ASR provider is: {shared_state.asr_provider}")
     
@@ -774,9 +812,13 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         else:
             asr_emoji = "🔴"
         
+        # MCP server status
+        mcp_running = shared_state.get_mcp_server_running()
+        mcp_status = "🟢 MCP" if mcp_running else "🔴 MCP"
+
         # Communication status - check both configuration and mode status
         comms = []
-        
+
         # Check if providers are configured (regardless of mode)
         if comms_manager:
             has_whatsapp = status["whatsapp"]["configured"]
@@ -787,21 +829,21 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
             has_whatsapp = shared_state.communication.whatsapp_enabled and shared_state.communication.whatsapp_to_number is not None
             # For Slack: need both channel AND enabled flag
             has_slack = shared_state.communication.slack_enabled and shared_state.communication.slack_channel is not None
-        
+
         # Show status based on configuration and mode
         if has_whatsapp:
             if shared_state.get_whatsapp_mode_active():
                 comms.append("🟢 WhatsApp")
             else:
                 comms.append("⚪ WhatsApp")  # Configured but mode not active
-        
+
         if has_slack:
             if shared_state.get_slack_mode_active():
                 comms.append("🟢 Slack")
             else:
                 comms.append("⚪ Slack")  # Configured but mode not active
-        
-        return f"TalkiTo: {tts_emoji} {tts_display} | {asr_emoji} {asr_display} | Comms: {', '.join(comms) if comms else 'none'}"
+
+        return f"TalkiTo: {tts_emoji} {tts_display} | {asr_emoji} {asr_display} | {mcp_status} | Comms: {', '.join(comms) if comms else 'none'}"
         
     except Exception as e:
         return f"Error getting status: {str(e)}"
@@ -832,12 +874,18 @@ TALKITO DEFAULT ASR MODE HAS CHANGED
 
 def set_tts_config_thread_safe(provider: Optional[str] = None, voice: Optional[str] = None,
                                region: Optional[str] = None, language: Optional[str] = None,
-                               rate: Optional[float] = None, pitch: Optional[float] = None):
+                               model: Optional[str] = None, rate: Optional[float] = None,
+                               pitch: Optional[float] = None):
     """Thread-safe helper to update TTS configuration"""
-    _shared_state.set_tts_config(provider, voice, region, language, rate, pitch)
+    _shared_state.set_tts_config(provider, voice, region, language, model, rate, pitch)
 
 
 def set_asr_config_thread_safe(provider: Optional[str] = None, language: Optional[str] = None,
                                model: Optional[str] = None):
     """Thread-safe helper to update ASR configuration"""
     _shared_state.set_asr_config(provider, language, model)
+
+
+def set_asr_mode_thread_safe(mode: str):
+    """Thread-safe helper to update ASR mode"""
+    _shared_state.set_asr_mode(mode)

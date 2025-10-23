@@ -340,7 +340,7 @@ For WhatsApp setup with zrok tunneling:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - macOS (with `say` command) or Linux (with `espeak`, `festival`, or `flite`)
 - Optional: `SpeechRecognition` and `pyaudio` for ASR support
 - Optional: Provider-specific Python packages (installed as needed)
