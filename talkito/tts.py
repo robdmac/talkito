@@ -269,6 +269,50 @@ TTS_PROVIDERS = {
     }
 }
 
+# Available voices for each TTS provider
+AVAILABLE_VOICES = {
+    'openai': ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
+    'aws': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
+    'polly': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
+    'azure': ['en-US-AriaNeural', 'en-US-GuyNeural', 'en-US-JennyNeural', 'en-US-AmberNeural', 'en-US-AshleyNeural', 'en-US-BrandonNeural', 'en-US-ChristopherNeural', 'en-US-CoraNeural', 'en-US-DavisNeural', 'en-US-ElizabethNeural', 'en-US-EricNeural', 'en-US-JacobNeural', 'en-US-JaneNeural', 'en-US-JasonNeural', 'en-US-MichelleNeural', 'en-US-MonicaNeural', 'en-US-NancyNeural', 'en-US-RogerNeural', 'en-US-SaraNeural', 'en-US-SteffanNeural', 'en-US-TonyNeural'],
+    'gcloud': ['en-US-Standard-A', 'en-US-Standard-B', 'en-US-Standard-C', 'en-US-Standard-D', 'en-US-Standard-E', 'en-US-Standard-F', 'en-US-Standard-G', 'en-US-Standard-H', 'en-US-Standard-I', 'en-US-Standard-J', 'en-US-Journey-D', 'en-US-Journey-F', 'en-US-News-K', 'en-US-News-L', 'en-US-News-M', 'en-US-News-N', 'en-US-Polyglot-1', 'en-US-Studio-M', 'en-US-Studio-O', 'en-US-Wavenet-A', 'en-US-Wavenet-B', 'en-US-Wavenet-C', 'en-US-Wavenet-D', 'en-US-Wavenet-E', 'en-US-Wavenet-F'],
+    'elevenlabs': [
+        ('21m00Tcm4TlvDq8ikWAM', 'Rachel'),
+        ('AZnzlk1XvdvUeBnXmlld', 'Domi'),
+        ('EXAVITQu4vr4xnSDxMaL', 'Bella'),
+        ('ErXwobaYiN019PkySvjV', 'Antoni'),
+        ('MF3mGyEYCl7XYWbV9V6O', 'Elli'),
+        ('TxGEqnHWrfWFTfGW9XjX', 'Josh'),
+        ('VR6AewLTigWG4xSOukaG', 'Arnold'),
+        ('pNInz6obpgDQGcFmaJgB', 'Adam'),
+        ('yoZ06aMxZJJ28mfd3POQ', 'Sam'),
+    ],
+    'deepgram': ['aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en'],
+    'kittentts': ['expr-voice-2-m', 'expr-voice-2-f', 'expr-voice-3-m', 'expr-voice-3-f', 'expr-voice-4-m', 'expr-voice-4-f', 'expr-voice-5-m', 'expr-voice-5-f'],
+    'kokoro': [
+        # American English
+        'af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky',
+        'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa',
+        # British English
+        'bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily', 'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis',
+        # Japanese
+        'jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo',
+        # Mandarin Chinese
+        'zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian', 'zm_yunxi', 'zm_yunxia', 'zm_yunyang',
+        # Spanish
+        'ef_dora', 'em_alex', 'em_santa',
+        # French
+        'ff_siwis',
+        # Hindi
+        'hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi',
+        # Italian
+        'if_sara', 'im_nicola',
+        # Brazilian Portuguese
+        'pf_dora', 'pm_alex', 'pm_santa',
+    ],
+    'system': []  # System voices depend on the OS
+}
+
 
 def _create_model_instance(provider: str):
     """Create model instance for the specified provider."""
@@ -469,6 +513,22 @@ def get_cached_local_model(provider: str, timeout: float = 10.0):
         
         time.sleep(0.1)
 
+def get_state_voice_if_valid() -> Optional[str]:
+    """Check if voice is valid for the given provider."""
+    state = get_shared_state()
+    provider = state.tts_provider or tts_provider
+    if provider not in AVAILABLE_VOICES:
+        return None
+    voices = AVAILABLE_VOICES.get(provider, [])
+    # ElevenLabs voices are tuples (id, name)
+    if provider == 'elevenlabs':
+        valid_ids = [voice_id for voice_id, _ in voices]
+        if state.tts_voice in valid_ids:
+            return state.tts_voice
+    else:
+        if state.tts_voice in voices:
+            return state.tts_voice
+    return None
 
 def get_tts_config():
     """Get TTS configuration from shared state or module globals."""
@@ -485,25 +545,25 @@ def get_tts_config():
 
         # Map provider-specific voice settings
         if state.tts_provider == 'openai':
-            config['voice'] = state.tts_voice or openai_voice
+            config['voice'] = get_state_voice_if_valid() or openai_voice
         elif state.tts_provider in ['aws', 'polly']:
-            config['voice'] = state.tts_voice or polly_voice
+            config['voice'] = get_state_voice_if_valid() or polly_voice
             config['region'] = state.tts_region or polly_region
         elif state.tts_provider == 'azure':
-            config['voice'] = state.tts_voice or azure_voice
+            config['voice'] = get_state_voice_if_valid() or azure_voice
             config['region'] = state.tts_region or azure_region
         elif state.tts_provider == 'gcloud':
-            config['voice'] = state.tts_voice or gcloud_voice
+            config['voice'] = get_state_voice_if_valid() or gcloud_voice
             config['language'] = state.tts_language or gcloud_language_code
         elif state.tts_provider == 'elevenlabs':
-            config['voice'] = state.tts_voice or elevenlabs_voice_id
+            config['voice'] = get_state_voice_if_valid() or elevenlabs_voice_id
         elif state.tts_provider == 'deepgram':
-            config['voice'] = state.tts_voice or deepgram_voice_model
+            config['voice'] = get_state_voice_if_valid() or deepgram_voice_model
         elif state.tts_provider == 'kittentts':
-            config['voice'] = state.tts_voice or kittentts_voice
+            config['voice'] = get_state_voice_if_valid() or kittentts_voice
             config['model'] = state.tts_model or kittentts_model
         elif state.tts_provider == 'kokoro':
-            config['voice'] = state.tts_voice or kokoro_voice
+            config['voice'] = get_state_voice_if_valid() or kokoro_voice
             config['language'] = state.tts_language or kokoro_language
             config['speed'] = float(state.tts_rate or kokoro_speed)
 
