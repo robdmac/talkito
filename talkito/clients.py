@@ -284,14 +284,25 @@ async def run_terminal_agent_extensions(args) -> int:
     """Run Claude with in-process MCP server and wrapper functionality"""
 
     log_message("DEBUG", "run_terminal_agent_extensions")
-    
-    # Find available port
-    port = args.port if args.port else find_available_port(8000)
-    if not port:
-        print("Error: Could not find an available port", file=sys.stderr)
-        return 1
 
-    # Start MCP server in background thread
+    # Determine if we should enable MCP server
+    # Use getattr with default False to avoid AttributeError in test/utility code
+    mcp_enabled = not getattr(args, "disable_mcp", False)
+    port = None
+
+    # Find available port only if MCP is enabled
+    if mcp_enabled:
+        port = args.port if args.port else find_available_port(8000)
+        if not port:
+            print("Warning: Could not find an available port for MCP server - continuing without MCP extensions", file=sys.stderr)
+            mcp_enabled = False
+            get_shared_state().set_mcp_server_running(False)
+    else:
+        # MCP explicitly disabled - ensure state reflects this
+        get_shared_state().set_mcp_server_running(False)
+
+    # Start MCP server in background thread (only if enabled)
+    # Always create Event object to avoid AttributeError if code is refactored
     server_ready = threading.Event()
 
     def check_port_listening(host='127.0.0.1', check_port=None, timeout=0.1):
@@ -484,9 +495,9 @@ async def run_terminal_agent_extensions(args) -> int:
 
         if args.command == 'claude':
             args = run_api_server(args)
-        
+
         # Start the MCP server thread
-        if not args.disable_mcp:
+        if mcp_enabled:
             log_message("INFO", "About to start MCP server thread")
             server_thread = threading.Thread(target=run_mcp_server, daemon=True)
             thread_start_time = time.time()
@@ -543,15 +554,18 @@ async def run_terminal_agent_extensions(args) -> int:
         except Exception as e:
             print(f"Error creating .talkito.env: {e}")
 
-        # Initialize coding terminal agent with streamable-http transport
-        if args.command == 'claude':
-            # Claude uses streamable-http transport
-            if not init_claude(transport="streamable-http", address="http://127.0.0.1", port=port):
-                print("Warning: Failed to configure Claude Code for streamable-http", file=sys.stderr)
-        elif args.command == 'codex':
-            # Codex uses streamable-http transport
-            if not init_codex(transport="streamable-http", address="http://127.0.0.1", port=port):
-                print("Warning: Failed to configure Codex CLI for streamable-http", file=sys.stderr)
+        # Initialize coding terminal agent with streamable-http transport (only if MCP is enabled)
+        if mcp_enabled:
+            if args.command == 'claude':
+                # Claude uses streamable-http transport
+                if not init_claude(transport="streamable-http", address="http://127.0.0.1", port=port):
+                    print("Warning: Failed to configure Claude Code for streamable-http", file=sys.stderr)
+            elif args.command == 'codex':
+                # Codex uses streamable-http transport
+                if not init_codex(transport="streamable-http", address="http://127.0.0.1", port=port):
+                    print("Warning: Failed to configure Codex CLI for streamable-http", file=sys.stderr)
+        else:
+            log_message("INFO", "MCP server disabled - skipping agent configuration")
 
         log_message("INFO", "starting print_configuration_status")
         # Show configuration status (now reflects actual providers after fallback)
