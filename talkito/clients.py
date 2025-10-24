@@ -18,6 +18,7 @@
 
 """Claude integration initialization for Talkito - handles setting up Claude Desktop configuration and permissions"""
 
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -26,10 +27,11 @@ import sys
 import threading
 import time
 
-from .templates import ENV_EXAMPLE_TEMPLATE, TALKITO_MD_CONTENT
-from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config, get_shared_state
-from .logs import log_message
 from .core import build_comms_config
+from .logs import log_message
+from .mcp import app, configure_mcp_server, find_available_port
+from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config, get_shared_state
+from .templates import ENV_EXAMPLE_TEMPLATE
 
 
 TALKITO_PERMISSIONS = [
@@ -159,28 +161,6 @@ def update_claude_hooks(webhook_port=8080):
         return False
 
 
-def create_talkito_md():
-    """Create TALKITO.md in current directory"""
-    talkito_md_path = Path("TALKITO.md")
-    
-    exists = talkito_md_path.exists()
-
-    if exists:
-        print("TALKITO.md already exists")
-        return True
-    
-    with open(talkito_md_path, 'w') as f:
-        f.write(TALKITO_MD_CONTENT)
-    
-    # if existed:
-    #     print("✓ Rewrote TALKITO.md")
-    # else:
-
-    print("Created TALKITO.md")
-
-    return True
-
-
 def create_talkito_env():
     """Create .talkito.env template in current directory"""
     talkito_env_path = Path(".talkito.env")
@@ -193,40 +173,6 @@ def create_talkito_env():
         f.write(ENV_EXAMPLE_TEMPLATE)
     
     print("Created .talkito.env (copy settings to .env as needed)")
-    return True
-
-
-def update_claude_md():
-    """Update or create CLAUDE.md with talkito import"""
-    claude_md_path = Path("CLAUDE.md")
-    
-    if claude_md_path.exists():
-        # Check if talkito section already exists
-        with open(claude_md_path, 'r') as f:
-            content = f.read()
-        
-        if "@TALKITO.md" in content:
-            print("CLAUDE.md already contains talkito import")
-            return True  # Already exists, nothing to do
-        else:
-            # Add talkito section to existing CLAUDE.md
-            with open(claude_md_path, 'a') as f:
-                f.write("\n## Talkito MCP Voice Mode\n")
-                f.write("- @TALKITO.md\n")
-            print("Updated CLAUDE.md with talkito import")
-    else:
-        # Create new CLAUDE.md with talkito section
-        content = """# CLAUDE.md
-
-This file provides guidance to Claude Code when working in this project.
-
-## Talkito MCP Voice Mode
-- @TALKITO.md
-"""
-        with open(claude_md_path, 'w') as f:
-            f.write(content)
-        print("Created CLAUDE.md with talkito import")
-    
     return True
 
 
@@ -250,97 +196,94 @@ def find_talkito_command():
     return "talkito"
 
 
-def init_claude(transport="sse", address="http://127.0.0.1", port=8001):
-    """Initialize Claude integration for talkito"""
-    
+def init_claude(transport="streamable-http", address="http://127.0.0.1", port=8001):
+    """Initialize Claude integration for talkito (uses streamable-http transport)"""
+
     success = True
-    
-    # 1. Create TALKITO.md
-    # try:
-    #     create_talkito_md()
-    # except Exception as e:
-    #     print(f"✗ Error creating TALKITO.md: {e}")
-    #     success = False
-    
-    # 2. Update Claude settings
+
     try:
         update_claude_settings()
-    except Exception as e:
-        print(f"✗ Error updating Claude settings: {e}")
-        success = False
-    
-    # 3. Update CLAUDE.md
-    # try:
-    #     update_claude_md()
-    # except Exception as e:
-    #     print(f"✗ Error updating CLAUDE.md: {e}")
-    #     success = False
-    
-    # 4. Create .talkito.env template
-    try:
-        create_talkito_env()
-    except Exception as e:
-        print(f"✗ Error creating .talkito.env: {e}")
-        success = False
-    
-    # 5. Add talkito to Claude MCP servers
-    try:
+
         # Check if claude CLI is available
         claude_path = shutil.which('claude')
         if claude_path:
-            # Run the claude mcp add command
-            mcp_url = None  # Initialize for scope
-            if transport == "sse":
-                mcp_url = address+str(port)+"/sse"
-                result = subprocess.run(
-                    ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport],
-                    capture_output=True,
-                    text=True
-                )
-            else:
-                result = subprocess.run(
-                    ['claude', 'mcp', 'add', 'talkito', 'talkito', '--', '--mcp-server'],
-                    capture_output=True,
-                    text=True
-                )
+            mcp_url = f"{address}:{port}/mcp"
+
+            # Remove old config if it exists
+            subprocess.run(['claude', 'mcp', 'remove', 'talkito'],
+                         capture_output=True, text=True)
+
+            result = subprocess.run(
+                ['claude', 'mcp', 'add', '--transport', 'http', 'talkito', mcp_url],
+                capture_output=True,
+                text=True
+            )
+
             if result.returncode != 0:
-                if "already exists" in result.stderr:
-                    # Try to update the configuration by removing and re-adding
-                    remove_result = subprocess.run(
-                        ['claude', 'mcp', 'remove', 'talkito'],
-                        capture_output=True,
-                        text=True
-                    )
-                    if remove_result.returncode == 0:
-                        # Now re-add with the new configuration
-                        if transport == "sse":
-                            result = subprocess.run(
-                                ['claude', 'mcp', 'add', 'talkito', mcp_url, '--transport', transport,],
-                                capture_output=True,
-                                text=True
-                            )
-                            if result.returncode != 0:
-                                print(f"✗ Failed to re-add MCP server: {result.stderr}")
-                                success = False
-                else:
-                    print(f"✗ Failed to add MCP server: {result.stderr}")
-                    success = False
+                print(f"Failed to add MCP server: {result.stderr}")
+                success = False
+            else:
+                log_message("DEBUG", f"Configured Claude to use talkito MCP server at {mcp_url} (streamable-http)")
         else:
-            print("✗ Claude CLI not found")
-            print("Install Claude CLI and run: claude mcp add talkito talkito -- --mcp-server")
+            print("Claude CLI not found")
+            print("Install Claude CLI and run: claude mcp add --transport http talkito http://127.0.0.1:8000/mcp")
             success = False
     except Exception as e:
-        print(f"✗ Error adding MCP server: {e}")
+        print(f"Error adding MCP server: {e}")
         success = False
-    
+
     return success
 
 
-async def run_claude_extensions(args) -> int:
-    """Run Claude with in-process MCP server and wrapper functionality"""
-    from .mcp import app, find_available_port
+def init_codex(transport="streamable-http", address="http://127.0.0.1", port=8001):
+    """Initialize Codex integration for talkito (uses streamable-http transport)"""
 
-    log_message("DEBUG", "run_claude_hybrid")
+    # Check if codex CLI is available
+    codex_path = shutil.which('codex')
+    if not codex_path:
+        print("Codex CLI not found")
+        print("Install Codex CLI - see: https://developers.openai.com/codex/")
+        return False
+
+    try:
+        mcp_url = f"{address}:{port}/mcp"
+
+        codex_config_path = Path.home() / ".codex" / "config.toml"
+        codex_config_path.parent.mkdir(exist_ok=True)
+
+        # Read existing config
+        config_content = ""
+        if codex_config_path.exists():
+            with open(codex_config_path, 'r') as f:
+                config_content = f.read()
+
+        # Remove old talkito section if exists
+        import re
+        talkito_section_pattern = r'\[mcp_servers\.talkito\].*?(?=\n\[|$)'
+        config_content = re.sub(talkito_section_pattern, '', config_content, flags=re.DOTALL).strip()
+
+        # Add new section for streamable-http
+        new_section = f'\n\n[mcp_servers.talkito]\nurl = "{mcp_url}"\n'
+        config_content += new_section
+
+        # Write config back
+        with open(codex_config_path, 'w') as f:
+            f.write(config_content)
+
+        log_message("DEBUG", f"Configured Codex to use talkito MCP server at {mcp_url} (streamable-http)")
+        return True
+
+    except Exception as e:
+        print(f"Error adding MCP server: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+async def run_terminal_agent_extensions(args) -> int:
+    """Run Claude with in-process MCP server and wrapper functionality"""
+
+    log_message("DEBUG", "run_terminal_agent_extensions")
     
     # Find available port
     port = args.port if args.port else find_available_port(8000)
@@ -350,8 +293,7 @@ async def run_claude_extensions(args) -> int:
 
     # Start MCP server in background thread
     server_ready = threading.Event()
-    server_thread = None
-    
+
     def check_port_listening(host='127.0.0.1', check_port=None, timeout=0.1):
         """Check if a port is listening"""
         import socket
@@ -367,18 +309,18 @@ async def run_claude_extensions(args) -> int:
     
     def optimized_mcp_health_check(check_port, timeout=10):
         """
-        Fast health check for MCP server using SSE endpoint
+        Fast health check for MCP server using streamable-http endpoint
         Returns True when server is ready, False on timeout
         """
         import socket
         import urllib.request
         import urllib.error
-        
+
         start_time = time.time()
         last_check_time = 0
         check_interval = 0.05  # Start with 50ms checks
         max_check_interval = 0.2  # Cap at 200ms
-        
+
         # First wait for port to be listening
         while time.time() - start_time < timeout:
             try:
@@ -391,18 +333,18 @@ async def run_claude_extensions(args) -> int:
             time.sleep(0.05)
         else:
             return False  # Port never started listening
-        
-        # Now do progressive health checks on SSE endpoint
+
+        # Now do progressive health checks on /mcp endpoint
         while time.time() - start_time < timeout:
             current_time = time.time()
-            
+
             # Only check if enough time has passed (progressive backoff)
             if current_time - last_check_time >= check_interval:
                 try:
-                    # Try SSE endpoint - responds immediately when ready
+                    # Try /mcp endpoint - responds immediately when ready
                     req = urllib.request.Request(
-                        f'http://127.0.0.1:{check_port}/sse',
-                        headers={'Accept': 'text/event-stream'}
+                        f'http://127.0.0.1:{check_port}/mcp',
+                        headers={'Accept': 'application/json'}
                     )
                     with urllib.request.urlopen(req, timeout=0.3):
                         # Server is ready!
@@ -414,26 +356,24 @@ async def run_claude_extensions(args) -> int:
                 except Exception:
                     # Connection errors - server not ready yet
                     pass
-                
+
                 last_check_time = current_time
                 # Progressive backoff - increase interval slightly each time
                 check_interval = min(check_interval * 1.1, max_check_interval)
-            
+
             time.sleep(0.02)  # Small sleep to avoid busy waiting
-        
+
         return False  # Timeout
     
     def run_mcp_server():
         """Run the MCP server in a thread"""
         try:
             # Configure MCP server through public interface
-            from . import mcp
             
             # Build configuration
             config = {'cors_enabled': True}
             
-            if args.command == 'claude':
-                config['running_for_claude'] = True
+            config['running_for_terminal_agent'] = True
             
             if args.log_file:
                 config['log_file_path'] = args.log_file
@@ -442,10 +382,10 @@ async def run_claude_extensions(args) -> int:
                 config['auto_skip_tts'] = True
             
             # Apply configuration
-            mcp.configure_mcp_server(**config)
+            configure_mcp_server(**config)
             
-            # Apply monkey patch for Claude to filter tools
-            apply_claude_tool_filter()
+            # Apply filter to mcp tools
+            apply_terminal_code_agent_tool_filter()
             
             # Start a thread to check when server is actually listening
             def monitor_server_startup():
@@ -493,16 +433,17 @@ async def run_claude_extensions(args) -> int:
             monitor_thread.start()
             
             # Temporarily redirect stderr to capture startup messages
-            import io
             old_stderr = sys.stderr
             stderr_capture = io.StringIO()
             sys.stderr = stderr_capture
-            
+            # Use streamable-http for both Claude and Codex
+            transport = "streamable-http"
+            log_message("DEBUG", f"Starting MCP server on port {port} with transport={transport}")
             try:
                 # Run the FastMCP server (this blocks)
                 app.run(
-                    transport="sse",
-                    host="127.0.0.1", 
+                    transport=transport,
+                    host="127.0.0.1",
                     port=port,
                     log_level="error"  # Changed from warning to error
                 )
@@ -526,12 +467,8 @@ async def run_claude_extensions(args) -> int:
             print(f"MCP server thread error: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
-    
+
     try:
-        # Start the API server first (for webhooks and Claude hooks)
-        step_start = time.time()
-        from .api import start_api_server
-        
         # Determine webhook port - use args if provided, otherwise find available port
         if hasattr(args, 'webhook_port') and args.webhook_port:
             webhook_port = args.webhook_port
@@ -541,117 +478,138 @@ async def run_claude_extensions(args) -> int:
             if not webhook_port:
                 print("Error: Could not find an available port for API server", file=sys.stderr)
                 return 1
-        
-        log_message("INFO", f"[CLAUDE_HYBRID] API server port discovery completed [{time.time() - step_start:.3f}s]")
-        
-        # Start API server in background thread (non-critical for immediate startup)
-        def start_api_server_background():
-            step_start = time.time()
-            log_message("INFO", "[CLAUDE_HYBRID] Starting API server in background...")
-            api_server = start_api_server(port=webhook_port)
-            log_message("INFO", f"[CLAUDE_HYBRID] API server startup completed [{time.time() - step_start:.3f}s]")
-            
-            # Get the actual port the server is running on (might be different if original was in use)
-            actual_webhook_port = webhook_port
-            if api_server:
-                actual_port = api_server.get_port()
-                if actual_port != webhook_port:
-                    actual_webhook_port = actual_port
-                    log_message("INFO", f"[CLAUDE_HYBRID] API server using port {actual_port} instead of requested {webhook_port}")
-            else:
-                print("Warning: API server failed to start", file=sys.stderr)
-                actual_webhook_port = None
 
-            # Update Claude hooks to use the API server
-            if actual_webhook_port:
-                try:
-                    update_claude_hooks(actual_webhook_port)
-                    log_message("INFO", f"[CLAUDE_HYBRID] Claude hooks updated for port {actual_webhook_port}")
-                except Exception as e:
-                    log_message("ERROR", f"[CLAUDE_HYBRID] Failed to update Claude hooks: {e}")
-            
-            # Update args with the webhook port so comms can use it
-            args.webhook_port = actual_webhook_port
-        
-        # Start API server in background thread
-        api_thread = threading.Thread(target=start_api_server_background, daemon=True, name="APIServerThread")
-        api_thread.start()
-        log_message("INFO", "[CLAUDE_HYBRID] API server thread started in background")
-        
         # Set initial webhook_port for args (will be updated by background thread)
         args.webhook_port = webhook_port
+
+        if args.command == 'claude':
+            args = run_api_server(args)
         
         # Start the MCP server thread
-        log_message("INFO", "[CLAUDE_HYBRID] About to start MCP server thread")
-        server_thread = threading.Thread(target=run_mcp_server, daemon=True)
-        thread_start_time = time.time()
-        server_thread.start()
-        log_message("INFO", f"[CLAUDE_HYBRID] MCP server thread started [{time.time() - thread_start_time:.3f}s]")
-        
-        # Wait for server to be ready (max 15 seconds)
-        if not server_ready.wait(15):
-            print("Warning: MCP server startup timeout - server may not be fully initialized", file=sys.stderr)
-            # Double-check if server is actually running despite timeout
-            if not check_port_listening('127.0.0.1', port):
-                print("Error: MCP server failed to start on port", port, file=sys.stderr)
-                return 1
-            else:
-                # Port is listening but server might not be fully ready
-                print("Note: MCP server port is listening but may still be initializing", file=sys.stderr)
-                # Use optimized health check instead of fixed 2-second sleep
-                health_check_start = time.time()
-                if optimized_mcp_health_check(port, timeout=3):
-                    log_message("INFO", f"[CLAUDE_HYBRID] MCP server health check passed [{time.time() - health_check_start:.3f}s]")
+        if not args.disable_mcp:
+            log_message("INFO", "About to start MCP server thread")
+            server_thread = threading.Thread(target=run_mcp_server, daemon=True)
+            thread_start_time = time.time()
+            server_thread.start()
+            log_message("INFO", f"MCP server thread started [{time.time() - thread_start_time:.3f}s]")
+
+            # Wait for server to be ready (max 15 seconds)
+            if not server_ready.wait(15):
+                print("Warning: MCP server startup timeout - server may not be fully initialized", file=sys.stderr)
+                # Double-check if server is actually running despite timeout
+                if not check_port_listening('127.0.0.1', port):
+                    print("Error: MCP server failed to start on port", port, file=sys.stderr)
+                    return 1
                 else:
-                    log_message("WARNING", f"[CLAUDE_HYBRID] MCP server health check timeout after {time.time() - health_check_start:.3f}s")
-                    # Fall back to small sleep if health check fails
-                    time.sleep(0.5)
+                    # Port is listening but server might not be fully ready
+                    print("Note: MCP server port is listening but may still be initializing", file=sys.stderr)
+                    # Use optimized health check instead of fixed 2-second sleep
+                    health_check_start = time.time()
+                    if optimized_mcp_health_check(port, timeout=3):
+                        log_message("INFO", f"MCP server health check passed [{time.time() - health_check_start:.3f}s]")
+                    else:
+                        log_message("WARNING", f"MCP server health check timeout after {time.time() - health_check_start:.3f}s")
+                        # Fall back to small sleep if health check fails
+                        time.sleep(0.5)
 
-                # Mark MCP server as running (port is listening even if health check had issues)
-                get_shared_state().set_mcp_server_running(True)
-        else:
-            # Server signaled ready - give it a tiny bit more time to be safe
-            time.sleep(0.2)
+                    # Mark MCP server as running (port is listening even if health check had issues)
+                    get_shared_state().set_mcp_server_running(True)
+            else:
+                # Server signaled ready - give it a tiny bit more time to be safe
+                time.sleep(0.2)
 
-        # Mark MCP server as running in shared state
-        get_shared_state().set_mcp_server_running(True)
+            # Mark MCP server as running in shared state
+            get_shared_state().set_mcp_server_running(True)
 
-        log_message("INFO", "[CLAUDE_HYBRID] restoring logging")
-        # Restore logging after FastMCP has messed with it
-        if args.log_file:
-            import logging
-            from .logs import setup_logging
-            import talkito.logs
-            
-            # Force reset of logging configuration
-            talkito.logs._is_configured = False
-            
-            # Clear all handlers that uvicorn/fastmcp added
-            root_logger = logging.getLogger()
-            root_logger.handlers.clear()
-            
-            # Re-setup logging
-            setup_logging(args.log_file, mode='a')
+            log_message("INFO", "restoring logging")
+            # Restore logging after FastMCP has messed with it
+            if args.log_file:
+                import logging
+                from .logs import setup_logging
+                import talkito.logs
 
-        # Initialize Claude with SSE configuration
-        if not init_claude(transport="sse", address="http://127.0.0.1:", port=port):
-            print("Warning: Failed to configure Claude for SSE", file=sys.stderr)
+                # Force reset of logging configuration
+                talkito.logs._is_configured = False
 
-        log_message("INFO", "[CLAUDE_HYBRID] starting print_configuration_status")
+                # Clear all handlers that uvicorn/fastmcp added
+                root_logger = logging.getLogger()
+                root_logger.handlers.clear()
+
+                # Re-setup logging
+                setup_logging(args.log_file, mode='a')
+
+        try:
+            create_talkito_env()
+        except Exception as e:
+            print(f"Error creating .talkito.env: {e}")
+
+        # Initialize coding terminal agent with streamable-http transport
+        if args.command == 'claude':
+            # Claude uses streamable-http transport
+            if not init_claude(transport="streamable-http", address="http://127.0.0.1", port=port):
+                print("Warning: Failed to configure Claude Code for streamable-http", file=sys.stderr)
+        elif args.command == 'codex':
+            # Codex uses streamable-http transport
+            if not init_codex(transport="streamable-http", address="http://127.0.0.1", port=port):
+                print("Warning: Failed to configure Codex CLI for streamable-http", file=sys.stderr)
+
+        log_message("INFO", "starting print_configuration_status")
         # Show configuration status (now reflects actual providers after fallback)
         print_configuration_status(args)
-        log_message("INFO", "[CLAUDE_HYBRID] print_configuration_status completed")
+        log_message("INFO", "print_configuration_status completed")
 
         return True
-        
+
     except Exception as e:
         print(f"Error running TalkiTo Claude extensions: {e}")
 
         return False
 
+def run_api_server(args):
+    # Start the API server first (for webhooks and Claude hooks)
+    step_start = time.time()
+    from .api import start_api_server
 
-def apply_claude_tool_filter():
-    """Apply monkey patch to filter tools for Claude"""
+    log_message("INFO", f"API server port discovery completed [{time.time() - step_start:.3f}s]")
+
+    # Start API server in background thread (non-critical for immediate startup)
+    def start_api_server_background():
+        step_start = time.time()
+        log_message("INFO", "Starting API server in background...")
+        api_server = start_api_server(port=args.webhook_port)
+        log_message("INFO", f"API server startup completed [{time.time() - step_start:.3f}s]")
+
+        # Get the actual port the server is running on (might be different if original was in use)
+        actual_webhook_port = args.webhook_port
+        if api_server:
+            actual_port = api_server.get_port()
+            if actual_port != args.webhook_port:
+                actual_webhook_port = actual_port
+                log_message("INFO",
+                            f"API server using port {actual_port} instead of requested {args.webhook_port}")
+        else:
+            print("Warning: API server failed to start", file=sys.stderr)
+            actual_webhook_port = None
+
+        # Update Claude hooks to use the API server
+        if actual_webhook_port:
+            try:
+                update_claude_hooks(actual_webhook_port)
+                log_message("INFO", f"Claude hooks updated for port {actual_webhook_port}")
+            except Exception as e:
+                log_message("ERROR", f"Failed to update Claude hooks: {e}")
+
+        # Update args with the webhook port so comms can use it
+        args.webhook_port = actual_webhook_port
+
+    # Start API server in background thread
+    api_thread = threading.Thread(target=start_api_server_background, daemon=True, name="APIServerThread")
+    api_thread.start()
+    log_message("INFO", "API server thread started in background")
+    return args
+
+def apply_terminal_code_agent_tool_filter():
+    """Apply monkey patch to filter tools for terminal coding agents that call tts/asr directly"""
     from .mcp import app
     
     # Store the original method from the tool manager

@@ -50,12 +50,12 @@ _log_file_path = None
 def log_message(level: str, message: str):
     """Log a message with [MCP-SSE] prefix"""
     global _log_file_path
-    
+
     # If we have a log file path, ensure logging is enabled
     if _log_file_path:
         # Import is_logging_enabled to check current state
         from .logs import is_logging_enabled
-        
+
         # Only setup if not already enabled
         if not is_logging_enabled():
             setup_logging(_log_file_path, mode='a')  # Use append mode to not overwrite
@@ -63,7 +63,7 @@ def log_message(level: str, message: str):
     # Also print important messages to stderr for debugging
     # if level in ["ERROR", "CRITICAL", "WARNING"]:
     #     print(f"[{level}] [MCP-SSE] {message}", file=sys.stderr)
-    
+
     # Always try to log, even if logging might be disabled
     try:
         _base_log_message(level, f"[MCP-SSE] {message}", __name__)
@@ -76,8 +76,8 @@ app = FastMCP("talkito-sse-server")
 # CORS headers for browser access
 _cors_enabled = False
 
-# Track if we're running for Claude (to mask certain tools)
-_running_for_claude = False
+# Track if we're running for terminal agents (to mask certain tools)
+_running_for_terminal_agent= False
 
 # Track current voice index for cycling
 _current_voice_index = {}
@@ -85,15 +85,15 @@ _current_voice_index = {}
 # Track if auto-skip TTS is enabled
 _auto_skip_tts = False
 
-def configure_mcp_server(cors_enabled=None, running_for_claude=None, log_file_path=None, auto_skip_tts=None):
+def configure_mcp_server(cors_enabled=None, running_for_terminal_agent=None, log_file_path=None, auto_skip_tts=None):
     """Configure MCP server settings through a public interface"""
-    global _cors_enabled, _running_for_claude, _log_file_path, _auto_skip_tts
+    global _cors_enabled, _running_for_terminal_agent, _log_file_path, _auto_skip_tts
     
     if cors_enabled is not None:
         _cors_enabled = cors_enabled
     
-    if running_for_claude is not None:
-        _running_for_claude = running_for_claude
+    if running_for_terminal_agent is not None:
+        _running_for_terminal_agent = running_for_terminal_agent
     
     if log_file_path is not None:
         _log_file_path = log_file_path
@@ -771,12 +771,15 @@ async def _enable_asr_internal() -> str:
 async def _disable_asr_internal() -> str:
     """Internal function to disable ASR"""
     try:
-        # Simply toggle the state - let core handle cleanup
-        from .state import _shared_state
+        # Set mode to 'off' and disable ASR
+        from .state import _shared_state, set_asr_mode_thread_safe
+
+        # Change mode to 'off' to fully disable ASR and prevent auto-input activation
+        set_asr_mode_thread_safe('off')
         _shared_state.set_asr_enabled(False)
-        
-        log_message("INFO", "ASR disabled (core will handle cleanup)")
-        
+
+        log_message("INFO", "ASR disabled and mode set to 'off'")
+
         return _get_status_summary()
         
     except Exception as e:
@@ -2037,8 +2040,7 @@ async def send_slack(message: str, channel: str = None, with_tts: bool = False) 
         Status message about the sent message
     """
     log_message("INFO", f"send_slack tool called with message: {message}, channel: {channel}, with_tts: {with_tts}")
-    log_message("INFO", f"_running_for_claude: {_running_for_claude}")
-    log_message("INFO", f"Tool is masked for Claude: {True if _running_for_claude else False}")
+    log_message("INFO", f"_running_for_terminal_agent: {_running_for_terminal_agent}")
     try:
         await _init_processor_if_needed()
         return await _send_slack_internal(message, channel, with_tts)
@@ -2124,7 +2126,7 @@ async def _start_whatsapp_mode_internal(phone_number: str = None) -> str:
         save_shared_state()
         
         # In standalone mode, we need to set up our own comm_manager
-        if not _running_for_claude:
+        if not _running_for_terminal_agent:
             # Ensure WhatsApp is configured
             if not _comms_manager or not any(isinstance(p, TwilioWhatsAppProvider) for p in (_comms_manager.providers if _comms_manager else [])):
                 base_manager = comms.setup_communication(providers=['whatsapp'])
@@ -2260,7 +2262,7 @@ async def _start_slack_mode_internal(channel: str = None) -> str:
         save_shared_state()
         
         # In standalone mode, we need to set up our own comm_manager
-        if not _running_for_claude:
+        if not _running_for_terminal_agent:
             # Ensure Slack is configured
             if not _comms_manager or not any(isinstance(p, SlackProvider) for p in (_comms_manager.providers if _comms_manager else [])):
                 base_manager = comms.setup_communication(providers=['slack'])
@@ -3176,7 +3178,7 @@ def main():
     args = parser.parse_args()
     
     # Set up logging if log file specified
-    global _log_file_path, _cors_enabled, _running_for_claude
+    global _log_file_path, _cors_enabled, _running_for_terminal_agent
     
     # IMPORTANT: Set up logging BEFORE any log_message calls
     if args.log_file:
@@ -3185,7 +3187,7 @@ def main():
     
     # Check if we're running for Claude
     if args.client_command == 'claude':
-        _running_for_claude = True
+        _running_for_terminal_agent = True
         log_message("INFO", "Running for Claude client")
     else:
         log_message("INFO", f"Running for client: {args.client_command or 'unknown'} - all tools available")

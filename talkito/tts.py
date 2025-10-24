@@ -1567,6 +1567,7 @@ class KokoroTTSProvider(TTSProvider):
                 return None
 
             log_message("DEBUG", "Using cached KokoroTTS model")
+            log_message("DEBUG", f"{text=} {voice=} {speed=}")
 
             # Generate audio with the specified voice and speed
             # Kokoro returns a generator, we need to process all chunks
