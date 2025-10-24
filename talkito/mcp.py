@@ -77,7 +77,7 @@ app = FastMCP("talkito-sse-server")
 _cors_enabled = False
 
 # Track if we're running for terminal agents (to mask certain tools)
-_running_for_terminal_agent= False
+_running_for_terminal_agent = False
 
 # Track current voice index for cycling
 _current_voice_index = {}

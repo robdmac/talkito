@@ -2055,9 +2055,9 @@ def _retry_delayed_speech(speech_item: SpeechItem, callback: Optional[Callable[[
                 _delayed_timer = None
                 _delayed_speech_item = None
             try:
-                # Apply bullet numbering at queue time
-                numbered_text = apply_bullet_numbering(speech_item.text)
-                speech_item.text = numbered_text
+                # Skip bullet numbering - just filter bullets out in text processing
+                # numbered_text = apply_bullet_numbering(speech_item.text)
+                # speech_item.text = numbered_text
 
                 with _cache_lock:
                     spoken_cache.append((speech_item.text, time.time()))
@@ -2206,9 +2206,9 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                 # TODO: We need a callback instead of a return for queue_output so core.py can also use the speakable text when appropriate
                 return "--ignore--"
             else:
-                # Apply bullet numbering at queue time
-                numbered_text = apply_bullet_numbering(speech_item.text)
-                speech_item.text = numbered_text
+                # Skip bullet numbering - just filter bullets out in text processing
+                # numbered_text = apply_bullet_numbering(speech_item.text)
+                # speech_item.text = numbered_text
 
                 # Use cache lock for cache operations
                 with _cache_lock:
@@ -2427,9 +2427,9 @@ def navigate_to_previous():
             playback_control.skip_current_item()
             prev_item = speech_history[-2]
 
-            # Apply bullet numbering at queue time
-            numbered_text = apply_bullet_numbering(prev_item.text)
-            prev_item.text = numbered_text
+            # Skip bullet numbering - just filter bullets out in text processing
+            # numbered_text = apply_bullet_numbering(prev_item.text)
+            # prev_item.text = numbered_text
 
             # Re-queue the previous item
             tts_queue.put_nowait(prev_item)
