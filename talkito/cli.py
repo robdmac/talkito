@@ -63,7 +63,7 @@ from . import __version__
 from . import asr
 from . import tts
 from .core import build_comms_config, replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
-from .claude import init_claude, run_claude_extensions
+from .clients import init_claude, run_terminal_agent_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
 from .templates import SLACK_BOT_MANIFEST
@@ -335,14 +335,11 @@ async def run_talkito_command(args) -> int:
 
     shared_state.tts_mode = tts_mode
 
-    # Special handling for 'claude' command
-    if args.command == 'claude':
-        log_message("INFO", "Starting claude mode")
+    # Special handling for 'claude' or 'codex' command
+    if args.command in ('claude', 'codex'):
+        log_message("INFO", f"Starting terminal agent mode for {args.command}")
         try:
-            # Check if MCP is disabled
-            log_message("DEBUG", f"Starting claude mode args.disable_mcp {args.disable_mcp}")
-            if not args.disable_mcp:
-                await run_claude_extensions(args)
+            await run_terminal_agent_extensions(args)
         finally:
             pass  # Signal handling moved to core.py
 
