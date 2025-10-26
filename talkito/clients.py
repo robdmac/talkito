@@ -20,15 +20,24 @@
 
 import io
 import json
+import logging
 from pathlib import Path
+import re
+import socket
 import subprocess
 import shutil
 import sys
 import threading
 import time
+import traceback
+import urllib.error
+import urllib.request
 
+import talkito.logs
+
+from .api import start_api_server
 from .core import build_comms_config
-from .logs import log_message
+from .logs import log_message, setup_logging
 from .mcp import app, configure_mcp_server, find_available_port
 from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config, get_shared_state
 from .templates import ENV_EXAMPLE_TEMPLATE
@@ -100,11 +109,9 @@ def update_claude_settings():
         settings["permissions"]["allow"] = []
     
     # Add permissions that aren't already present
-    added = 0
     for perm in TALKITO_PERMISSIONS:
         if perm not in settings["permissions"]["allow"]:
             settings["permissions"]["allow"].append(perm)
-            added += 1
     
     # Save updated settings
     with open(settings_file, 'w') as f:
@@ -187,7 +194,6 @@ def find_talkito_command():
         pass
     
     # Fall back to Python's shutil.which
-    import shutil
     path = shutil.which('talkito')
     if path:
         return path
@@ -196,7 +202,7 @@ def find_talkito_command():
     return "talkito"
 
 
-def init_claude(transport="streamable-http", address="http://127.0.0.1", port=8001):
+def init_claude(address="http://127.0.0.1", port=8001):
     """Initialize Claude integration for talkito (uses streamable-http transport)"""
 
     success = True
@@ -258,7 +264,6 @@ def init_codex(transport="streamable-http", address="http://127.0.0.1", port=800
                 config_content = f.read()
 
         # Remove old talkito section if exists
-        import re
         talkito_section_pattern = r'\[mcp_servers\.talkito\].*?(?=\n\[|$)'
         config_content = re.sub(talkito_section_pattern, '', config_content, flags=re.DOTALL).strip()
 
@@ -275,7 +280,6 @@ def init_codex(transport="streamable-http", address="http://127.0.0.1", port=800
 
     except Exception as e:
         print(f"Error adding MCP server: {e}")
-        import traceback
         traceback.print_exc()
         return False
 
@@ -307,14 +311,12 @@ async def run_terminal_agent_extensions(args) -> int:
 
     def check_port_listening(host='127.0.0.1', check_port=None, timeout=0.1):
         """Check if a port is listening"""
-        import socket
         check_port = check_port or port  # Use the outer scope port if not specified
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((host, check_port))
-            sock.close()
-            return result == 0
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                result = sock.connect_ex((host, check_port))
+                return result == 0
         except Exception:
             return False
     
@@ -323,10 +325,6 @@ async def run_terminal_agent_extensions(args) -> int:
         Fast health check for MCP server using streamable-http endpoint
         Returns True when server is ready, False on timeout
         """
-        import socket
-        import urllib.request
-        import urllib.error
-
         start_time = time.time()
         last_check_time = 0
         check_interval = 0.05  # Start with 50ms checks
@@ -400,8 +398,6 @@ async def run_terminal_agent_extensions(args) -> int:
             
             # Start a thread to check when server is actually listening
             def monitor_server_startup():
-                import urllib.request
-                import urllib.error
                 start_time = time.time()
                 
                 # First wait for port to be listening
@@ -465,7 +461,6 @@ async def run_terminal_agent_extensions(args) -> int:
                 # Get captured stderr content
                 # stderr_content = stderr_capture.getvalue()  # Captured but not used
                 print(f"MCP server error: {e}", file=sys.stderr)
-                import traceback
                 traceback.print_exc(file=sys.stderr)
                 
                 # Don't set server_ready on error - let it timeout
@@ -476,7 +471,6 @@ async def run_terminal_agent_extensions(args) -> int:
                     sys.stderr = old_stderr
         except Exception as e:
             print(f"MCP server thread error: {e}", file=sys.stderr)
-            import traceback
             traceback.print_exc(file=sys.stderr)
 
     try:
@@ -528,17 +522,12 @@ async def run_terminal_agent_extensions(args) -> int:
             else:
                 # Server signaled ready - give it a tiny bit more time to be safe
                 time.sleep(0.2)
-
-            # Mark MCP server as running in shared state
-            get_shared_state().set_mcp_server_running(True)
+                # Mark MCP server as running in shared state
+                get_shared_state().set_mcp_server_running(True)
 
             log_message("INFO", "restoring logging")
             # Restore logging after FastMCP has messed with it
             if args.log_file:
-                import logging
-                from .logs import setup_logging
-                import talkito.logs
-
                 # Force reset of logging configuration
                 talkito.logs._is_configured = False
 
@@ -558,11 +547,11 @@ async def run_terminal_agent_extensions(args) -> int:
         if mcp_enabled:
             if args.command == 'claude':
                 # Claude uses streamable-http transport
-                if not init_claude(transport="streamable-http", address="http://127.0.0.1", port=port):
+                if not init_claude(address="http://127.0.0.1", port=port):
                     print("Warning: Failed to configure Claude Code for streamable-http", file=sys.stderr)
             elif args.command == 'codex':
                 # Codex uses streamable-http transport
-                if not init_codex(transport="streamable-http", address="http://127.0.0.1", port=port):
+                if not init_codex(address="http://127.0.0.1", port=port):
                     print("Warning: Failed to configure Codex CLI for streamable-http", file=sys.stderr)
         else:
             log_message("INFO", "MCP server disabled - skipping agent configuration")
@@ -582,8 +571,6 @@ async def run_terminal_agent_extensions(args) -> int:
 def run_api_server(args):
     # Start the API server first (for webhooks and Claude hooks)
     step_start = time.time()
-    from .api import start_api_server
-
     log_message("INFO", f"API server port discovery completed [{time.time() - step_start:.3f}s]")
 
     # Start API server in background thread (non-critical for immediate startup)
@@ -624,8 +611,6 @@ def run_api_server(args):
 
 def apply_terminal_code_agent_tool_filter():
     """Apply monkey patch to filter tools for terminal coding agents that call tts/asr directly"""
-    from .mcp import app
-    
     # Store the original method from the tool manager
     original_list_tools = app._tool_manager.list_tools
     

@@ -1161,6 +1161,10 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         return _skip_line_and_return(buffer, line, True)
 
     if cleaned_line:
+        # Skip echoed user input when we're waiting at the prompt for the next command.
+        if asr_state.waiting_for_input and not is_prompt:
+            log_message("FILTER", f"Suppressed input echo while waiting for prompt: '{cleaned_line}'")
+            return _skip_line_and_return(buffer, line)
         # Check if extracted text should be filtered based on verbosity
         if active_profile and active_profile.should_skip(cleaned_line, verbosity_level):
             log_message("FILTER", f"Skipped extracted text by profile (verbosity={verbosity_level}): '{cleaned_line}'")

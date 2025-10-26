@@ -222,6 +222,8 @@ class Profile:
         """Check if line is a continuation of the previous line"""
         if line.strip().endswith(":"):
             return False
+        if self.is_question_line(line):
+            return False
         if self._compiled_continuation:
             return self._compiled_continuation.match(line) is not None
         return False

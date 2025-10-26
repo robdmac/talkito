@@ -41,7 +41,7 @@ from .comms import SlackProvider, TwilioWhatsAppProvider
 from .core import ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
-from .tts import AVAILABLE_VOICES
+from .tts import AVAILABLE_VOICES, get_all_voices_for_provider, get_tts_config
 
 # Global logging setup - set from command line args
 _log_file_path = None
@@ -1138,65 +1138,94 @@ async def configure_tts(provider: str = "system", voice: str = None, region: str
     return await _change_tts_internal(provider, voice, region, language, rate, pitch)
 
 @app.tool()
-async def list_tts_voices(provider: str = None) -> dict[str, Any]:
+async def list_tts_voices(provider: str = None, language: str = None) -> dict[str, Any]:
     """
     List available voices for TTS providers
-    
+
     Args:
         provider: TTS provider to list voices for. If not specified, lists voices for current provider.
-                 Options: openai, aws, polly, azure, gcloud, elevenlabs, deepgram
-    
+                 Options: openai, aws, polly, azure, gcloud, elevenlabs, deepgram, kokoro, kittentts
+        language: BCP 47 language code (e.g., 'en-US', 'es-ES', 'ja-JP') to filter voices by language.
+                 If not specified, returns all available voices.
+                 If you know which language the user is using, please specify it here.
+                 If you don't know which language the user is using, please input the language you are using here.
+
+    CRITICAL INSTRUCTIONS:
+    1. If no language is provided this will show all options which will be too many
+    2. Add a best guess language if you do not know.
+
     Returns:
-        Dictionary with provider name and available voices
+        Dictionary with provider name, available voices organized by language, and current voice
     """
     try:
         # Get current provider if not specified
         if provider is None:
             shared_state = get_shared_state()
             provider = shared_state.tts_provider or 'system'
-            
+
         # Normalize provider name
         if provider == 'system':
             return {
                 'provider': 'system',
-                'voices': [],
+                'voices': {},
                 'message': 'System TTS uses OS-specific voices. Use OS settings to configure.'
             }
-            
+
         if provider not in AVAILABLE_VOICES:
             return {
                 'error': f'Unknown provider: {provider}',
                 'available_providers': list(AVAILABLE_VOICES.keys())
             }
-            
-        voices = AVAILABLE_VOICES[provider]
-        
+
+        voices_by_language = AVAILABLE_VOICES[provider]
+
+        # Filter by language if specified
+        if language:
+            if language not in voices_by_language:
+                return {
+                    'error': f'Language {language} not available for {provider}',
+                    'available_languages': list(voices_by_language.keys())
+                }
+            voices_by_language = {language: voices_by_language[language]}
+
         # Handle ElevenLabs special case (voice IDs with names)
         if provider == 'elevenlabs':
+            formatted_voices = {}
+            for lang, voices in voices_by_language.items():
+                formatted_voices[lang] = [{'id': voice_id, 'name': name} for voice_id, name in voices]
+
             return {
                 'provider': provider,
-                'voices': [{'id': voice_id, 'name': name} for voice_id, name in voices],
-                'current_voice': get_shared_state().tts_voice,
+                'voices': formatted_voices,
+                'current_voice': get_tts_config().get('voice'),
                 'note': 'Use the voice ID (not name) when configuring'
             }
         else:
             return {
                 'provider': provider,
-                'voices': voices,
-                'current_voice': get_shared_state().tts_voice
+                'voices': voices_by_language,
+                'current_voice': get_tts_config().get('voice')
             }
-            
+
     except Exception as e:
         return {'error': f'Error listing voices: {str(e)}'}
 
 @app.tool()
-async def randomize_tts_voice(provider: str = None) -> str:
+async def randomize_tts_voice(provider: str = None, language: str = None) -> str:
     """
     Randomly select a voice for the TTS provider
-    
+
     Args:
         provider: TTS provider to randomize voice for. If not specified, uses current provider.
-    
+        language: Optional BCP 47 language code (e.g., 'en-US', 'es-ES', 'ja-JP') to filter voices by language.
+                 If not specified, selects from all available voices.
+                 If you know which language the user is using, please specify it here.
+                 If you don't know which language the user is using, please input the language you are using here.
+
+    CRITICAL INSTRUCTIONS:
+    1. If no language is provided this will possibly select one from the wrong language.
+    2. Add a best guess language if you do not know.
+
     Returns:
         Status message with the selected voice
     """
@@ -1205,94 +1234,123 @@ async def randomize_tts_voice(provider: str = None) -> str:
         shared_state = get_shared_state()
         if provider is None:
             provider = shared_state.tts_provider or 'system'
-            
+
         if provider == 'system':
             return "Cannot randomize system TTS voices"
-            
+
         if provider not in AVAILABLE_VOICES:
             return f"Unknown provider: {provider}"
-            
-        voices = AVAILABLE_VOICES[provider]
+
+        # Get voices - either filtered by language or all voices
+        if language:
+            voices_by_language = AVAILABLE_VOICES[provider]
+            if language not in voices_by_language:
+                return f"Language {language} not available for {provider}. Available languages: {', '.join(voices_by_language.keys())}"
+            voices = voices_by_language[language]
+        else:
+            voices = get_all_voices_for_provider(provider)
+
         if not voices:
-            return f"No voices available for {provider}"
-            
+            return f"No voices available for {provider}" + (f" in language {language}" if language else "")
+
         # Handle ElevenLabs special case
         if provider == 'elevenlabs':
             voice_id, voice_name = random.choice(voices)
             await _change_tts_internal(provider, voice_id)
-            return f"Selected random voice: {voice_name} (ID: {voice_id})"
+            lang_suffix = f" ({language})" if language else ""
+            return f"Selected random voice: {voice_name} (ID: {voice_id}){lang_suffix}"
         else:
             selected_voice = random.choice(voices)
             await _change_tts_internal(provider, selected_voice)
-            return f"Selected random voice: {selected_voice}"
-            
+            lang_suffix = f" ({language})" if language else ""
+            return f"Selected random voice: {selected_voice}{lang_suffix}"
+
     except Exception as e:
         return f"Error randomizing voice: {str(e)}"
 
 @app.tool()
-async def cycle_tts_voice(direction: str = "next") -> str:
+async def cycle_tts_voice(direction: str = "next", language: str = None) -> str:
     """
     Cycle through available voices for the current TTS provider
-    
+
     Args:
         direction: Direction to cycle - "next" or "previous"
-    
+        language: Optional BCP 47 language code (e.g., 'en-US', 'es-ES', 'ja-JP') to filter voices by language.
+                 If not specified, cycles through all available voices.
+                 If you know which language the user is using, please specify it here.
+                 If you don't know which language the user is using, please input the language you are using here.
+
+    CRITICAL INSTRUCTIONS:
+    1. If no language is provided this will possibly select one from the wrong language.
+    2. Add a best guess language if you do not know.
+
     Returns:
         Status message with the selected voice
     """
     try:
         global _current_voice_index
-        
+
         # Get current provider
         shared_state = get_shared_state()
         provider = shared_state.tts_provider or 'system'
-        
+
         if provider == 'system':
             return "Cannot cycle system TTS voices"
-            
+
         if provider not in AVAILABLE_VOICES:
             return f"Unknown provider: {provider}"
-            
-        voices = AVAILABLE_VOICES[provider]
+
+        # Get voices - either filtered by language or all voices
+        if language:
+            voices_by_language = AVAILABLE_VOICES[provider]
+            if language not in voices_by_language:
+                return f"Language {language} not available for {provider}. Available languages: {', '.join(voices_by_language.keys())}"
+            voices = voices_by_language[language]
+        else:
+            voices = get_all_voices_for_provider(provider)
+
         if not voices:
-            return f"No voices available for {provider}"
-            
+            return f"No voices available for {provider}" + (f" in language {language}" if language else "")
+
         # Initialize index if needed
-        if provider not in _current_voice_index:
+        # Use a composite key for language-specific cycling
+        index_key = f"{provider}:{language}" if language else provider
+        if index_key not in _current_voice_index:
             # Try to find current voice in the list
             current_voice = shared_state.tts_voice
             if provider == 'elevenlabs':
                 # Find by voice ID
                 for i, (voice_id, _) in enumerate(voices):
                     if voice_id == current_voice:
-                        _current_voice_index[provider] = i
+                        _current_voice_index[index_key] = i
                         break
                 else:
-                    _current_voice_index[provider] = 0
+                    _current_voice_index[index_key] = 0
             else:
                 try:
-                    _current_voice_index[provider] = voices.index(current_voice)
+                    _current_voice_index[index_key] = voices.index(current_voice)
                 except (ValueError, TypeError):
-                    _current_voice_index[provider] = 0
-        
+                    _current_voice_index[index_key] = 0
+
         # Cycle the index
-        current_idx = _current_voice_index[provider]
+        current_idx = _current_voice_index[index_key]
         if direction == "next":
             current_idx = (current_idx + 1) % len(voices)
         else:  # previous
             current_idx = (current_idx - 1) % len(voices)
-        _current_voice_index[provider] = current_idx
-        
+        _current_voice_index[index_key] = current_idx
+
         # Set the new voice
+        lang_suffix = f" ({language})" if language else ""
         if provider == 'elevenlabs':
             voice_id, voice_name = voices[current_idx]
             await _change_tts_internal(provider, voice_id)
-            return f"Cycled to voice: {voice_name} (ID: {voice_id}) [{current_idx + 1}/{len(voices)}]"
+            return f"Cycled to voice: {voice_name} (ID: {voice_id}) [{current_idx + 1}/{len(voices)}]{lang_suffix}"
         else:
             selected_voice = voices[current_idx]
             await _change_tts_internal(provider, selected_voice)
-            return f"Cycled to voice: {selected_voice} [{current_idx + 1}/{len(voices)}]"
-            
+            return f"Cycled to voice: {selected_voice} [{current_idx + 1}/{len(voices)}]{lang_suffix}"
+
     except Exception as e:
         return f"Error cycling voice: {str(e)}"
 
