@@ -87,11 +87,11 @@ then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 | AI Assistant                 | Method        | Status              |
 |------------------------------|---------------|---------------------|
 | **Claude Code**              | Terminal      | **Fully Supported** |
+| **Codex Cli**                | Terminal      | **Fully Supported** |
 | bolt.new                     | Web Extension | Output Only         |
 | v0.dev                       | Web Extension | Output Only         |
 | replit.com                   | Web Extension | Output Only         |
 | Gemini CLI                   | Terminal      | In Progress         |
-| Codex                        | Terminal      | In Progress         |
 | Aider                        | Terminal      | In Progress         |
 | Cursor                       | Terminal      | In Progress         |
 | Continue                     | Terminal      | In Progress         |

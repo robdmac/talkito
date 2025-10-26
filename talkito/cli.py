@@ -63,7 +63,7 @@ from . import __version__
 from . import asr
 from . import tts
 from .core import build_comms_config, replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
-from .clients import init_claude, run_terminal_agent_extensions
+from .clients import run_terminal_agent_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
 from .templates import SLACK_BOT_MANIFEST
@@ -192,12 +192,6 @@ def parse_arguments():
         args.verbosity = args.verbose
     elif args.verbosity is None:
         args.verbosity = 0
-    
-    # Handle special commands
-    if args.command == "init" and args.arguments and args.arguments[0] == "claude":
-        # This is the 'init claude' command
-        args.init_claude = True
-        return args
     
     # Handle setup helpers
     if args.setup_slack:
@@ -857,11 +851,6 @@ def main():
     # Set up logging early if log file specified (before any other operations)
     if args.log_file:
         setup_logging(args.log_file, mode='w')  # Use 'w' for fresh log on startup
-
-    # Handle special commands that don't need async
-    if hasattr(args, 'init_claude') and args.init_claude:
-        success = init_claude()
-        sys.exit(0 if success else 1)
 
     if hasattr(args, 'show_slack_setup') and args.show_slack_setup:
         show_slack_setup()

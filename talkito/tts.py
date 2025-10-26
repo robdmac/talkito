@@ -269,48 +269,112 @@ TTS_PROVIDERS = {
     }
 }
 
-# Available voices for each TTS provider
+# Available voices for each TTS provider (organized by language using BCP 47 codes)
 AVAILABLE_VOICES = {
-    'openai': ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
-    'aws': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
-    'polly': ['Joanna', 'Matthew', 'Amy', 'Brian', 'Emma', 'Russell', 'Nicole', 'Raveena', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
-    'azure': ['en-US-AriaNeural', 'en-US-GuyNeural', 'en-US-JennyNeural', 'en-US-AmberNeural', 'en-US-AshleyNeural', 'en-US-BrandonNeural', 'en-US-ChristopherNeural', 'en-US-CoraNeural', 'en-US-DavisNeural', 'en-US-ElizabethNeural', 'en-US-EricNeural', 'en-US-JacobNeural', 'en-US-JaneNeural', 'en-US-JasonNeural', 'en-US-MichelleNeural', 'en-US-MonicaNeural', 'en-US-NancyNeural', 'en-US-RogerNeural', 'en-US-SaraNeural', 'en-US-SteffanNeural', 'en-US-TonyNeural'],
-    'gcloud': ['en-US-Standard-A', 'en-US-Standard-B', 'en-US-Standard-C', 'en-US-Standard-D', 'en-US-Standard-E', 'en-US-Standard-F', 'en-US-Standard-G', 'en-US-Standard-H', 'en-US-Standard-I', 'en-US-Standard-J', 'en-US-Journey-D', 'en-US-Journey-F', 'en-US-News-K', 'en-US-News-L', 'en-US-News-M', 'en-US-News-N', 'en-US-Polyglot-1', 'en-US-Studio-M', 'en-US-Studio-O', 'en-US-Wavenet-A', 'en-US-Wavenet-B', 'en-US-Wavenet-C', 'en-US-Wavenet-D', 'en-US-Wavenet-E', 'en-US-Wavenet-F'],
-    'elevenlabs': [
-        ('21m00Tcm4TlvDq8ikWAM', 'Rachel'),
-        ('AZnzlk1XvdvUeBnXmlld', 'Domi'),
-        ('EXAVITQu4vr4xnSDxMaL', 'Bella'),
-        ('ErXwobaYiN019PkySvjV', 'Antoni'),
-        ('MF3mGyEYCl7XYWbV9V6O', 'Elli'),
-        ('TxGEqnHWrfWFTfGW9XjX', 'Josh'),
-        ('VR6AewLTigWG4xSOukaG', 'Arnold'),
-        ('pNInz6obpgDQGcFmaJgB', 'Adam'),
-        ('yoZ06aMxZJJ28mfd3POQ', 'Sam'),
-    ],
-    'deepgram': ['aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en'],
-    'kittentts': ['expr-voice-2-m', 'expr-voice-2-f', 'expr-voice-3-m', 'expr-voice-3-f', 'expr-voice-4-m', 'expr-voice-4-f', 'expr-voice-5-m', 'expr-voice-5-f'],
-    'kokoro': [
-        # American English
-        'af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky',
-        'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa',
-        # British English
-        'bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily', 'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis',
-        # Japanese
-        'jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo',
-        # Mandarin Chinese
-        'zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian', 'zm_yunxi', 'zm_yunxia', 'zm_yunyang',
-        # Spanish
-        'ef_dora', 'em_alex', 'em_santa',
-        # French
-        'ff_siwis',
-        # Hindi
-        'hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi',
-        # Italian
-        'if_sara', 'im_nicola',
-        # Brazilian Portuguese
-        'pf_dora', 'pm_alex', 'pm_santa',
-    ],
-    'system': []  # System voices depend on the OS
+    'openai': {
+        'en-US': ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'nova', 'sage', 'shimmer', 'verse']
+    },
+    'aws': {
+        'en-US': ['Joanna', 'Matthew', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin', 'Ruth', 'Stephen', 'Gregory', 'Danielle'],
+        'en-GB': ['Amy', 'Brian', 'Emma', 'Arthur'],
+        'en-AU': ['Nicole', 'Russell', 'Olivia'],
+        'en-IN': ['Raveena', 'Kajal'],
+        'en-NZ': ['Aria'],
+        'en-ZA': ['Ayanda'],
+        'es-ES': ['Lucia', 'Sergio'],
+        'es-MX': ['Mia', 'Andres'],
+        'es-US': ['Lupe', 'Pedro'],
+        'fr-FR': ['Celine', 'Mathieu', 'Lea'],
+        'fr-CA': ['Chantal', 'Gabrielle', 'Liam'],
+        'de-DE': ['Marlene', 'Hans', 'Vicki', 'Daniel'],
+        'it-IT': ['Carla', 'Giorgio', 'Bianca'],
+        'pt-BR': ['Vitoria', 'Camila', 'Ricardo', 'Thiago'],
+        'pt-PT': ['Ines'],
+        'ja-JP': ['Mizuki', 'Takumi', 'Kazuha', 'Tomoko'],
+        'ko-KR': ['Seoyeon'],
+        'zh-CN': ['Zhiyu'],
+        'ar-AE': ['Hala', 'Zayd'],
+        'hi-IN': ['Aditi', 'Kajal'],
+        'pl-PL': ['Ola'],
+        'ru-RU': ['Tatyana', 'Maxim'],
+        'sv-SE': ['Astrid'],
+        'tr-TR': ['Filiz'],
+        'nl-NL': ['Lotte', 'Laura'],
+        'nb-NO': ['Liv', 'Ida'],
+        'da-DK': ['Naja', 'Mads'],
+        'ro-RO': ['Carmen']
+    },
+    'polly': {  # Alias for aws
+        'en-US': ['Joanna', 'Matthew', 'Ivy', 'Kendra', 'Kimberly', 'Salli', 'Joey', 'Justin', 'Kevin'],
+        'en-GB': ['Amy', 'Brian', 'Emma'],
+        'en-AU': ['Nicole', 'Russell'],
+        'en-IN': ['Raveena']
+    },
+    'azure': {
+        'en-US': ['AriaNeural', 'GuyNeural', 'JennyNeural', 'AmberNeural', 'AshleyNeural', 'BrandonNeural', 'ChristopherNeural', 'CoraNeural', 'DavisNeural', 'ElizabethNeural', 'EricNeural', 'JacobNeural', 'JaneNeural', 'JasonNeural', 'MichelleNeural', 'MonicaNeural', 'NancyNeural', 'RogerNeural', 'SaraNeural', 'SteffanNeural', 'TonyNeural'],
+        'en-GB': ['LibbyNeural', 'RyanNeural', 'SoniaNeural'],
+        'en-AU': ['NatashaNeural', 'WilliamNeural'],
+        'en-CA': ['ClaraNeural', 'LiamNeural'],
+        'en-IN': ['NeerjaNeural', 'PrabhatNeural'],
+        'es-ES': ['ElviraNeural', 'AlvaroNeural'],
+        'es-MX': ['DaliaNeural', 'JorgeNeural'],
+        'fr-FR': ['DeniseNeural', 'HenriNeural'],
+        'fr-CA': ['SylvieNeural', 'JeanNeural', 'AntoineNeural'],
+        'de-DE': ['KatjaNeural', 'ConradNeural'],
+        'it-IT': ['ElsaNeural', 'IsabellaNeural', 'DiegoNeural'],
+        'pt-BR': ['FranciscaNeural', 'AntonioNeural'],
+        'pt-PT': ['RaquelNeural', 'DuarteNeural'],
+        'ja-JP': ['NanamiNeural', 'KeitaNeural'],
+        'ko-KR': ['SunHiNeural', 'InJoonNeural'],
+        'zh-CN': ['XiaoxiaoNeural', 'YunxiNeural', 'YunjianNeural', 'XiaoyiNeural'],
+        'zh-HK': ['HiuMaanNeural', 'WanLungNeural'],
+        'zh-TW': ['HsiaoChenNeural', 'YunJheNeural']
+    },
+    'gcloud': {
+        'en-US': ['Standard-A', 'Standard-B', 'Standard-C', 'Standard-D', 'Standard-E', 'Standard-F', 'Standard-G', 'Standard-H', 'Standard-I', 'Standard-J', 'Journey-D', 'Journey-F', 'News-K', 'News-L', 'News-M', 'News-N', 'Polyglot-1', 'Studio-M', 'Studio-O', 'Wavenet-A', 'Wavenet-B', 'Wavenet-C', 'Wavenet-D', 'Wavenet-E', 'Wavenet-F'],
+        'en-GB': ['Standard-A', 'Standard-B', 'Standard-C', 'Standard-D', 'Standard-F', 'Wavenet-A', 'Wavenet-B', 'Wavenet-C', 'Wavenet-D', 'Wavenet-F'],
+        'en-AU': ['Standard-A', 'Standard-B', 'Standard-C', 'Standard-D', 'Wavenet-A', 'Wavenet-B', 'Wavenet-C', 'Wavenet-D'],
+        'en-IN': ['Standard-A', 'Standard-B', 'Standard-C', 'Standard-D', 'Wavenet-A', 'Wavenet-B', 'Wavenet-C', 'Wavenet-D']
+    },
+    'elevenlabs': {
+        'en-US': [  # Voice ID, Name
+            ('21m00Tcm4TlvDq8ikWAM', 'Rachel'),
+            ('AZnzlk1XvdvUeBnXmlld', 'Domi'),
+            ('EXAVITQu4vr4xnSDxMaL', 'Bella'),
+            ('ErXwobaYiN019PkySvjV', 'Antoni'),
+            ('MF3mGyEYCl7XYWbV9V6O', 'Elli'),
+            ('TxGEqnHWrfWFTfGW9XjX', 'Josh'),
+            ('VR6AewLTigWG4xSOukaG', 'Arnold'),
+            ('pNInz6obpgDQGcFmaJgB', 'Adam'),
+            ('yoZ06aMxZJJ28mfd3POQ', 'Sam'),
+        ]
+    },
+    'deepgram': {
+        'en-US': [
+            # Aura 1 voices
+            'aura-asteria-en', 'aura-luna-en', 'aura-stella-en', 'aura-athena-en', 'aura-hera-en', 'aura-orion-en', 'aura-arcas-en', 'aura-perseus-en', 'aura-angus-en', 'aura-orpheus-en', 'aura-helios-en', 'aura-zeus-en',
+            # Aura 2 voices
+            'aura-2-amalthea-en', 'aura-2-andromeda-en', 'aura-2-apollo-en', 'aura-2-arcas-en', 'aura-2-aries-en', 'aura-2-asteria-en', 'aura-2-athena-en', 'aura-2-atlas-en', 'aura-2-aurora-en', 'aura-2-callista-en', 'aura-2-cora-en', 'aura-2-cordelia-en', 'aura-2-delia-en', 'aura-2-draco-en', 'aura-2-electra-en', 'aura-2-harmonia-en', 'aura-2-helena-en', 'aura-2-hera-en', 'aura-2-hermes-en', 'aura-2-hyperion-en', 'aura-2-iris-en', 'aura-2-janus-en', 'aura-2-juno-en', 'aura-2-jupiter-en', 'aura-2-luna-en', 'aura-2-mars-en', 'aura-2-minerva-en', 'aura-2-neptune-en', 'aura-2-odysseus-en', 'aura-2-ophelia-en', 'aura-2-orion-en', 'aura-2-orpheus-en', 'aura-2-pandora-en', 'aura-2-phoebe-en', 'aura-2-pluto-en', 'aura-2-saturn-en', 'aura-2-selene-en', 'aura-2-thalia-en', 'aura-2-theia-en', 'aura-2-vesta-en', 'aura-2-zeus-en'
+        ],
+        'es-ES': [
+            'aura-2-sirio-es', 'aura-2-nestor-es', 'aura-2-carina-es', 'aura-2-celeste-es', 'aura-2-alvaro-es', 'aura-2-diana-es', 'aura-2-aquila-es', 'aura-2-selena-es', 'aura-2-estrella-es', 'aura-2-javier-es'
+        ]
+    },
+    'kittentts': {
+        'en-US': ['expr-voice-2-m', 'expr-voice-2-f', 'expr-voice-3-m', 'expr-voice-3-f', 'expr-voice-4-m', 'expr-voice-4-f', 'expr-voice-5-m', 'expr-voice-5-f']
+    },
+    'kokoro': {
+        'en-US': ['af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa'],
+        'en-GB': ['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily', 'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis'],
+        'ja-JP': ['jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo'],
+        'zh-CN': ['zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian', 'zm_yunxi', 'zm_yunxia', 'zm_yunyang'],
+        'es-ES': ['ef_dora', 'em_alex', 'em_santa'],
+        'fr-FR': ['ff_siwis'],
+        'hi-IN': ['hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi'],
+        'it-IT': ['if_sara', 'im_nicola'],
+        'pt-BR': ['pf_dora', 'pm_alex', 'pm_santa']
+    },
+    'system': {}  # System voices depend on the OS
 }
 
 
@@ -513,13 +577,30 @@ def get_cached_local_model(provider: str, timeout: float = 10.0):
         
         time.sleep(0.1)
 
+def get_all_voices_for_provider(provider: str) -> list:
+    """Get flattened list of all voices for a provider across all languages."""
+    if provider not in AVAILABLE_VOICES:
+        return []
+
+    provider_voices = AVAILABLE_VOICES[provider]
+    if not provider_voices:
+        return []
+
+    # Flatten voices from all languages
+    all_voices = []
+    for lang_code, voices in provider_voices.items():
+        all_voices.extend(voices)
+    return all_voices
+
 def get_state_voice_if_valid() -> Optional[str]:
     """Check if voice is valid for the given provider."""
     state = get_shared_state()
     provider = state.tts_provider or tts_provider
     if provider not in AVAILABLE_VOICES:
         return None
-    voices = AVAILABLE_VOICES.get(provider, [])
+
+    voices = get_all_voices_for_provider(provider)
+
     # ElevenLabs voices are tuples (id, name)
     if provider == 'elevenlabs':
         valid_ids = [voice_id for voice_id, _ in voices]
