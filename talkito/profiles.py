@@ -322,7 +322,7 @@ CLAUDE_PROFILE = Profile(
     needs_full_lines=True,
     response_prefix='⏺',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
-    question_prefix=r'^\s*[│]\s+Do you',
+    question_prefix=r'^\s*Do you',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
         r'\[38;5;246m\d+\s*\[39m',            # Direct line numbers
@@ -330,7 +330,6 @@ CLAUDE_PROFILE = Profile(
     ],
     exception_patterns=[
         (0, r'Claude Code v'),       # ✻ Welcome to Claude Code
-        (0, r'^⏺')
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
