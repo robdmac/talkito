@@ -769,7 +769,8 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
                 "enabled": shared_state.get_tts_enabled(),
                 "is_speaking": tts.is_speaking() if shared_state.get_tts_initialized() else False,
                 "mode": shared_state.tts_mode,
-                "provider": configured_tts_provider or shared_state.get_tts_provider() or "system"
+                "provider": configured_tts_provider or shared_state.get_tts_provider() or "system",
+                "voice": tts.get_tts_config().get('voice')
             },
             "asr": {
                 "available": True,
@@ -800,6 +801,8 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         elif tts_override or (status["tts"]["initialized"] and status["tts"]["enabled"]):
             tts_emoji = "🟢"
             tts_display += f" → {status['tts']['provider']}"
+            if status['tts']['voice']:
+                tts_display += f" {status['tts']['voice']}"
         else:
             tts_emoji = "🔴"
         asr_display = f"ASR {status['asr']['mode']}"

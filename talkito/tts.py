@@ -119,6 +119,7 @@ class SpeechItem:
     timestamp: Optional[datetime] = None
     start_time: Optional[float] = None  # Time when speech actually starts playing
     source: str = "output"  # "output", "error", etc.
+    is_exception: bool = False  # True for exception patterns (questions, etc.) that should not be auto-skipped
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -662,14 +663,25 @@ def get_tts_config():
         'pitch': None
     }
 
+def _mark_playback_finished(speech_item: Optional[SpeechItem]) -> None:
+    """Update playback bookkeeping when audio stops."""
+    global current_speech_item, last_speech_end_time
+
+    with _state_lock:
+        if speech_item is not None and current_speech_item is speech_item:
+            current_speech_item = None
+        last_speech_end_time = time.time()
+
+
 class AudioPlaybackThread(threading.Thread):
     """Thread for non-blocking audio playback."""
-    def __init__(self, audio_path: str, playback_control: 'PlaybackControl'):
+    def __init__(self, audio_path: str, playback_control: 'PlaybackControl', speech_item: Optional[SpeechItem] = None):
         super().__init__(daemon=True)
         self.audio_path = audio_path
         self.playback_control = playback_control
         self.process: Optional[subprocess.Popen] = None
         self.stopped = threading.Event()
+        self.speech_item = speech_item
 
     def run(self):
         """Run the audio playback in this thread."""
@@ -684,6 +696,8 @@ class AudioPlaybackThread(threading.Thread):
         except Exception as e:
             log_message("ERROR", f"Audio playback thread error: {e}")
             return False
+        finally:
+            _mark_playback_finished(self.speech_item)
 
     def stop(self):
         """Stop the audio playback."""
@@ -1171,13 +1185,15 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     Returns immediately after starting the playback thread.
     """
     log_message("DEBUG", "_play_audio_file")
+    with _state_lock:
+        active_item = current_speech_item
     if not use_process_control:
         # For backward compatibility, if process control is disabled,
         # fall back to the old blocking behavior
-        return _play_audio_file_blocking(audio_path, use_process_control)
+        return _play_audio_file_blocking(audio_path, use_process_control, active_item)
 
     # Create and start playback thread
-    playback_thread = AudioPlaybackThread(audio_path, playback_control)
+    playback_thread = AudioPlaybackThread(audio_path, playback_control, active_item)
 
     # Register the thread with playback control
     with playback_control.lock:
@@ -1193,120 +1209,126 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     return True
 
 
-def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True) -> bool:
+def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True, speech_item: Optional[SpeechItem] = None) -> bool:
     """Play audio file using an available system player (blocking version).
     This is the original blocking implementation, kept for fallback.
     """
-    path = Path(audio_path)
-    if not path.exists():
-        log_message("ERROR", f"Audio file not found: {audio_path}")
-        return False
-
-    ext = path.suffix.lower()
-    is_wav = ext == ".wav"
-    is_mp3 = ext == ".mp3"
-
-    # Build candidate player commands in priority order for each format
-    candidates = []
-
-    if is_wav:
-        # macOS / Linux players that handle WAV well
-        # afplay (macOS), sox 'play', ffplay, PulseAudio/ALSA, VLC CLI
-        candidates.extend([
-            (["afplay", audio_path], "afplay"),
-            (["play", "-q", audio_path], "play"),
-            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
-            (["paplay", audio_path], "paplay"),
-            (["aplay", audio_path], "aplay"),
-            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
-        ])
-
-        # Windows (WAV only): PowerShell SoundPlayer
-        if sys.platform.startswith("win"):
-            candidates.append((
-                ["powershell", "-NoProfile", "-Command",
-                 f'[Console]::OutputEncoding=[Text.UTF8]; '
-                 f'$p=New-Object System.Media.SoundPlayer "{audio_path}"; '
-                 f'$p.PlaySync();'],
-                "powershell-wav"
-            ))
-
-    elif is_mp3:
-        # MP3: prefer afplay (macOS), mpg123 (fast), sox 'play', ffplay, vlc CLI
-        candidates.extend([
-            (["afplay", audio_path], "afplay"),
-            (["mpg123", "-q", audio_path], "mpg123"),
-            (["play", "-q", audio_path], "play"),
-            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
-            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
-        ])
-    else:
-        # Unknown extension: try broadly capable players
-        candidates.extend([
-            (["afplay", audio_path], "afplay"),
-            (["play", "-q", audio_path], "play"),
-            (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
-            (["mpg123", "-q", audio_path], "mpg123"),
-            (["paplay", audio_path], "paplay"),
-            (["aplay", audio_path], "aplay"),
-            (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
-        ])
-
-    # Pick the first available player from the candidate list
-    chosen_cmd = None
-    for cmd, binary in candidates:
-        # Special case: "powershell-wav" isn't a binary to which/which
-        if binary == "powershell-wav":
-            chosen_cmd = cmd
-            break
-        if shutil.which(binary):
-            chosen_cmd = cmd
-            break
-
-    if not chosen_cmd:
-        # Helpful, format-aware error
-        need = "a WAV-capable player (afplay, play/sox, ffplay, paplay/aplay, or VLC)"
-        if is_mp3:
-            need = "an MP3-capable player (afplay, mpg123, play/sox, ffplay, or VLC)"
-        log_message("ERROR", f"No suitable audio player found for {ext or 'unknown format'}. Install {need}.")
-        return False
-
-    # Launch player
-    try:
-        process = subprocess.Popen(
-            chosen_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True  # ensures we can terminate the whole group
-        )
-    except Exception as e:
-        log_message("ERROR", f"Failed to start audio player {chosen_cmd[0]}: {e}")
-        return False
-
-    if use_process_control:
-        with playback_control.lock:
-            playback_control.current_process = process
-            log_message("DEBUG", "audio process started via original method")
+    if speech_item is None:
+        with _state_lock:
+            speech_item = current_speech_item
 
     try:
-        # Poll + allow cooperative interruption
-        while process.poll() is None:
-            if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
-                try:
-                    process.terminate()
-                    process.wait(timeout=0.25)
-                except Exception:
-                    process.kill()
+        path = Path(audio_path)
+        if not path.exists():
+            log_message("ERROR", f"Audio file not found: {audio_path}")
+            return False
+
+        ext = path.suffix.lower()
+        is_wav = ext == ".wav"
+        is_mp3 = ext == ".mp3"
+
+        # Build candidate player commands in priority order for each format
+        candidates = []
+
+        if is_wav:
+            # macOS / Linux players that handle WAV well
+            # afplay (macOS), sox 'play', ffplay, PulseAudio/ALSA, VLC CLI
+            candidates.extend([
+                (["afplay", audio_path], "afplay"),
+                (["play", "-q", audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+                (["paplay", audio_path], "paplay"),
+                (["aplay", audio_path], "aplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+            ])
+
+            # Windows (WAV only): PowerShell SoundPlayer
+            if sys.platform.startswith("win"):
+                candidates.append((
+                    ["powershell", "-NoProfile", "-Command",
+                     f'[Console]::OutputEncoding=[Text.UTF8]; '
+                     f'$p=New-Object System.Media.SoundPlayer "{audio_path}"; '
+                     f'$p.PlaySync();'],
+                    "powershell-wav"
+                ))
+
+        elif is_mp3:
+            # MP3: prefer afplay (macOS), mpg123 (fast), sox 'play', ffplay, vlc CLI
+            candidates.extend([
+                (["afplay", audio_path], "afplay"),
+                (["mpg123", "-q", audio_path], "mpg123"),
+                (["play", "-q", audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+            ])
+        else:
+            # Unknown extension: try broadly capable players
+            candidates.extend([
+                (["afplay", audio_path], "afplay"),
+                (["play", "-q", audio_path], "play"),
+                (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path], "ffplay"),
+                (["mpg123", "-q", audio_path], "mpg123"),
+                (["paplay", audio_path], "paplay"),
+                (["aplay", audio_path], "aplay"),
+                (["cvlc", "--play-and-exit", "--intf", "dummy", audio_path], "cvlc"),
+            ])
+
+        # Pick the first available player from the candidate list
+        chosen_cmd = None
+        for cmd, binary in candidates:
+            # Special case: "powershell-wav" isn't a binary to which/which
+            if binary == "powershell-wav":
+                chosen_cmd = cmd
+                break
+            if shutil.which(binary):
+                chosen_cmd = cmd
+                break
+
+        if not chosen_cmd:
+            # Helpful, format-aware error
+            need = "a WAV-capable player (afplay, play/sox, ffplay, paplay/aplay, or VLC)"
+            if is_mp3:
+                need = "an MP3-capable player (afplay, mpg123, play/sox, ffplay, or VLC)"
+            log_message("ERROR", f"No suitable audio player found for {ext or 'unknown format'}. Install {need}.")
+            return False
+
+        # Launch player
+        try:
+            process = subprocess.Popen(
+                chosen_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True  # ensures we can terminate the whole group
+            )
+        except Exception as e:
+            log_message("ERROR", f"Failed to start audio player {chosen_cmd[0]}: {e}")
+            return False
+
+        if use_process_control:
+            with playback_control.lock:
+                playback_control.current_process = process
+                log_message("DEBUG", "audio process started via original method")
+
+            try:
+                # Poll + allow cooperative interruption
+                while process.poll() is None:
+                    if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
+                        try:
+                            process.terminate()
+                            process.wait(timeout=0.25)
+                        except Exception:
+                            process.kill()
+                        return False
+                    time.sleep(0.01)
+                return process.returncode == 0
+            except Exception:
                 return False
-            time.sleep(0.01)
-        return process.returncode == 0
-    except Exception:
-        return False
     finally:
         if use_process_control:
             with playback_control.lock:
                 log_message("DEBUG", "audio process ended")
                 playback_control.current_process = None
+        _mark_playback_finished(speech_item)
 
 
 def _cleanup_temp_file(file_path: str):
@@ -1346,7 +1368,19 @@ def synthesize_and_play(synthesize_func, text: str, use_process_control: bool = 
         tmp_path = _write_temp_audio(audio_bytes, ext)
 
         if needs_skip:
+            # Capture old thread before signaling skip
+            with playback_control.lock:
+                old_thread = playback_control.current_playback_thread
+
             playback_control.skip_current_item()
+
+            # Wait for old playback to finish before starting new one preventing the skip flagging the new playback.
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=0.1)
+
+            # Reset only skip_current (preserve skip_all if user requested it)
+            with playback_control.lock:
+                playback_control.skip_current = False
 
         if use_process_control:
             # For threaded playback, the AudioPlaybackThread will handle cleanup
@@ -2009,6 +2043,7 @@ def tts_worker(engine: str):
                 time.sleep(0.1)
 
             text_to_speak = ""
+            speech_item: Optional[SpeechItem] = None
             breakout = False
             while not tts_queue.empty():
                 # Get next item from queue
@@ -2031,6 +2066,9 @@ def tts_worker(engine: str):
             if breakout:
                 break
 
+            if speech_item is None:
+                continue
+
             # Tell ASR to ignore input while we're speaking to prevent feedback
             try:
                 from . import asr
@@ -2042,21 +2080,26 @@ def tts_worker(engine: str):
 
             # Check for auto-skip before starting audio generation
             needs_skip = False
-            if auto_skip_tts_enabled and not _local_model_loading and not tts_queue.empty():
+
+
+            log_message("DEBUG",
+                        f"Auto-skip check: {auto_skip_tts_enabled=} {_local_model_loading=} {tts_queue.empty()=}, current_speech_item={current_speech_item is not None}")
+
+            if auto_skip_tts_enabled and not _local_model_loading:
                 # Check if something is currently playing and how long it's been playing
-                is_currently_playing = playback_control.current_process is not None
                 is_currently_speaking = is_speaking()
+                is_currently_playing = playback_control.current_process is not None
                 playing_long_enough = False
-
-                log_message("DEBUG", f"Auto-skip check: is_currently_playing={is_currently_playing}, is_actually_speaking={is_currently_speaking}, current_speech_item={current_speech_item is not None}")
-
+                time_playing = None
                 if is_currently_playing and current_speech_item and current_speech_item.start_time:
                     time_playing = time.time() - current_speech_item.start_time
                     playing_long_enough = time_playing >= 1.0  # Minimum 1 second
                     log_message("DEBUG", f"Current item has been playing for {time_playing:.2f} seconds")
 
-                # Only skip current item if something is actually speaking
-                if is_currently_speaking:
+                log_message("DEBUG", f"{is_currently_speaking=} {is_currently_playing=} {playing_long_enough=} {time_playing=}")
+
+                # Only skip current item if something is actually speaking AND a process exists AND it's not an exception
+                if is_currently_speaking and is_currently_playing and (not current_speech_item or not current_speech_item.is_exception):
                     needs_skip = True
                     log_message("INFO", f"Auto-skipping current audio for new text ({len(text_to_speak)} chars)")
 
@@ -2078,6 +2121,7 @@ def tts_worker(engine: str):
                 speech_item.start_time = time.time()
                 current_speech_item = speech_item
 
+            playback_started = False
             if text_to_speak.strip():
                 # Include line number in log if available
                 if speech_item.line_number is not None:
@@ -2085,18 +2129,21 @@ def tts_worker(engine: str):
                 else:
                     log_message("INFO", f"Speaking via {engine}: '{text_to_speak}'")
 
-                speak_text(text_to_speak, engine, needs_skip)
+                playback_started = speak_text(text_to_speak, engine, needs_skip)
+                if disable_tts:
+                    playback_started = False  # Ensure cleanup runs when TTS disabled (no actual playback)
 
             # Check if we should skip current or if shutdown was requested
             if playback_control.skip_current or shutdown_event.is_set():
                 playback_control.reset_skip_flags()
                 if shutdown_event.is_set():
                     break
-            
-            # Clear current item and track end time
-            with _state_lock:
-                current_speech_item = None
-                last_speech_end_time = time.time()
+
+            if not playback_started:
+                with _state_lock:
+                    if speech_item and current_speech_item is speech_item:
+                        current_speech_item = None
+                    last_speech_end_time = time.time()
             
             # Resume ASR input after speaking (but only for appropriate modes)
             try:
@@ -2274,7 +2321,8 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             text=speakable_text,
             original_text=text,
             line_number=line_number,
-            source=source
+            source=source,
+            is_exception=exception_match
         )
 
         try:
