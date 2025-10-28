@@ -35,15 +35,10 @@ from collections import deque
 from difflib import SequenceMatcher
 
 # Import centralized logging utilities
-from .logs import log_message as _base_log_message
+from .logs import log_message
 
 # Import shared state for tool use detection
-try:
-    from .state import get_shared_state
-    SHARED_STATE_AVAILABLE = True
-except ImportError:
-    SHARED_STATE_AVAILABLE = False
-    get_shared_state = None
+from .state import get_shared_state
 
 # Optional imports for providers
 try:
@@ -61,13 +56,6 @@ try:
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
-
-def log_message(level: str, message: str, force_console: bool = False) -> None:
-    """Log a message with [COMMS] prefix"""
-    _base_log_message(level, f"[COMMS] {message}", __name__)
-    # Also print critical messages to console if requested
-    if force_console or level in ["ERROR", "CRITICAL"]:
-        print(f"[COMMS] {message}")
 
 
 @dataclass
@@ -122,31 +110,33 @@ class CommsConfig:
 
 class CommsProvider(ABC):
     """Abstract base class for communication providers"""
-    
+
     def __init__(self, config: CommsConfig):
         self.config = config
         self.active = True
-    
+
     @abstractmethod
     def send_message(self, message: Message) -> bool:
         """Send a message through the provider"""
         pass
-    
+
     @abstractmethod
     def start(self, input_callback: Callable[[Message], None]):
         """Start the provider and set up message receiving"""
         pass
-    
+
     @abstractmethod
     def stop(self):
         """Stop the provider"""
         pass
-    
+
     def format_output(self, text: str) -> List[str]:
         """Format terminal output for messaging, splitting if needed"""
-        # Remove ANSI codes
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        text = ansi_escape.sub('', text)
+        # Import inside function to avoid circular dependency (core imports comms at module level)
+        from .core import ANSI_PATTERN
+
+        # Remove ANSI codes using comprehensive pattern from core.py
+        text = ANSI_PATTERN.sub('', text)
         
         # Clean up excessive whitespace
         text = re.sub(r'\n{3,}', '\n\n', text)
@@ -527,18 +517,18 @@ class CommunicationManager:
     def _is_duplicate_message(self, content: str, channel: str) -> bool:
         """Check if message was recently sent to the same channel"""
         current_time = time.time()
-        
+
         with self._cache_lock:
             # Clean up expired cache entries
             while self.sent_cache and (current_time - self.sent_cache[0][2]) >= self.CACHE_TIMEOUT:
                 self.sent_cache.popleft()
-            
+
             # Check for exact matches first
             for cached_content, cached_channel, _ in self.sent_cache:
                 if cached_content == content and cached_channel == channel:
                     log_message("DEBUG", f"Duplicate message detected (exact match): '{content[:50]}...' to {channel}")
                     return True
-            
+
             # Check for similarity
             for cached_content, cached_channel, _ in self.sent_cache:
                 if cached_channel == channel:
@@ -546,13 +536,40 @@ class CommunicationManager:
                     if similarity >= self.SIMILARITY_THRESHOLD:
                         log_message("INFO", f"Message '{content[:50]}...' is {similarity:.2%} similar to '{cached_content[:50]}...' on {channel}")
                         return True
-        
+
         return False
-    
+
     def _add_to_cache(self, content: str, channel: str):
         """Add message to sent cache"""
         with self._cache_lock:
             self.sent_cache.append((content, channel, time.time()))
+
+    def _check_and_cache_message(self, content: str, channel: str) -> bool:
+        """Atomically check for duplicate and add to cache if not duplicate. Returns True if message should be sent, False if duplicate."""
+        current_time = time.time()
+
+        with self._cache_lock:
+            # Clean up expired cache entries
+            while self.sent_cache and (current_time - self.sent_cache[0][2]) >= self.CACHE_TIMEOUT:
+                self.sent_cache.popleft()
+
+            # Check for exact matches first
+            for cached_content, cached_channel, _ in self.sent_cache:
+                if cached_content == content and cached_channel == channel:
+                    log_message("DEBUG", f"Duplicate message detected (exact match): '{content[:50]}...' to {channel}")
+                    return False
+
+            # Check for similarity
+            for cached_content, cached_channel, _ in self.sent_cache:
+                if cached_channel == channel:
+                    similarity = SequenceMatcher(None, content.lower(), cached_content.lower()).ratio()
+                    if similarity >= self.SIMILARITY_THRESHOLD:
+                        log_message("INFO", f"Message '{content[:50]}...' is {similarity:.2%} similar to '{cached_content[:50]}...' on {channel}")
+                        return False
+
+            # Not a duplicate - add to cache while still holding the lock
+            self.sent_cache.append((content, channel, current_time))
+            return True
     
     def reset_message_cache(self):
         """Reset message cache - useful for testing"""
@@ -732,7 +749,7 @@ class CommunicationManager:
             return
         
         # Check shared state for active modes
-        shared_state = get_shared_state() if SHARED_STATE_AVAILABLE else None
+        shared_state = get_shared_state()
 
 
         # Send to SMS recipients
@@ -740,11 +757,9 @@ class CommunicationManager:
         for phone in sms_recipients:
             # Check for duplicate before queuing (skip if in tool use mode)
             channel_key = f"sms:{phone}"
-            in_tool_use = False
-            if SHARED_STATE_AVAILABLE and shared_state:
-                in_tool_use = shared_state.get_in_tool_use()
+            in_tool_use = shared_state.get_in_tool_use()
             
-            if in_tool_use or not self._is_duplicate_message(text, channel_key):
+            if in_tool_use:
                 msg = Message(
                     content=text,
                     sender=phone,
@@ -753,6 +768,14 @@ class CommunicationManager:
                 )
                 self.output_queue.put(msg)
                 self._add_to_cache(text, channel_key)
+            elif self._check_and_cache_message(text, channel_key):
+                msg = Message(
+                    content=text,
+                    sender=phone,
+                    channel="sms",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
             else:
                 log_message("INFO", f"Recently sent to SMS {phone}: '{text[:50]}...'")
         
@@ -761,15 +784,13 @@ class CommunicationManager:
         if shared_state.whatsapp_mode_active and shared_state.communication.whatsapp_to_number:
             if shared_state.communication.whatsapp_to_number not in whatsapp_recipients:
                 whatsapp_recipients.append(shared_state.communication.whatsapp_to_number)
-        
+
         for phone in whatsapp_recipients:
             # Check for duplicate before queuing (skip if in tool use mode)
             channel_key = f"whatsapp:{phone}"
-            in_tool_use = False
-            if SHARED_STATE_AVAILABLE and shared_state:
-                in_tool_use = shared_state.get_in_tool_use()
+            in_tool_use = shared_state.get_in_tool_use()
             
-            if in_tool_use or not self._is_duplicate_message(text, channel_key):
+            if in_tool_use:
                 msg = Message(
                     content=text,
                     sender=phone,
@@ -778,6 +799,14 @@ class CommunicationManager:
                 )
                 self.output_queue.put(msg)
                 self._add_to_cache(text, channel_key)
+            elif self._check_and_cache_message(text, channel_key):
+                msg = Message(
+                    content=text,
+                    sender=phone,
+                    channel="whatsapp",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
             else:
                 log_message("INFO", f"Recently sent to WhatsApp {phone}: '{text[:50]}...'")
         
@@ -809,11 +838,9 @@ class CommunicationManager:
             
             # Check for duplicate message before queuing (skip if in tool use mode)
             channel_key = f"slack:{self.config.slack_channel}"
-            in_tool_use = False
-            if SHARED_STATE_AVAILABLE and shared_state:
-                in_tool_use = shared_state.get_in_tool_use()
+            in_tool_use = shared_state.get_in_tool_use()
             
-            if in_tool_use or not self._is_duplicate_message(final_text, channel_key):
+            if in_tool_use:
                 log_message("DEBUG", f"sending final text {len(final_text)} {final_text} to slack")
                 msg = Message(
                     content=final_text,
@@ -823,6 +850,15 @@ class CommunicationManager:
                 )
                 self.output_queue.put(msg)
                 self._add_to_cache(final_text, channel_key)
+            elif self._check_and_cache_message(final_text, channel_key):
+                log_message("DEBUG", f"sending final text {len(final_text)} {final_text} to slack")
+                msg = Message(
+                    content=final_text,
+                    sender=self.config.slack_channel,
+                    channel="slack",
+                    session_id=self.current_session_id
+                )
+                self.output_queue.put(msg)
             else:
                 log_message("INFO", f"Recently sent to Slack {self.config.slack_channel}: '{final_text[:50]}...'")
     
@@ -992,8 +1028,8 @@ class CommunicationManager:
     def _print_webhook_info(self):
         """Print webhook configuration information."""
         # Check if running in Claude wrapper mode
-        shared_state = get_shared_state() if SHARED_STATE_AVAILABLE else None
-        is_wrapper_mode = shared_state and (shared_state.slack_mode_active or shared_state.whatsapp_mode_active)
+        shared_state = get_shared_state()
+        is_wrapper_mode = shared_state.slack_mode_active or shared_state.whatsapp_mode_active
         
         has_sms = any(isinstance(p, TwilioSMSProvider) for p in self.providers)
         has_whatsapp = any(isinstance(p, TwilioWhatsAppProvider) for p in self.providers)

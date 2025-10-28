@@ -19,7 +19,6 @@
 """Standalone HTTP API server for talkito - handles Claude hooks and communication webhooks."""
 
 import json
-import time
 import threading
 import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -27,15 +26,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Dict, Callable, Optional
 from dataclasses import dataclass
 
-from .logs import log_message as _base_log_message
-
-
-def log_message(level: str, message: str, force_console: bool = False) -> None:
-    """Log a message with [API] prefix"""
-    _base_log_message(level, f"[API] {message}", __name__)
-    # Also print critical messages to console if requested
-    if force_console or level in ["ERROR", "CRITICAL"]:
-        print(f"[API] {message}")
+from .logs import log_message
 
 
 @dataclass
@@ -163,37 +154,97 @@ class APIServer:
                 }
                 self.wfile.write(json.dumps(response).encode())
         
+        # Event to signal when server is ready
+        server_ready = threading.Event()
+        server_error = []  # List to capture any startup errors
+
         # Create and start the server in a separate thread
         def run_server():
+            local_server = None
             try:
-                self.server = HTTPServer((self.config.host, self.config.port), APIHandler)
+                # Create server
+                local_server = HTTPServer((self.config.host, self.config.port), APIHandler)
+                self.server = local_server
                 self.running = True
                 log_message("INFO", f"HTTP API server started on {self.config.host}:{self.config.port}")
-                self.server.serve_forever()
+
+                # Signal that server is ready
+                server_ready.set()
+
+                # Start serving
+                local_server.serve_forever()
             except Exception as e:
-                log_message("ERROR", f"Failed to start API server: {e}")
+                error_msg = f"Failed to start API server: {e}"
+                log_message("ERROR", error_msg)
+                server_error.append(str(e))
+
+                # Clean up on failure
+                if local_server:
+                    try:
+                        local_server.server_close()
+                    except Exception:
+                        pass
+
+                self.server = None
                 self.running = False
-        
-        self.server_thread = threading.Thread(target=run_server, daemon=True)
+            finally:
+                # Ensure event is set even on failure
+                server_ready.set()
+
+        self.server_thread = threading.Thread(target=run_server, daemon=True, name="TalkitoAPIServer")
         self.server_thread.start()
-        
-        # Wait a moment to ensure server starts
-        time.sleep(0.5)
-        
+
+        # Wait for server to be ready (with timeout)
+        if not server_ready.wait(timeout=5.0):
+            log_message("ERROR", "API server startup timeout")
+            self.running = False
+            return False
+
+        # Check if there were any startup errors
+        if server_error:
+            log_message("ERROR", f"API server failed to start: {server_error[0]}")
+            return False
+
         return self.running
-    
+
     def stop(self):
         """Stop the API server"""
-        if self.server:
-            log_message("INFO", "Stopping API server")
-            self.server.shutdown()
-            self.server = None
-        
-        if self.server_thread:
-            self.server_thread.join(timeout=5)
-            self.server_thread = None
-        
+        if not self.running and not self.server:
+            return  # Already stopped
+
+        log_message("INFO", "Stopping API server")
+
+        # First, set running to False to signal shutdown intent
         self.running = False
+
+        # Shutdown and close the server
+        if self.server:
+            try:
+                # Shutdown stops serve_forever()
+                self.server.shutdown()
+            except Exception as e:
+                log_message("WARNING", f"Error during server shutdown: {e}")
+            finally:
+                try:
+                    # server_close() releases the socket
+                    self.server.server_close()
+                except Exception as e:
+                    log_message("WARNING", f"Error closing server socket: {e}")
+                finally:
+                    self.server = None
+
+        # Wait for thread to finish
+        if self.server_thread and self.server_thread.is_alive():
+            try:
+                self.server_thread.join(timeout=5)
+                if self.server_thread.is_alive():
+                    log_message("WARNING", "API server thread did not terminate within timeout")
+            except Exception as e:
+                log_message("WARNING", f"Error joining server thread: {e}")
+            finally:
+                self.server_thread = None
+
+        log_message("INFO", "API server stopped")
 
 
 # Default handlers for common endpoints

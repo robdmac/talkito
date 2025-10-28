@@ -140,9 +140,13 @@ def get_logger(name: str) -> logging.Logger:
 
 def log_message(level: str, message: str, logger_name: Optional[str] = None) -> None:
     """Log a message with custom level handling (supports BUFFER and FILTER levels)."""
+
+    if level in ["ERROR", "CRITICAL"]:
+        print(message)
+
     if not _log_enabled:
         return
-        
+
     logger = get_logger(logger_name or __name__)
     
     # Get caller information

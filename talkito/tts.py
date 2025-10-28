@@ -127,7 +127,7 @@ class SpeechItem:
 
 # Configuration constants
 MIN_SPEAK_LENGTH = 4  # Minimum characters before speaking
-CACHE_SIZE = 1000  # Cache size for similarity checking
+CACHE_SIZE = 10000  # Cache size for similarity checking
 CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
@@ -1861,13 +1861,12 @@ def extract_speakable_text(text: str) -> (str, str):
     text = text.strip()
 
     spoken_text = text
-    written_text = text
 
     # Skip text that contains no letters (just punctuation, numbers, spaces)
     if not RE_HAS_LETTERS.search(text):
         return "", ""
 
-    return spoken_text, written_text
+    return spoken_text
 
 
 def is_similar_to_recent(text: str) -> bool:
@@ -2193,7 +2192,7 @@ def _retry_delayed_speech(speech_item: SpeechItem, callback: Optional[Callable[[
                 speech_history.append(speech_item)
                 # Call the callback now that we're actually going to speak it
                 if callback:
-                    callback(speech_item.text)
+                    callback(speech_item.original_text)
             except queue.Full:
                 log_message("WARNING", "TTS queue full, skipping text")
 
@@ -2213,7 +2212,7 @@ def _text_is_novel(new_text: str, old_text: str) -> bool:
         return True
 
 
-def queue_for_speech(text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False, writes_partial_output: bool = False, callback: Optional[Callable[[str], None]] = None) -> str:
+def queue_for_speech(original_text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False, writes_partial_output: bool = False, callback: Optional[Callable[[str], None]] = None, constituent_parts: Optional[List[str]] = None) -> str:
     """Queue text for TTS with debouncing and filtering."""
     global highest_spoken_line_number, last_queued_text, last_queue_time, _delayed_timer, _delayed_speech_item
 
@@ -2224,17 +2223,16 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         return ""
 
     # Log the original text before any filtering
-    log_message("INFO", f"queue_for_speech received: '{text}' (exception_match={exception_match})")
+    log_message("INFO", f"queue_for_speech received: '{original_text}' (exception_match={exception_match}, has_constituent_parts={constituent_parts is not None})")
 
-    speakable_text, written_text = extract_speakable_text(text)
+    speakable_text = extract_speakable_text(original_text)
 
     if not speakable_text or len(speakable_text) < MIN_SPEAK_LENGTH:
-        log_message("INFO", f"Text too short: '{text}' -> '{speakable_text}'")
+        log_message("INFO", f"Text too short: '{original_text}' -> '{speakable_text}'")
         return ""
     
     # Clean up any awkward punctuation sequences
     speakable_text = clean_punctuation_sequences(speakable_text)
-
 
     # Get current time for various time-based checks
     current_time = time.time()
@@ -2268,7 +2266,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
 
         with _state_lock:
             delay = True
-            log_message("INFO", f"Will delay incomplete sentence: '{text}' by {2000}ms")
+            log_message("INFO", f"Will delay incomplete sentence: '{original_text}' by {2000}ms")
 
     else:
         # Always check for exact duplicates of the last spoken text
@@ -2296,6 +2294,19 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
             if is_similar_to_recent(speakable_text):
                 log_message("INFO", f"Recently spoken: '{speakable_text}'")
                 return ""
+
+            # Check if half or more of constituent parts are already in cache
+            if constituent_parts and len(constituent_parts) > 1:
+                matches = 0
+                for part in constituent_parts:
+                    if part and part.strip():
+                        if is_similar_to_recent(part):
+                            matches += 1
+                            log_message("DEBUG", f"Constituent part matches cache: '{part[:50]}...'")
+
+                if matches >= len(constituent_parts) // 2:
+                    log_message("INFO", f"Skipping text - {matches}/{len(constituent_parts)} constituent parts already in cache")
+                    return ""
         else:
             log_message("INFO", f"Bypassing similarity checks for exception pattern match: '{speakable_text}'")
 
@@ -2319,7 +2330,7 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
         # Create speech item
         speech_item = SpeechItem(
             text=speakable_text,
-            original_text=text,
+            original_text=original_text,
             line_number=line_number,
             source=source,
             is_exception=exception_match
@@ -2342,13 +2353,18 @@ def queue_for_speech(text: str, line_number: Optional[int] = None, source: str =
                 # Use cache lock for cache operations
                 with _cache_lock:
                     spoken_cache.append((speech_item.text, current_time))
+                    # Also add constituent parts to cache to prevent future duplicates
+                    if constituent_parts:
+                        for part in constituent_parts:
+                            if part and part.strip():  # Only add non-empty parts
+                                spoken_cache.append((part, current_time))
                 tts_queue.put_nowait(speech_item)
                 # Thread-safe append to history
                 speech_history.append(speech_item)
         except queue.Full:
             log_message("WARNING", "TTS queue full, skipping text")
 
-    return written_text
+    return speakable_text
 
 
 def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thread:
@@ -2366,24 +2382,49 @@ def start_tts_worker(engine: str, auto_skip_tts: bool = False) -> threading.Thre
 def reset_tts_cache():
     """Reset all TTS caches and queue."""
     global last_queued_text, last_queue_time, highest_spoken_line_number
-    
+
     with _cache_lock:
         spoken_cache.clear()
         speech_history.clear()
-    
+
     with _state_lock:
         last_queued_text = ""
         last_queue_time = 0
         highest_spoken_line_number = -1
-    
+
     # Also clear the queue
     while not tts_queue.empty():
         try:
             tts_queue.get_nowait()
         except queue.Empty:
             break
-    
+
     log_message("INFO", "TTS cache reset")
+
+
+def clear_tts_queue_only():
+    """Clear TTS queue and state without clearing spoken_cache.
+
+    Use this when changing TTS providers to avoid re-speaking content
+    that was already spoken with the previous provider.
+    """
+    global last_queued_text, last_queue_time
+
+    # Clear the queue to remove pending items
+    while not tts_queue.empty():
+        try:
+            tts_queue.get_nowait()
+        except queue.Empty:
+            break
+
+    # Reset state variables but NOT spoken_cache
+    with _state_lock:
+        last_queued_text = ""
+        last_queue_time = 0
+        # Note: We intentionally don't reset highest_spoken_line_number
+        # or clear spoken_cache to avoid repeating content
+
+    log_message("INFO", "TTS queue cleared (spoken_cache preserved)")
 
 
 def clear_speech_queue():

@@ -876,8 +876,8 @@ async def _change_tts_internal(provider: str = "system", voice: str = None, regi
         # Restart TTS worker with new config
         if get_shared_state().tts_initialized:
             tts.shutdown_tts()
-            # Clear the queue to remove any leftover __SHUTDOWN__ messages
-            tts.reset_tts_cache()
+            # Clear the queue but preserve spoken_cache to prevent repeats during redraws
+            tts.clear_tts_queue_only()
 
         # For local models, preload the model before starting the worker
         if final_provider in ['kittentts', 'kokoro']:
