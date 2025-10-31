@@ -31,13 +31,7 @@ from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
 from . import __version__
-from .logs import log_message as _base_log_message
-
-
-# Wrapper for module-specific logging
-def log_message(level: str, message: str):
-    """Log message with module name using centralized logger."""
-    _base_log_message(level, message, __name__)
+from .logs import log_message
 
 
 class TalkitoUpdater:

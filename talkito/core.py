@@ -515,27 +515,30 @@ def send_pending_text():
         terminal.last_sent_text = pending_text
         if shared_state.tts_enabled:
 
-            def speech_callback(speakable_text: str):
+            def speech_callback(written_text: str):
                 """Called when text is actually queued for speech (immediate or delayed)"""
-                log_message("DEBUG", f"All checks passed for [{speakable_text}]. Send to comms")
-                send_to_comms(speakable_text)
+                log_message("DEBUG", f"All checks passed for [{written_text}]. Send to comms")
+                send_to_comms(written_text)
 
             # Pass the exception match flag from terminal state
             exception_match = getattr(terminal, 'pending_text_exception_match', False)
+            # Pass constituent parts to help with duplicate detection
+            constituent_parts = terminal.pending_speech_text.copy() if len(terminal.pending_speech_text) > 1 else None
             speakable_text = tts.queue_for_speech(
-                pending_text, 
+                pending_text,
                 terminal.pending_text_line_number,
                 source="output",
                 exception_match=exception_match,
                 writes_partial_output=active_profile.writes_partial_output,
                 callback=speech_callback,
+                constituent_parts=constituent_parts,
             )
             if speakable_text:
                 terminal.pending_speech_text.clear()
                 terminal.pending_text_exception_match = False  # Reset flag
                 terminal.pending_text_should_skip = False  # Reset flag
                 if speakable_text != "--ignore--":
-                    speech_callback(speakable_text)
+                    speech_callback(pending_text)
         else:
             log_message("DEBUG", "TTS disabled, not sending pending text to speech")
             # Still send to comms even if TTS is disabled
@@ -2361,6 +2364,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
     global current_master_fd, current_proc, _original_tty_attrs
 
     # Initialize to ensure cleanup on error
+    stdin_flags = None
     try:
         # Set up terminal and spawn process
         slave_fd, stdin_flags = await setup_terminal_for_command(cmd)
@@ -2777,10 +2781,11 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             # Clear global reference
             _original_tty_attrs = None
 
-        try:
-            fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, stdin_flags)
-        except Exception as e:
-            log_message("ERROR", f"Failed to restore stdin flags: {e}")
+        if stdin_flags is not None:
+            try:
+                fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, stdin_flags)
+            except Exception as e:
+                log_message("ERROR", f"Failed to restore stdin flags: {e}")
         
         # Ensure cursor is visible
         try:
