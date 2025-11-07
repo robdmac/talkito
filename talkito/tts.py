@@ -959,7 +959,7 @@ current_speech_item: Optional[SpeechItem] = None
 
 # Track when speech actually finishes (including audio playback)
 last_speech_end_time = 0.0
-SPEECH_BUFFER_TIME = 0.1  # Seconds to wait after TTS process ends for audio to finish
+SPEECH_BUFFER_TIME = 0.01  # Seconds to wait after TTS process ends for audio to finish
 
 # Track the highest line number that has been spoken
 highest_spoken_line_number = -1
@@ -1309,20 +1309,20 @@ def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True,
                 playback_control.current_process = process
                 log_message("DEBUG", "audio process started via original method")
 
-            try:
-                # Poll + allow cooperative interruption
-                while process.poll() is None:
-                    if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
-                        try:
-                            process.terminate()
-                            process.wait(timeout=0.25)
-                        except Exception:
-                            process.kill()
-                        return False
-                    time.sleep(0.01)
-                return process.returncode == 0
-            except Exception:
-                return False
+        try:
+            # Poll + allow cooperative interruption
+            while process.poll() is None:
+                if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
+                    try:
+                        process.terminate()
+                        process.wait(timeout=0.25)
+                    except Exception:
+                        process.kill()
+                    return False
+                time.sleep(0.01)
+            return process.returncode == 0
+        except Exception:
+            return False
     finally:
         if use_process_control:
             with playback_control.lock:

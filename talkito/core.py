@@ -3443,6 +3443,7 @@ async def run_with_talkito(command: List[str], args) -> int:
     # Handle TTS disable
     if args.disable_tts:
         tts.disable_tts = True
+        get_shared_state().set_tts_enabled(False)
 
     comms_config = build_comms_config(args)
     

@@ -470,24 +470,18 @@ def show_slack_setup():
 def show_welcome_and_config():
     """Show welcome screen and configuration menu when talkito is run without a command"""
 
-    # ASCII Header
-    print("""
-╭─────────────────────────────────────────────────────────────╮
-│   ████████╗ █████╗ ██╗     ██╗  ██╗██╗████████╗ ██████╗     │
-│   ╚══██╔══╝██╔══██╗██║     ██║ ██╔╝██║╚══██╔══╝██╔═══██╗    │
-│      ██║   ███████║██║     █████╔╝ ██║   ██║   ██║   ██║    │
-│      ██║   ██╔══██║██║     ██╔═██╗ ██║   ██║   ██║   ██║    │
-│      ██║   ██║  ██║███████╗██║  ██╗██║   ██║   ╚██████╔╝    │
-│      ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝   ╚═╝    ╚═════╝     │
-╰─────────────────────────────────────────────────────────────╯""")
-
-    print("\n🎯 Welcome to TalkiTo! Let's configure your preferred providers.\n")
+    print("Welcome to TalkiTo!\n")
 
     # Check current environment variables
     current_tts = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', 'auto')
     current_asr = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER', 'auto')
 
-    print(f"Current preferences:\n  TTS Provider: {current_tts}\n  ASR Provider: {current_asr}\n")
+    # Normalize aws -> polly for display (they're the same provider)
+    if current_tts == 'aws':
+        current_tts = 'polly'
+
+    # Display as "polly (aws)" in menu
+    display_tts = 'polly (aws)' if current_tts == 'polly' else current_tts
 
     # Check available providers
     try:
@@ -501,30 +495,24 @@ def show_welcome_and_config():
     else:
         accessible_asr = {}
 
-    # TTS Configuration with interactive menu
-    tts_choices = ['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'auto']
+    # TTS Configuration choices (aws and polly are the same, only show polly in menu)
+    tts_choices = ['system', 'openai', 'polly (aws)', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'auto']
     tts_available = []
 
     for provider in tts_choices:
         if provider == 'auto':
             tts_available.append((provider, True, "Let TalkiTo choose automatically"))
         else:
-            available = accessible_tts.get(provider, {}).get('available', False)
-            note = accessible_tts.get(provider, {}).get('note', '')
+            # Map display name back to actual provider for availability check
+            actual_provider = 'polly' if provider == 'polly (aws)' else provider
+            available = accessible_tts.get(actual_provider, {}).get('available', False)
+            note = accessible_tts.get(actual_provider, {}).get('note', '')
             tts_available.append((provider, available, note))
 
-    new_tts_provider = show_interactive_menu(
-        "TTS Provider",
-        tts_available,
-        current_tts,
-        test_tts_provider if 'test_tts_provider' in globals() else None
-    )
-
-    # ASR Configuration with interactive menu
-    new_asr_provider = None
+    # ASR Configuration choices
+    asr_available_list = []
     if asr_available:
         asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'auto']
-        asr_available_list = []
 
         for provider in asr_choices:
             if provider == 'auto':
@@ -534,21 +522,26 @@ def show_welcome_and_config():
                 note = accessible_asr.get(provider, {}).get('note', '')
                 asr_available_list.append((provider, available, note))
 
-        new_asr_provider = show_interactive_menu(
-            "ASR Provider",
-            asr_available_list,
-            current_asr,
-            None  # No test function for ASR providers
-        )
+    # Show main configuration menu
+    new_tts_provider, new_asr_provider = show_main_config_menu(
+        display_tts,
+        current_asr,
+        tts_available,
+        asr_available_list if asr_available else None
+    )
 
     # Save preferences
     config_file = '.talkito.env'
     changes_made = False
 
-    if new_tts_provider is not None and new_tts_provider != current_tts:
-        if new_tts_provider and new_tts_provider != 'auto':
-            set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', new_tts_provider)
-            print(f"✅ Set TTS provider to: {new_tts_provider}")
+    # Convert "polly (aws)" back to "polly" for saving
+    save_tts_provider = 'polly' if new_tts_provider == 'polly (aws)' else new_tts_provider
+    save_current_tts = current_tts  # Already normalized to 'polly'
+
+    if new_tts_provider is not None and save_tts_provider != save_current_tts:
+        if save_tts_provider and save_tts_provider != 'auto':
+            set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', save_tts_provider)
+            print(f"✅ Set TTS provider to: {save_tts_provider}")
         else:
             unset_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER')
             print("✅ Set TTS provider to: auto")
@@ -574,6 +567,118 @@ def show_welcome_and_config():
     print("  talkito --setup-whatsapp             # Setup WhatsApp integration")
     print("\n📚 For more info: talkito --help")
     print("─" * 65)
+
+
+def show_main_config_menu(current_tts, current_asr, tts_options, asr_options):
+    """Show main configuration menu with TTS and ASR settings"""
+
+    def get_key():
+        """Get a single keypress"""
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            key = sys.stdin.read(1)
+            if key == '\x1b':  # ESC sequence
+                key += sys.stdin.read(2)
+            return key
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Menu items
+    menu_items = [
+        ('tts', f"TTS: {current_tts}"),
+        ('asr', f"ASR: {current_asr}"),
+        ('exit', "Exit")
+    ]
+
+    selected = 0
+    new_tts = current_tts
+    new_asr = current_asr
+
+    # Calculate menu lines for redrawing
+    menu_lines = len(menu_items)
+
+    # Initial display
+    for i, (item_type, label) in enumerate(menu_items):
+        cursor = "➤ " if i == selected else "  "
+        print(f"{cursor}{label}")
+
+    while True:
+        key = get_key()
+
+        if key == '\x1b[A':  # Up arrow
+            selected = (selected - 1) % len(menu_items)
+            # Redraw menu
+            print(f'\033[{menu_lines}A', end='')
+            for i, (item_type, label) in enumerate(menu_items):
+                # Update label if it changed
+                if item_type == 'tts':
+                    label = f"TTS: {new_tts}"
+                elif item_type == 'asr':
+                    label = f"ASR: {new_asr}"
+                cursor = "➤ " if i == selected else "  "
+                print(f"\033[2K{cursor}{label}")
+
+        elif key == '\x1b[B':  # Down arrow
+            selected = (selected + 1) % len(menu_items)
+            # Redraw menu
+            print(f'\033[{menu_lines}A', end='')
+            for i, (item_type, label) in enumerate(menu_items):
+                # Update label if it changed
+                if item_type == 'tts':
+                    label = f"TTS: {new_tts}"
+                elif item_type == 'asr':
+                    label = f"ASR: {new_asr}"
+                cursor = "➤ " if i == selected else "  "
+                print(f"\033[2K{cursor}{label}")
+
+        elif key == '\r' or key == '\n':  # Enter
+            item_type = menu_items[selected][0]
+
+            if item_type == 'tts':
+                # Clear screen area and show TTS menu
+                print()
+                result = show_interactive_menu(
+                    "TTS Provider",
+                    tts_options,
+                    new_tts,
+                    test_tts_provider if 'test_tts_provider' in globals() else None
+                )
+                if result is not None:
+                    new_tts = result
+                menu_items[0] = ('tts', f"TTS: {new_tts}")
+                for i, (item_type, label) in enumerate(menu_items):
+                    cursor = "➤ " if i == selected else "  "
+                    print(f"{cursor}{label}")
+
+            elif item_type == 'asr':
+                if asr_options:
+                    # Clear screen area and show ASR menu
+                    print()
+                    result = show_interactive_menu(
+                        "ASR Provider",
+                        asr_options,
+                        new_asr,
+                        None  # No test function for ASR
+                    )
+                    if result is not None:
+                        new_asr = result
+                    menu_items[1] = ('asr', f"ASR: {new_asr}")
+                    for i, (item_type, label) in enumerate(menu_items):
+                        cursor = "➤ " if i == selected else "  "
+                        print(f"{cursor}{label}")
+                else:
+                    # ASR not available
+                    print("\n❌ ASR module not available")
+
+            elif item_type == 'exit':
+                print()
+                return new_tts, new_asr
+
+        elif key == '\x03' or key == 'q' or key == 'Q':  # Ctrl+C or q
+            print()
+            return new_tts, new_asr
 
 
 def show_interactive_menu(title, options, current_choice, test_function=None):
@@ -673,9 +778,12 @@ def show_interactive_menu(title, options, current_choice, test_function=None):
 
 def test_tts_provider(provider):
     """Test a TTS provider by speaking a sample phrase"""
-    test_text = f"Hello! This is {provider} text-to-speech."
+    # Convert "polly (aws)" to "polly" for testing
+    actual_provider = 'polly' if provider == 'polly (aws)' else provider
 
-    if provider == 'system':
+    test_text = f"Hello! This is {actual_provider} text-to-speech."
+
+    if actual_provider == 'system':
         # Test system TTS
         if platform.system() == 'Darwin':  # macOS
             subprocess.run(['say', test_text], check=True)
@@ -699,15 +807,15 @@ def test_tts_provider(provider):
         old_state_provider = shared_state.tts_provider
 
         try:
-            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = provider
-            shared_state.set_tts_config(provider=provider)
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = actual_provider
+            shared_state.set_tts_config(provider=actual_provider)
 
             # For local models, ensure model is preloaded before testing
-            if provider in ['kittentts', 'kokoro']:
-                tts.preload_local_model(provider)
+            if actual_provider in ['kittentts', 'kokoro']:
+                tts.preload_local_model(actual_provider)
 
             # Use direct provider approach to avoid worker synchronization issues
-            provider_instance = tts.create_tts_provider(provider)
+            provider_instance = tts.create_tts_provider(actual_provider)
             if provider_instance:
                 success = provider_instance.speak(test_text, use_process_control=False)
                 if not success:
