@@ -682,66 +682,87 @@ def initialize_providers_early(args):
 
     # Capture desired ASR mode before initialization logic potentially overrides it
     requested_asr_mode = getattr(args, 'asr_mode', None) if hasattr(args, 'asr_mode') else None
-    
-    # Trigger TTS provider selection (this will run availability checks and downloads)
-    # Check both command line args and environment variable (same as ASR)
-    step_start = time.time()
-    requested_tts_provider = None
-    if hasattr(args, 'tts_provider') and args.tts_provider:
-        requested_tts_provider = args.tts_provider
-        log_message("INFO", f"Found tts_provider in args: {requested_tts_provider}")
-    preferred = requested_tts_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
-    log_message("INFO", f"Starting TTS provider selection for: {preferred}")
-    try:
-        if preferred:
-            # Set the requested provider in shared state so select_best_tts_provider knows what was requested
-            shared_state.tts_provider = preferred
-        selected_tts = tts.select_best_tts_provider()
-        shared_state.tts_provider = selected_tts
-        log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
 
-        # Start preloading TTS models early for local providers
-        if selected_tts in ['kokoro', 'kittentts']:
-            try:
-                preload_start = time.time()
-                log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
-                tts.preload_local_model(selected_tts)
-                log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
-            except Exception as preload_e:
-                log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
+    # Check if TTS is disabled before attempting provider initialization
+    tts_disabled = (
+        getattr(args, 'disable_tts', False) or
+        getattr(args, 'tts_mode', None) == 'off' or
+        os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER') == 'off'
+    )
 
-    except Exception as e:
-        log_message("ERROR", f"TTS provider selection failed: {e}")
-        pass  # Continue even if selection fails
-    
-    # Trigger ASR provider selection (this will run availability checks and downloads)  
-    # Check both command line args and environment variable (claude command sets env var)
-    step_start = time.time()
-    requested_asr_provider = None
-    if hasattr(args, 'asr_provider') and args.asr_provider:
-        requested_asr_provider = args.asr_provider
-        log_message("INFO", f"Found asr_provider in args: {requested_asr_provider}")
-    preferred = requested_asr_provider or os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
-    log_message("INFO", f"Starting ASR provider selection for: {preferred}")
-    if asr_module is None:
-        asr_module = _import_asr()
-    shared_state.asr_provider = asr_module.select_best_asr_provider(preferred)
-    log_message("INFO", f"ASR provider selection completed: {shared_state.asr_provider} [{time.time() - step_start:.3f}s]")
-    
-    # Start preloading local whisper models early for local_whisper provider
-    if shared_state.asr_provider == 'local_whisper':
-        if requested_asr_mode == 'off':
-            log_message("INFO", "Skipping PyWhisper preload - ASR mode requested as 'off'")
-        else:
-            try:
-                preload_start = time.time()
-                log_message("INFO", f"Starting early ASR model preloading for: {shared_state.asr_provider}")
-                asr_module.preload_local_asr_model()
-                log_message("INFO", f"Early ASR model preloading started for {shared_state.asr_provider} [{time.time() - preload_start:.3f}s]")
-            except Exception as preload_e:
-                log_message("ERROR", f"Early ASR model preloading failed for {shared_state.asr_provider}: {preload_e}")
+    if tts_disabled:
+        log_message("INFO", "Skipping TTS provider initialization - TTS mode is 'off'")
+        shared_state.tts_provider = None
     else:
-        log_message("INFO", f"Skipping PyWhisper preload - ASR provider is: {shared_state.asr_provider}")
+        # Trigger TTS provider selection (this will run availability checks and downloads)
+        # Check both command line args and environment variable (same as ASR)
+        step_start = time.time()
+        requested_tts_provider = None
+        if hasattr(args, 'tts_provider') and args.tts_provider:
+            requested_tts_provider = args.tts_provider
+            log_message("INFO", f"Found tts_provider in args: {requested_tts_provider}")
+        preferred = requested_tts_provider or os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+        log_message("INFO", f"Starting TTS provider selection for: {preferred}")
+        try:
+            if preferred:
+                # Set the requested provider in shared state so select_best_tts_provider knows what was requested
+                shared_state.tts_provider = preferred
+            selected_tts = tts.select_best_tts_provider()
+            shared_state.tts_provider = selected_tts
+            log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
+
+            # Start preloading TTS models early for local providers
+            if selected_tts in ['kokoro', 'kittentts']:
+                try:
+                    preload_start = time.time()
+                    log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
+                    tts.preload_local_model(selected_tts)
+                    log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
+                except Exception as preload_e:
+                    log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
+
+        except Exception as e:
+            log_message("ERROR", f"TTS provider selection failed: {e}")
+            pass  # Continue even if selection fails
+    
+    # Check if ASR is disabled before attempting provider initialization
+    asr_disabled = (
+        requested_asr_mode == 'off' or
+        os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER') == 'off'
+    )
+
+    if asr_disabled:
+        log_message("INFO", "Skipping ASR provider initialization - ASR mode is 'off'")
+        shared_state.asr_provider = None
+    else:
+        # Trigger ASR provider selection (this will run availability checks and downloads)
+        # Check both command line args and environment variable (claude command sets env var)
+        step_start = time.time()
+        requested_asr_provider = None
+        if hasattr(args, 'asr_provider') and args.asr_provider:
+            requested_asr_provider = args.asr_provider
+            log_message("INFO", f"Found asr_provider in args: {requested_asr_provider}")
+        preferred = requested_asr_provider or os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
+        log_message("INFO", f"Starting ASR provider selection for: {preferred}")
+        if asr_module is None:
+            asr_module = _import_asr()
+        shared_state.asr_provider = asr_module.select_best_asr_provider(preferred)
+        log_message("INFO", f"ASR provider selection completed: {shared_state.asr_provider} [{time.time() - step_start:.3f}s]")
+
+        # Start preloading local whisper models early for local_whisper provider
+        if shared_state.asr_provider == 'local_whisper':
+            if requested_asr_mode == 'off':
+                log_message("INFO", "Skipping PyWhisper preload - ASR mode requested as 'off'")
+            else:
+                try:
+                    preload_start = time.time()
+                    log_message("INFO", f"Starting early ASR model preloading for: {shared_state.asr_provider}")
+                    asr_module.preload_local_asr_model()
+                    log_message("INFO", f"Early ASR model preloading started for {shared_state.asr_provider} [{time.time() - preload_start:.3f}s]")
+                except Exception as preload_e:
+                    log_message("ERROR", f"Early ASR model preloading failed for {shared_state.asr_provider}: {preload_e}")
+        else:
+            log_message("INFO", f"Skipping PyWhisper preload - ASR provider is: {shared_state.asr_provider}")
     
     log_message("INFO", "initialize_providers_early about to complete")
     total_time = time.time() - start_time
