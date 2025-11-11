@@ -3575,7 +3575,11 @@ async def run_with_talkito(command: List[str], args) -> int:
         if hasattr(comms_config, 'slack_enabled') and comms_config.slack_enabled:
             providers.append('slack')
 
-        comm_manager = comms.setup_communication(providers=providers, config=comms_config)
+        # Only setup communication if there are enabled providers
+        if providers:
+            comm_manager = comms.setup_communication(providers=providers, config=comms_config)
+        else:
+            comm_manager = None
         core.comm_manager = comm_manager
         
         # Update shared state with configured providers
