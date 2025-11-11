@@ -3415,6 +3415,30 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     config.whatsapp_enabled = has_whatsapp
     config.slack_enabled = has_slack
 
+    # Apply user preference from environment if set
+    preferred = os.environ.get('TALKITO_PREFERRED_COMMS_PROVIDERS', 'auto')
+    if preferred and preferred != 'auto':
+        if preferred == 'none':
+            # Disable all providers
+            config.slack_enabled = False
+            config.whatsapp_enabled = False
+            config.sms_enabled = False
+        elif preferred == 'slack':
+            # Only enable slack
+            config.slack_enabled = has_slack
+            config.whatsapp_enabled = False
+            config.sms_enabled = False
+        elif preferred == 'whatsapp':
+            # Only enable whatsapp
+            config.slack_enabled = False
+            config.whatsapp_enabled = has_whatsapp
+            config.sms_enabled = False
+        elif preferred == 'both':
+            # Enable both slack and whatsapp
+            config.slack_enabled = has_slack
+            config.whatsapp_enabled = has_whatsapp
+            config.sms_enabled = False
+
     return config
 
 # High-level API functions
