@@ -3387,19 +3387,30 @@ class TalkitoCore:
         return result
 
 
-def build_comms_config(args) -> Optional[comms.CommsConfig]:
-    """Build communication configuration from command line arguments"""
+def get_comms_config_from_args(args) -> comms.CommsConfig:
+    """Return a CommsConfig snapshot that reflects env vars plus CLI overrides."""
     config = comms.create_config_from_env()
 
-    # Override with command line arguments first
-    if args.sms_recipients:
-        config.sms_recipients = [r.strip() for r in args.sms_recipients.split(',')]
-    if args.whatsapp_recipients:
-        config.whatsapp_recipients = [r.strip() for r in args.whatsapp_recipients.split(',')]
-    if args.slack_channel:
+    def _split_list(value: Optional[str]) -> List[str]:
+        if not value:
+            return []
+        return [item.strip() for item in value.split(',') if item.strip()]
+
+    if getattr(args, "sms_recipients", None):
+        config.sms_recipients = _split_list(args.sms_recipients)
+    if getattr(args, "whatsapp_recipients", None):
+        config.whatsapp_recipients = _split_list(args.whatsapp_recipients)
+    if getattr(args, "slack_channel", None):
         config.slack_channel = args.slack_channel
-    if args.webhook_port:
+    if getattr(args, "webhook_port", None):
         config.webhook_port = args.webhook_port
+
+    return config
+
+
+def build_comms_config(args) -> Optional[comms.CommsConfig]:
+    """Build communication configuration from command line arguments"""
+    config = get_comms_config_from_args(args)
 
     # Check if any communication is configured (after applying overrides)
     has_sms = config.twilio_account_sid and config.sms_recipients
@@ -3414,6 +3425,30 @@ def build_comms_config(args) -> Optional[comms.CommsConfig]:
     config.sms_enabled = has_sms
     config.whatsapp_enabled = has_whatsapp
     config.slack_enabled = has_slack
+
+    # Apply user preference from environment if set
+    preferred = os.environ.get('TALKITO_PREFERRED_COMMS_PROVIDERS', 'auto')
+    if preferred and preferred != 'auto':
+        if preferred == 'none':
+            # Disable all providers
+            config.slack_enabled = False
+            config.whatsapp_enabled = False
+            config.sms_enabled = False
+        elif preferred == 'slack':
+            # Only enable slack
+            config.slack_enabled = has_slack
+            config.whatsapp_enabled = False
+            config.sms_enabled = False
+        elif preferred == 'whatsapp':
+            # Only enable whatsapp
+            config.slack_enabled = False
+            config.whatsapp_enabled = has_whatsapp
+            config.sms_enabled = False
+        elif preferred == 'both':
+            # Enable both slack and whatsapp
+            config.slack_enabled = has_slack
+            config.whatsapp_enabled = has_whatsapp
+            config.sms_enabled = False
 
     return config
 
@@ -3443,6 +3478,7 @@ async def run_with_talkito(command: List[str], args) -> int:
     # Handle TTS disable
     if args.disable_tts:
         tts.disable_tts = True
+        get_shared_state().set_tts_enabled(False)
 
     comms_config = build_comms_config(args)
     
@@ -3539,7 +3575,11 @@ async def run_with_talkito(command: List[str], args) -> int:
         if hasattr(comms_config, 'slack_enabled') and comms_config.slack_enabled:
             providers.append('slack')
 
-        comm_manager = comms.setup_communication(providers=providers, config=comms_config)
+        # Only setup communication if there are enabled providers
+        if providers:
+            comm_manager = comms.setup_communication(providers=providers, config=comms_config)
+        else:
+            comm_manager = None
         core.comm_manager = comm_manager
         
         # Update shared state with configured providers

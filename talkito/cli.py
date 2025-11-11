@@ -62,7 +62,14 @@ from typing import List, Optional, Union, Tuple
 from . import __version__
 from . import asr
 from . import tts
-from .core import build_comms_config, replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
+from .core import (
+    build_comms_config,
+    get_comms_config_from_args,
+    replay_recorded_session,
+    run_with_talkito,
+    signal_handler,
+    TalkitoCore,
+)
 from .clients import run_terminal_agent_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
@@ -102,9 +109,9 @@ def parse_arguments():
     
     # TTS options
     tts_group = parser.add_argument_group('TTS options')
-    tts_group.add_argument('--tts-provider', type=str, 
-                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro'],
-                           help='TTS provider to use')
+    tts_group.add_argument('--tts-provider', type=str,
+                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'off'],
+                           help='TTS provider to use (use "off" to disable TTS)')
     tts_group.add_argument('--tts-voice', type=str, 
                            help='Voice to use (provider-specific)')
     tts_group.add_argument('--tts-region', type=str, 
@@ -128,8 +135,8 @@ def parse_arguments():
                            default='tap-to-talk',
                            help='ASR mode: off, auto-input, tap-to-talk, or file:<path> for testing (default: tap-to-talk)')
     asr_group.add_argument('--asr-provider', type=str,
-                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
-                           help='ASR provider to use')
+                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'off'],
+                           help='ASR provider to use (use "off" to disable ASR)')
     asr_group.add_argument('--asr-language', type=str, default='en-US',
                            help='Language code for ASR (default: en-US)')
     asr_group.add_argument('--asr-model', type=str,
@@ -272,34 +279,54 @@ async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
 
+    # Check for 'off' provider from environment if not specified on command line
+    if not args.tts_provider:
+        env_tts_provider = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER')
+        if env_tts_provider == 'off':
+            args.disable_tts = True
+            args.tts_provider = None
+
     # Set environment variables for provider preferences
     # Check if the TTS provider is valid first, fall back to system on macOS if not
     if args.tts_provider:
-        # Validate the provider before setting it
-        log_message("INFO", f"About to validate TTS provider: {args.tts_provider}")
-        provider_valid = tts.validate_provider_config(args.tts_provider)
-        log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
-        if not provider_valid:
-            # Don't fallback to system - just let the provider selection logic handle it
-            # The system might not have a working system TTS (e.g., Linux without espeak/festival/flite)
-            print("No fallback TTS provider available. TTS will be disabled.")
-            # Clear the invalid provider so select_best_tts_provider() can choose an alternative
+        # Handle 'off' provider explicitly
+        if args.tts_provider == 'off':
+            args.disable_tts = True
             args.tts_provider = None
-            args.disable_tts = True  # Explicitly disable TTS
-            if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
-                del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
         else:
-            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
+            # Validate the provider before setting it
+            log_message("INFO", f"About to validate TTS provider: {args.tts_provider}")
+            provider_valid = tts.validate_provider_config(args.tts_provider)
+            log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
+            if not provider_valid:
+                # Don't fallback to system - just let the provider selection logic handle it
+                # The system might not have a working system TTS (e.g., Linux without espeak/festival/flite)
+                print("No fallback TTS provider available. TTS will be disabled.")
+                # Clear the invalid provider so select_best_tts_provider() can choose an alternative
+                args.tts_provider = None
+                args.disable_tts = True  # Explicitly disable TTS
+                if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
+                    del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
+            else:
+                os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = args.tts_provider
 
     # If no ASR provider specified on command line, check environment variable
     if not args.asr_provider:
         env_asr_provider = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER')
         if env_asr_provider:
-            args.asr_provider = env_asr_provider
-            log_message("INFO", f"Using ASR provider from environment: {env_asr_provider}")
+            if env_asr_provider == 'off':
+                args.asr_mode = 'off'
+            else:
+                args.asr_provider = env_asr_provider
+                log_message("INFO", f"Using ASR provider from environment: {env_asr_provider}")
 
     if args.asr_provider:
-        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
+        # Handle 'off' provider explicitly
+        if args.asr_provider == 'off':
+            args.asr_mode = 'off'
+            args.asr_provider = None
+        else:
+            os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = args.asr_provider
 
     # Initialize providers early (triggers availability checks and download prompts)
     initialize_providers_early(args)
@@ -328,6 +355,14 @@ async def run_talkito_command(args) -> int:
         shared_state.asr_file_delay = 0.1
 
     shared_state.tts_mode = tts_mode
+
+    # Disable TTS if mode is 'off'
+    if tts_mode == 'off':
+        shared_state.set_tts_enabled(False)
+
+    # Disable ASR if mode is 'off'
+    if shared_state.asr_mode == 'off':
+        shared_state.set_asr_enabled(False)
 
     # Special handling for 'claude' or 'codex' command
     if args.command in ('claude', 'codex'):
@@ -467,27 +502,124 @@ def show_slack_setup():
     # print()
 
 
-def show_welcome_and_config():
+def check_comms_provider_accessibility(args):
+    """Check which communication providers are accessible using shared comms config."""
+    config = get_comms_config_from_args(args)
+    sync_communication_state_from_config(config)
+
+    accessible = {}
+
+    slack_tokens = bool(config.slack_bot_token and config.slack_app_token)
+    slack_channel = bool(config.slack_channel)
+    if not slack_tokens:
+        note = 'SLACK_BOT_TOKEN not set' if not config.slack_bot_token else 'SLACK_APP_TOKEN not set'
+    elif not slack_channel:
+        note = 'Channel will be prompted'
+    else:
+        note = 'Ready'
+    accessible['slack'] = {
+        'available': slack_tokens,
+        'note': note,
+    }
+
+    whatsapp_credentials = all(
+        [config.twilio_account_sid, config.twilio_auth_token, config.twilio_whatsapp_number]
+    )
+    whatsapp_recipients = bool(config.whatsapp_recipients)
+    if not whatsapp_credentials:
+        note = 'Twilio credentials not set'
+    elif not whatsapp_recipients:
+        note = 'Recipients will be prompted'
+    else:
+        note = 'Ready'
+    accessible['whatsapp'] = {
+        'available': whatsapp_credentials,
+        'note': note,
+    }
+
+    return accessible
+
+
+def build_comms_display_string(comms_provider):
+    """Build a display string for comms that includes channel/recipients"""
+    if comms_provider in ['auto', 'none']:
+        return comms_provider
+
+    details = []
+
+    if comms_provider in ['slack', 'both']:
+        slack_channel = os.environ.get('SLACK_CHANNEL')
+        if slack_channel:
+            details.append(slack_channel)
+
+    if comms_provider in ['whatsapp', 'both']:
+        whatsapp_recipients = os.environ.get('WHATSAPP_RECIPIENTS')
+        if whatsapp_recipients:
+            details.append(whatsapp_recipients)
+
+    if details:
+        return f"{comms_provider}: {', '.join(details)}"
+    else:
+        return comms_provider
+
+
+def ensure_comms_configured(provider, args):
+    """Prompt for missing comms config and keep shared communication state in sync.
+
+    Args:
+        provider: 'slack', 'whatsapp', or 'both'
+        args: Command line arguments
+
+    Returns:
+        True if all required config is present after prompting, False otherwise
+    """
+    success = True
+
+    if provider in ['slack', 'both']:
+        if not os.environ.get('SLACK_CHANNEL'):
+            print("\n📢 Slack channel not configured.")
+            channel = input("Enter Slack channel (e.g., #talkito-comms): ").strip()
+            if channel:
+                if not channel.startswith('#'):
+                    channel = '#' + channel
+                set_key('.talkito.env', 'SLACK_CHANNEL', channel)
+                os.environ['SLACK_CHANNEL'] = channel
+                print(f"✅ Set Slack channel to: {channel}\n")
+            else:
+                success = False
+
+    if provider in ['whatsapp', 'both']:
+        if not os.environ.get('WHATSAPP_RECIPIENTS'):
+            print("\n📱 WhatsApp recipients not configured.")
+            recipients = input("Enter WhatsApp number (e.g., +1234567890): ").strip()
+            if recipients:
+                set_key('.talkito.env', 'WHATSAPP_RECIPIENTS', recipients)
+                os.environ['WHATSAPP_RECIPIENTS'] = recipients
+                print(f"✅ Set WhatsApp recipients to: {recipients}\n")
+            else:
+                success = False
+
+    # Sync shared communication state after prompting
+    sync_communication_state_from_config(get_comms_config_from_args(args))
+    return success
+
+
+def show_welcome_and_config(args):
     """Show welcome screen and configuration menu when talkito is run without a command"""
 
-    # ASCII Header
-    print("""
-╭─────────────────────────────────────────────────────────────╮
-│   ████████╗ █████╗ ██╗     ██╗  ██╗██╗████████╗ ██████╗     │
-│   ╚══██╔══╝██╔══██╗██║     ██║ ██╔╝██║╚══██╔══╝██╔═══██╗    │
-│      ██║   ███████║██║     █████╔╝ ██║   ██║   ██║   ██║    │
-│      ██║   ██╔══██║██║     ██╔═██╗ ██║   ██║   ██║   ██║    │
-│      ██║   ██║  ██║███████╗██║  ██╗██║   ██║   ╚██████╔╝    │
-│      ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝   ╚═╝    ╚═════╝     │
-╰─────────────────────────────────────────────────────────────╯""")
-
-    print("\n🎯 Welcome to TalkiTo! Let's configure your preferred providers.\n")
+    print("Welcome to TalkiTo!\n")
 
     # Check current environment variables
     current_tts = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', 'auto')
     current_asr = os.environ.get('TALKITO_PREFERRED_ASR_PROVIDER', 'auto')
+    current_comms = os.environ.get('TALKITO_PREFERRED_COMMS_PROVIDERS', 'auto')
 
-    print(f"Current preferences:\n  TTS Provider: {current_tts}\n  ASR Provider: {current_asr}\n")
+    # Normalize aws -> polly for display (they're the same provider)
+    if current_tts == 'aws':
+        current_tts = 'polly'
+
+    # Display as "polly (aws)" in menu
+    display_tts = 'polly (aws)' if current_tts == 'polly' else current_tts
 
     # Check available providers
     try:
@@ -501,71 +633,169 @@ def show_welcome_and_config():
     else:
         accessible_asr = {}
 
-    # TTS Configuration with interactive menu
-    tts_choices = ['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'auto']
+    accessible_comms = check_comms_provider_accessibility(args)
+
+    # TTS Configuration choices (aws and polly are the same, only show polly in menu)
+    tts_choices = ['system', 'openai', 'polly (aws)', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'off', 'auto']
     tts_available = []
 
     for provider in tts_choices:
         if provider == 'auto':
             tts_available.append((provider, True, "Let TalkiTo choose automatically"))
+        elif provider == 'off':
+            tts_available.append((provider, True, "Disable TTS output"))
         else:
-            available = accessible_tts.get(provider, {}).get('available', False)
-            note = accessible_tts.get(provider, {}).get('note', '')
+            # Map display name back to actual provider for availability check
+            actual_provider = 'polly' if provider == 'polly (aws)' else provider
+            available = accessible_tts.get(actual_provider, {}).get('available', False)
+            note = accessible_tts.get(actual_provider, {}).get('note', '')
             tts_available.append((provider, available, note))
 
-    new_tts_provider = show_interactive_menu(
-        "TTS Provider",
-        tts_available,
-        current_tts,
-        test_tts_provider if 'test_tts_provider' in globals() else None
-    )
-
-    # ASR Configuration with interactive menu
-    new_asr_provider = None
+    # ASR Configuration choices
+    asr_available_list = []
     if asr_available:
-        asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'auto']
-        asr_available_list = []
+        asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'off', 'auto']
 
         for provider in asr_choices:
             if provider == 'auto':
                 asr_available_list.append((provider, True, "Let TalkiTo choose automatically"))
+            elif provider == 'off':
+                asr_available_list.append((provider, True, "Disable ASR input"))
             else:
                 available = accessible_asr.get(provider, {}).get('available', False)
                 note = accessible_asr.get(provider, {}).get('note', '')
                 asr_available_list.append((provider, available, note))
 
-        new_asr_provider = show_interactive_menu(
-            "ASR Provider",
-            asr_available_list,
-            current_asr,
-            None  # No test function for ASR providers
-        )
+    # Comms Configuration choices
+    comms_choices = ['slack', 'whatsapp', 'both', 'none', 'auto']
+    comms_available_list = []
+
+    for provider in comms_choices:
+        if provider == 'auto':
+            comms_available_list.append((provider, True, "Enable all configured providers"))
+        elif provider == 'both':
+            has_both = accessible_comms.get('slack', {}).get('available', False) and accessible_comms.get('whatsapp', {}).get('available', False)
+            comms_available_list.append((provider, has_both, "Enable both Slack and WhatsApp" if has_both else "Both not configured"))
+        elif provider == 'none':
+            comms_available_list.append((provider, True, "Disable all communication providers"))
+        else:
+            available = accessible_comms.get(provider, {}).get('available', False)
+            note = accessible_comms.get(provider, {}).get('note', '')
+            comms_available_list.append((provider, available, note))
+
+    # Show main configuration menu
+    result = show_main_config_menu(
+        args,
+        display_tts,
+        current_asr,
+        current_comms,
+        tts_available,
+        asr_available_list if asr_available else None,
+        comms_available_list
+    )
+
+    # Check if we got a launch command
+    launch_command = None
+    if isinstance(result, tuple) and len(result) == 4 and isinstance(result[0], str):
+        launch_command, new_tts_provider, new_asr_provider, new_comms = result
+    else:
+        new_tts_provider, new_asr_provider, new_comms = result
 
     # Save preferences
     config_file = '.talkito.env'
     changes_made = False
 
-    if new_tts_provider is not None and new_tts_provider != current_tts:
-        if new_tts_provider and new_tts_provider != 'auto':
-            set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', new_tts_provider)
-            print(f"✅ Set TTS provider to: {new_tts_provider}")
+    # Convert "polly (aws)" back to "polly" for saving
+    save_tts_provider = 'polly' if new_tts_provider == 'polly (aws)' else new_tts_provider
+    save_current_tts = current_tts  # Already normalized to 'polly'
+
+    if new_tts_provider is not None and save_tts_provider != save_current_tts:
+        if save_tts_provider and save_tts_provider != 'auto':
+            set_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER', save_tts_provider)
+            # Update current process so quick-launch sees the new value
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = save_tts_provider
+            if save_tts_provider == 'off':
+                args.disable_tts = True
+                args.tts_provider = None
+            else:
+                args.tts_provider = save_tts_provider
+                args.disable_tts = False
+            if not launch_command:
+                print(f"✅ Set TTS provider to: {save_tts_provider}")
         else:
             unset_key(config_file, 'TALKITO_PREFERRED_TTS_PROVIDER')
-            print("✅ Set TTS provider to: auto")
+            # Update current process
+            if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
+                del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
+            args.tts_provider = None
+            args.disable_tts = False
+            if not launch_command:
+                print("✅ Set TTS provider to: auto")
         changes_made = True
 
     if asr_available and new_asr_provider is not None and new_asr_provider != current_asr:
         if new_asr_provider and new_asr_provider != 'auto':
             set_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER', new_asr_provider)
-            print(f"✅ Set ASR provider to: {new_asr_provider}")
+            # Update current process so quick-launch sees the new value
+            os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = new_asr_provider
+            if new_asr_provider == 'off':
+                args.asr_mode = 'off'
+                args.asr_provider = None
+            else:
+                args.asr_provider = new_asr_provider
+                if args.asr_mode == 'off':
+                    args.asr_mode = 'tap-to-talk'
+            if not launch_command:
+                print(f"✅ Set ASR provider to: {new_asr_provider}")
         else:
             unset_key(config_file, 'TALKITO_PREFERRED_ASR_PROVIDER')
-            print("✅ Set ASR provider to: auto")
+            # Update current process
+            if 'TALKITO_PREFERRED_ASR_PROVIDER' in os.environ:
+                del os.environ['TALKITO_PREFERRED_ASR_PROVIDER']
+            args.asr_provider = None
+            if args.asr_mode == 'off':
+                args.asr_mode = 'tap-to-talk'
+            if not launch_command:
+                print("✅ Set ASR provider to: auto")
         changes_made = True
 
-    if changes_made:
+    if new_comms is not None and new_comms != current_comms:
+        if new_comms and new_comms != 'auto':
+            set_key(config_file, 'TALKITO_PREFERRED_COMMS_PROVIDERS', new_comms)
+            # Update current process so quick-launch sees the new value
+            os.environ['TALKITO_PREFERRED_COMMS_PROVIDERS'] = new_comms
+            if not launch_command:
+                print(f"✅ Set Comms provider to: {new_comms}")
+        else:
+            unset_key(config_file, 'TALKITO_PREFERRED_COMMS_PROVIDERS')
+            # Update current process
+            if 'TALKITO_PREFERRED_COMMS_PROVIDERS' in os.environ:
+                del os.environ['TALKITO_PREFERRED_COMMS_PROVIDERS']
+            if not launch_command:
+                print("✅ Set Comms provider to: auto")
+        changes_made = True
+
+    if changes_made and not launch_command:
         print(f"\n💾 Preferences saved to {config_file}")
 
+    # Handle launch commands
+    if launch_command == 'launch_claude':
+        args.command = 'claude'
+        args.profile = 'claude'
+        args.arguments = []
+        exit_code = asyncio.run(run_talkito_command(args))
+        sys.exit(exit_code)
+    elif launch_command == 'launch_codex':
+        args.command = 'codex'
+        args.profile = 'codex'
+        args.arguments = []
+        exit_code = asyncio.run(run_talkito_command(args))
+        sys.exit(exit_code)
+    elif launch_command == 'launch_mcp':
+        run_mcp_sse_server()
+        sys.exit(0)
+
+    # Normal exit - show help text
     print("\n" + "─" * 65)
     print("🚀 Quick Start Examples:")
     print("  talkito echo 'Hello World!'          # Basic TTS demo")
@@ -574,6 +804,162 @@ def show_welcome_and_config():
     print("  talkito --setup-whatsapp             # Setup WhatsApp integration")
     print("\n📚 For more info: talkito --help")
     print("─" * 65)
+
+
+def show_main_config_menu(args, current_tts, current_asr, current_comms, tts_options, asr_options, comms_options):
+    """Show main configuration menu with TTS, ASR, and Comms settings"""
+
+    def get_key():
+        """Get a single keypress"""
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            key = sys.stdin.read(1)
+            if key == '\x1b':  # ESC sequence
+                key += sys.stdin.read(2)
+            return key
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Menu items
+    menu_items = [
+        ('tts', f"TTS: {current_tts}"),
+        ('asr', f"ASR: {current_asr}"),
+        ('comms', f"Comms: {build_comms_display_string(current_comms)}"),
+        ('claude', "Claude"),
+        ('codex', "Codex"),
+        ('mcp', "MCP Server"),
+        ('exit', "Exit")
+    ]
+
+    selected = 0
+    new_tts = current_tts
+    new_asr = current_asr
+    new_comms = current_comms
+
+    # Calculate menu lines for redrawing
+    menu_lines = len(menu_items)
+
+    # Initial display
+    for i, (item_type, label) in enumerate(menu_items):
+        cursor = "➤ " if i == selected else "  "
+        print(f"{cursor}{label}")
+
+    while True:
+        key = get_key()
+
+        if key == '\x1b[A':  # Up arrow
+            selected = (selected - 1) % len(menu_items)
+            # Redraw menu
+            print(f'\033[{menu_lines}A', end='')
+            for i, (item_type, label) in enumerate(menu_items):
+                # Update label if it changed
+                if item_type == 'tts':
+                    label = f"TTS: {new_tts}"
+                elif item_type == 'asr':
+                    label = f"ASR: {new_asr}"
+                elif item_type == 'comms':
+                    label = f"Comms: {build_comms_display_string(new_comms)}"
+                cursor = "➤ " if i == selected else "  "
+                print(f"\033[2K{cursor}{label}")
+
+        elif key == '\x1b[B':  # Down arrow
+            selected = (selected + 1) % len(menu_items)
+            # Redraw menu
+            print(f'\033[{menu_lines}A', end='')
+            for i, (item_type, label) in enumerate(menu_items):
+                # Update label if it changed
+                if item_type == 'tts':
+                    label = f"TTS: {new_tts}"
+                elif item_type == 'asr':
+                    label = f"ASR: {new_asr}"
+                elif item_type == 'comms':
+                    label = f"Comms: {build_comms_display_string(new_comms)}"
+                cursor = "➤ " if i == selected else "  "
+                print(f"\033[2K{cursor}{label}")
+
+        elif key == '\r' or key == '\n':  # Enter
+            item_type = menu_items[selected][0]
+
+            if item_type == 'tts':
+                # Clear screen area and show TTS menu
+                print()
+                result = show_interactive_menu(
+                    "TTS Provider",
+                    tts_options,
+                    new_tts,
+                    test_tts_provider if 'test_tts_provider' in globals() else None
+                )
+                if result is not None:
+                    new_tts = result
+                menu_items[0] = ('tts', f"TTS: {new_tts}")
+                for i, (item_type, label) in enumerate(menu_items):
+                    cursor = "➤ " if i == selected else "  "
+                    print(f"{cursor}{label}")
+
+            elif item_type == 'asr':
+                if asr_options:
+                    # Clear screen area and show ASR menu
+                    print()
+                    result = show_interactive_menu(
+                        "ASR Provider",
+                        asr_options,
+                        new_asr,
+                        None  # No test function for ASR
+                    )
+                    if result is not None:
+                        new_asr = result
+                    menu_items[1] = ('asr', f"ASR: {new_asr}")
+                    for i, (item_type, label) in enumerate(menu_items):
+                        cursor = "➤ " if i == selected else "  "
+                        print(f"{cursor}{label}")
+                else:
+                    # ASR not available
+                    print("\n❌ ASR module not available")
+
+            elif item_type == 'comms':
+                # Clear screen area and show Comms menu
+                print()
+                result = show_interactive_menu(
+                    "Comms Provider",
+                    comms_options,
+                    new_comms,
+                    None  # No test function for Comms
+                )
+                if result is not None:
+                    new_comms = result
+
+                    # Prompt for channel/recipients if needed using centralized function
+                    ensure_comms_configured(new_comms, args)
+
+                menu_items[2] = ('comms', f"Comms: {build_comms_display_string(new_comms)}")
+                for i, (item_type, label) in enumerate(menu_items):
+                    cursor = "➤ " if i == selected else "  "
+                    print(f"{cursor}{label}")
+
+            elif item_type == 'claude':
+                print()
+                # Return special signal to launch claude
+                return ('launch_claude', new_tts, new_asr, new_comms)
+
+            elif item_type == 'codex':
+                print()
+                # Return special signal to launch codex
+                return ('launch_codex', new_tts, new_asr, new_comms)
+
+            elif item_type == 'mcp':
+                print()
+                # Return special signal to launch MCP server
+                return ('launch_mcp', new_tts, new_asr, new_comms)
+
+            elif item_type == 'exit':
+                print()
+                return new_tts, new_asr, new_comms
+
+        elif key == '\x03' or key == 'q' or key == 'Q':  # Ctrl+C or q
+            print()
+            return new_tts, new_asr, new_comms
 
 
 def show_interactive_menu(title, options, current_choice, test_function=None):
@@ -673,9 +1059,12 @@ def show_interactive_menu(title, options, current_choice, test_function=None):
 
 def test_tts_provider(provider):
     """Test a TTS provider by speaking a sample phrase"""
-    test_text = f"Hello! This is {provider} text-to-speech."
+    # Convert "polly (aws)" to "polly" for testing
+    actual_provider = 'polly' if provider == 'polly (aws)' else provider
 
-    if provider == 'system':
+    test_text = f"Hello! This is {actual_provider} text-to-speech."
+
+    if actual_provider == 'system':
         # Test system TTS
         if platform.system() == 'Darwin':  # macOS
             subprocess.run(['say', test_text], check=True)
@@ -699,15 +1088,15 @@ def test_tts_provider(provider):
         old_state_provider = shared_state.tts_provider
 
         try:
-            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = provider
-            shared_state.set_tts_config(provider=provider)
+            os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = actual_provider
+            shared_state.set_tts_config(provider=actual_provider)
 
             # For local models, ensure model is preloaded before testing
-            if provider in ['kittentts', 'kokoro']:
-                tts.preload_local_model(provider)
+            if actual_provider in ['kittentts', 'kokoro']:
+                tts.preload_local_model(actual_provider)
 
             # Use direct provider approach to avoid worker synchronization issues
-            provider_instance = tts.create_tts_provider(provider)
+            provider_instance = tts.create_tts_provider(actual_provider)
             if provider_instance:
                 success = provider_instance.speak(test_text, use_process_control=False)
                 if not success:
@@ -866,7 +1255,7 @@ def main():
         sys.exit(0 if success else 1)
 
     if hasattr(args, 'show_welcome') and args.show_welcome:
-        show_welcome_and_config()
+        show_welcome_and_config(args)
         sys.exit(0)
 
     if args.mcp_server:

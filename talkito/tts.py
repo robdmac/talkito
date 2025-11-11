@@ -128,7 +128,6 @@ class SpeechItem:
 # Configuration constants
 MIN_SPEAK_LENGTH = 4  # Minimum characters before speaking
 CACHE_SIZE = 10000  # Cache size for similarity checking
-CACHE_TIMEOUT = 18000  # Seconds before a cached item can be spoken again
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
 SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to add when auto-skipping
@@ -959,7 +958,7 @@ current_speech_item: Optional[SpeechItem] = None
 
 # Track when speech actually finishes (including audio playback)
 last_speech_end_time = 0.0
-SPEECH_BUFFER_TIME = 0.1  # Seconds to wait after TTS process ends for audio to finish
+SPEECH_BUFFER_TIME = 0.01  # Seconds to wait after TTS process ends for audio to finish
 
 # Track the highest line number that has been spoken
 highest_spoken_line_number = -1
@@ -1309,20 +1308,20 @@ def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True,
                 playback_control.current_process = process
                 log_message("DEBUG", "audio process started via original method")
 
-            try:
-                # Poll + allow cooperative interruption
-                while process.poll() is None:
-                    if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
-                        try:
-                            process.terminate()
-                            process.wait(timeout=0.25)
-                        except Exception:
-                            process.kill()
-                        return False
-                    time.sleep(0.01)
-                return process.returncode == 0
-            except Exception:
-                return False
+        try:
+            # Poll + allow cooperative interruption
+            while process.poll() is None:
+                if shutdown_event.is_set() or (use_process_control and (playback_control.skip_current or playback_control.skip_all)):
+                    try:
+                        process.terminate()
+                        process.wait(timeout=0.25)
+                    except Exception:
+                        process.kill()
+                    return False
+                time.sleep(0.01)
+            return process.returncode == 0
+        except Exception:
+            return False
     finally:
         if use_process_control:
             with playback_control.lock:
@@ -1874,10 +1873,6 @@ def is_similar_to_recent(text: str) -> bool:
     current_time = time.time()
 
     with _cache_lock:
-        # Clean up expired cache entries
-        while spoken_cache and (current_time - spoken_cache[0][1]) >= CACHE_TIMEOUT:
-            spoken_cache.popleft()
-
         # Check for exact matches first
         if any(cached_text == text for cached_text, _ in spoken_cache):
             return True
@@ -2271,8 +2266,9 @@ def queue_for_speech(original_text: str, line_number: Optional[int] = None, sour
     else:
         # Always check for exact duplicates of the last spoken text
         with _state_lock:
-            if last_queued_text and speakable_text == last_queued_text and not exception_match:
-                log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}'")
+            time_since_last = current_time - last_queue_time
+            if last_queued_text and speakable_text == last_queued_text and (not exception_match or time_since_last < 5.0):
+                log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}' (time_since_last={time_since_last:.1f}s, exception_match={exception_match})")
                 return ""
 
         # Check if we're in tool use mode (between PreToolUse and PostToolUse hooks)
