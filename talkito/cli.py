@@ -62,7 +62,14 @@ from typing import List, Optional, Union, Tuple
 from . import __version__
 from . import asr
 from . import tts
-from .core import build_comms_config, replay_recorded_session, run_with_talkito, signal_handler, TalkitoCore
+from .core import (
+    build_comms_config,
+    get_comms_config_from_args,
+    replay_recorded_session,
+    run_with_talkito,
+    signal_handler,
+    TalkitoCore,
+)
 from .clients import run_terminal_agent_extensions
 from .logs import log_message, setup_logging
 from .mcp import main as mcp_main
@@ -495,45 +502,39 @@ def show_slack_setup():
     # print()
 
 
-def check_comms_provider_accessibility():
-    """Check which communication providers are accessible"""
+def check_comms_provider_accessibility(args):
+    """Check which communication providers are accessible using shared comms config."""
+    config = get_comms_config_from_args(args)
+    sync_communication_state_from_config(config)
+
     accessible = {}
 
-    # Check Slack
-    has_slack_token = bool(os.environ.get('SLACK_BOT_TOKEN'))
-    has_slack_channel = bool(os.environ.get('SLACK_CHANNEL'))
-    slack_fully_configured = has_slack_token and has_slack_channel
-
-    if not has_slack_token:
-        note = 'SLACK_BOT_TOKEN not set'
-    elif not has_slack_channel:
+    slack_tokens = bool(config.slack_bot_token and config.slack_app_token)
+    slack_channel = bool(config.slack_channel)
+    if not slack_tokens:
+        note = 'SLACK_BOT_TOKEN not set' if not config.slack_bot_token else 'SLACK_APP_TOKEN not set'
+    elif not slack_channel:
         note = 'Channel will be prompted'
     else:
         note = 'Ready'
-
     accessible['slack'] = {
-        'available': has_slack_token,  # Available if has token (will prompt for channel)
-        'note': note
+        'available': slack_tokens,
+        'note': note,
     }
 
-    # Check WhatsApp (via Twilio)
-    has_twilio_sid = bool(os.environ.get('TWILIO_ACCOUNT_SID'))
-    has_twilio_token = bool(os.environ.get('TWILIO_AUTH_TOKEN'))
-    has_whatsapp_number = bool(os.environ.get('TWILIO_WHATSAPP_NUMBER'))
-    has_recipient = bool(os.environ.get('WHATSAPP_RECIPIENTS'))
-    whatsapp_credentials = has_twilio_sid and has_twilio_token and has_whatsapp_number
-    whatsapp_fully_configured = whatsapp_credentials and has_recipient
-
+    whatsapp_credentials = all(
+        [config.twilio_account_sid, config.twilio_auth_token, config.twilio_whatsapp_number]
+    )
+    whatsapp_recipients = bool(config.whatsapp_recipients)
     if not whatsapp_credentials:
         note = 'Twilio credentials not set'
-    elif not has_recipient:
+    elif not whatsapp_recipients:
         note = 'Recipients will be prompted'
     else:
         note = 'Ready'
-
     accessible['whatsapp'] = {
-        'available': whatsapp_credentials,  # Available if has credentials (will prompt for recipients)
-        'note': note
+        'available': whatsapp_credentials,
+        'note': note,
     }
 
     return accessible
@@ -562,11 +563,12 @@ def build_comms_display_string(comms_provider):
         return comms_provider
 
 
-def ensure_comms_configured(provider):
-    """Centralized function to prompt for missing comms configuration.
+def ensure_comms_configured(provider, args):
+    """Prompt for missing comms config and keep shared communication state in sync.
 
     Args:
         provider: 'slack', 'whatsapp', or 'both'
+        args: Command line arguments
 
     Returns:
         True if all required config is present after prompting, False otherwise
@@ -597,6 +599,8 @@ def ensure_comms_configured(provider):
             else:
                 success = False
 
+    # Sync shared communication state after prompting
+    sync_communication_state_from_config(get_comms_config_from_args(args))
     return success
 
 
@@ -629,7 +633,7 @@ def show_welcome_and_config(args):
     else:
         accessible_asr = {}
 
-    accessible_comms = check_comms_provider_accessibility()
+    accessible_comms = check_comms_provider_accessibility(args)
 
     # TTS Configuration choices (aws and polly are the same, only show polly in menu)
     tts_choices = ['system', 'openai', 'polly (aws)', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'off', 'auto']
@@ -681,6 +685,7 @@ def show_welcome_and_config(args):
 
     # Show main configuration menu
     result = show_main_config_menu(
+        args,
         display_tts,
         current_asr,
         current_comms,
@@ -801,7 +806,7 @@ def show_welcome_and_config(args):
     print("─" * 65)
 
 
-def show_main_config_menu(current_tts, current_asr, current_comms, tts_options, asr_options, comms_options):
+def show_main_config_menu(args, current_tts, current_asr, current_comms, tts_options, asr_options, comms_options):
     """Show main configuration menu with TTS, ASR, and Comms settings"""
 
     def get_key():
@@ -926,7 +931,7 @@ def show_main_config_menu(current_tts, current_asr, current_comms, tts_options, 
                     new_comms = result
 
                     # Prompt for channel/recipients if needed using centralized function
-                    ensure_comms_configured(new_comms)
+                    ensure_comms_configured(new_comms, args)
 
                 menu_items[2] = ('comms', f"Comms: {build_comms_display_string(new_comms)}")
                 for i, (item_type, label) in enumerate(menu_items):
