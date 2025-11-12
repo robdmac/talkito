@@ -1870,7 +1870,6 @@ def extract_speakable_text(text: str) -> (str, str):
 
 def is_similar_to_recent(text: str) -> bool:
     """Check if text is similar to recently spoken text."""
-    current_time = time.time()
 
     with _cache_lock:
         # Check for exact matches first
