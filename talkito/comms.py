@@ -482,7 +482,6 @@ class CommunicationManager:
 
     # Cache configuration constants (matching tts.py pattern)
     CACHE_SIZE = 1000  # Cache size for similarity checking
-    CACHE_TIMEOUT = 18000  # 5 hours - Seconds before a cached message can be sent again
     SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 
     # Buffer-specific constants
@@ -516,13 +515,7 @@ class CommunicationManager:
     
     def _is_duplicate_message(self, content: str, channel: str) -> bool:
         """Check if message was recently sent to the same channel"""
-        current_time = time.time()
-
         with self._cache_lock:
-            # Clean up expired cache entries
-            while self.sent_cache and (current_time - self.sent_cache[0][2]) >= self.CACHE_TIMEOUT:
-                self.sent_cache.popleft()
-
             # Check for exact matches first
             for cached_content, cached_channel, _ in self.sent_cache:
                 if cached_content == content and cached_channel == channel:
@@ -549,10 +542,6 @@ class CommunicationManager:
         current_time = time.time()
 
         with self._cache_lock:
-            # Clean up expired cache entries
-            while self.sent_cache and (current_time - self.sent_cache[0][2]) >= self.CACHE_TIMEOUT:
-                self.sent_cache.popleft()
-
             # Check for exact matches first
             for cached_content, cached_channel, _ in self.sent_cache:
                 if cached_content == content and cached_channel == channel:
@@ -581,21 +570,15 @@ class CommunicationManager:
         """Check if buffer content is a duplicate"""
         if not buffer_lines:
             return False
-            
+
         buffer_content = '\n'.join(buffer_lines)
-        
+
         with self._buffer_lock:
-            current_time = time.time()
-            
-            # Clean old cache entries
-            while self.buffer_cache and (current_time - self.buffer_cache[0][2]) > self.CACHE_TIMEOUT:
-                self.buffer_cache.popleft()
-            
             # Check for exact matches first
             for cached_content, cached_channel, _ in self.buffer_cache:
                 if cached_channel == channel and cached_content == buffer_content:
                     return True
-            
+
             # Check for similarity
             for cached_content, cached_channel, _ in self.buffer_cache:
                 if cached_channel == channel:
@@ -603,7 +586,7 @@ class CommunicationManager:
                     if similarity >= self.BUFFER_SIMILARITY_THRESHOLD:
                         log_message("INFO", f"Buffer content is {similarity:.2%} similar to cached buffer on {channel}")
                         return True
-        
+
         return False
     
     def _add_buffer_to_cache(self, buffer_lines: List[str], channel: str):

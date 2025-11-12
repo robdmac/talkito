@@ -970,13 +970,17 @@ def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = 
     """Helper to skip a line and return with common pattern"""
     global comm_manager
     # Add cleaned line to processed buffer for slack context with higher verbosity (level 2)
+    # Only process buffer if Slack is enabled (buffer is only used for Slack)
     cleaned_line = clean_text(line)
     if cleaned_line and cleaned_line.strip() and '───' not in cleaned_line:
-        log_message("INFO", "adding line to buffer with verbosity level 2 (more verbose)")
         if comm_manager:
-            # Use the new comm_manager buffer with hard-coded verbosity level 2 for more verbose output
-            comm_manager.add_to_buffer(cleaned_line.strip(), active_profile)
-    
+            # Check if Slack provider is enabled (buffer is only used for Slack)
+            from .comms import SlackProvider
+            if any(isinstance(p, SlackProvider) for p in comm_manager.providers):
+                log_message("INFO", "adding line to buffer with verbosity level 2 (more verbose)")
+                # Use the new comm_manager buffer with hard-coded verbosity level 2 for more verbose output
+                comm_manager.add_to_buffer(cleaned_line.strip(), active_profile)
+
     terminal.previous_line_was_skipped = True
     send_pending_text()
     return buffer, line, detected_prompt
