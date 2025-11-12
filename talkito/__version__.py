@@ -16,6 +16,6 @@
 
 """Version information for talkito package"""
 
-__version__ = "0.1.1"
+__version__ = "0.1.3"
 __author__ = "Robert Macrae"
 __license__ = "AGPL-3.0-or-later"

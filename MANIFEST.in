@@ -3,6 +3,7 @@ include LICENSE
 include CONTRIBUTING.md
 include .env.example
 include requirements.txt
+include install_with_uv.sh
 recursive-include talkito *.py
 recursive-exclude * __pycache__
 recursive-exclude * *.pyc
