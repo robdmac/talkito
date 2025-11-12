@@ -576,28 +576,46 @@ def ensure_comms_configured(provider, args):
     success = True
 
     if provider in ['slack', 'both']:
-        if not os.environ.get('SLACK_CHANNEL'):
-            print("\n📢 Slack channel not configured.")
-            channel = input("Enter Slack channel (e.g., #talkito-comms): ").strip()
-            if channel:
-                if not channel.startswith('#'):
-                    channel = '#' + channel
-                set_key('.talkito.env', 'SLACK_CHANNEL', channel)
-                os.environ['SLACK_CHANNEL'] = channel
-                print(f"✅ Set Slack channel to: {channel}\n")
-            else:
-                success = False
+        current_channel = os.environ.get('SLACK_CHANNEL', '')
+        if current_channel:
+            prompt = f"\nSlack channel (press Enter to keep '{current_channel}' or enter new): "
+        else:
+            prompt = "\nSlack channel not configured.\nEnter Slack channel (e.g., #talkito-comms): "
+
+        channel = input(prompt).strip()
+
+        # If empty and there's a default, use the default
+        if not channel and current_channel:
+            channel = current_channel
+            print(f"✅ Using Slack channel: {channel}\n")
+        elif channel:
+            if not channel.startswith('#'):
+                channel = '#' + channel
+            set_key('.talkito.env', 'SLACK_CHANNEL', channel)
+            os.environ['SLACK_CHANNEL'] = channel
+            print(f"✅ Set Slack channel to: {channel}\n")
+        else:
+            success = False
 
     if provider in ['whatsapp', 'both']:
-        if not os.environ.get('WHATSAPP_RECIPIENTS'):
-            print("\n📱 WhatsApp recipients not configured.")
-            recipients = input("Enter WhatsApp number (e.g., +1234567890): ").strip()
-            if recipients:
-                set_key('.talkito.env', 'WHATSAPP_RECIPIENTS', recipients)
-                os.environ['WHATSAPP_RECIPIENTS'] = recipients
-                print(f"✅ Set WhatsApp recipients to: {recipients}\n")
-            else:
-                success = False
+        current_recipients = os.environ.get('WHATSAPP_RECIPIENTS', '')
+        if current_recipients:
+            prompt = f"\nWhatsApp number (press Enter to keep '{current_recipients}' or enter new): "
+        else:
+            prompt = "\nWhatsApp recipients not configured.\nEnter WhatsApp number (e.g., +1234567890): "
+
+        recipients = input(prompt).strip()
+
+        # If empty and there's a default, use the default
+        if not recipients and current_recipients:
+            recipients = current_recipients
+            print(f"✅ Using WhatsApp number: {recipients}\n")
+        elif recipients:
+            set_key('.talkito.env', 'WHATSAPP_RECIPIENTS', recipients)
+            os.environ['WHATSAPP_RECIPIENTS'] = recipients
+            print(f"✅ Set WhatsApp recipients to: {recipients}\n")
+        else:
+            success = False
 
     # Sync shared communication state after prompting
     sync_communication_state_from_config(get_comms_config_from_args(args))

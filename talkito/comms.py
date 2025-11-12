@@ -343,7 +343,7 @@ class SlackProvider(CommsProvider):
                     thread_ts=message.reply_to
                 )
             except Exception as api_e:
-                log_message("ERROR" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}")
+                log_message("DEBUG" ,f"[COMMS DEBUG] Exception during chat_postMessage: {type(api_e).__name__}: {str(api_e)}")
                 print(f"error {type(api_e).__name__}: {str(api_e)}")
                 raise
             
@@ -352,12 +352,12 @@ class SlackProvider(CommsProvider):
                 message.message_id = result["ts"]
                 log_message("DEBUG", f"Slack message sent successfully, ts={result['ts']}")
             else:
-                log_message("ERROR", f"Slack API returned ok=False: {result}")
+                log_message("DEBUG", f"Slack API returned ok=False: {result}")
             
             return True
         except SlackApiError as e:
             error_response = e.response
-            log_message("ERROR", f"SlackApiError: {error_response}")
+            log_message("DEBUG", f"SlackApiError: {error_response}")
 
             error_code = error_response.get('error', '')
             if error_code == 'not_in_channel':
@@ -374,16 +374,16 @@ class SlackProvider(CommsProvider):
                 self.rate_limited = True
                 self.rate_limit_reset_time = time.time() + retry_after
                 log_message("ERROR", f"Slack rate limited! Will retry after {retry_after} seconds")
-                log_message("INFO", f"Temporarily disabling Slack until {time.ctime(self.rate_limit_reset_time)}")
+                log_message("ERROR", f"Temporarily disabling Slack until {time.ctime(self.rate_limit_reset_time)}")
                 # Optionally disable the provider temporarily
                 self.active = False
                 # Schedule re-enabling
                 threading.Timer(retry_after, self._re_enable_after_rate_limit).start()
                 return False
             else:
-                log_message("ERROR", f"Failed to send Slack message: {e}")
+                log_message("DEBUG", f"Failed to send Slack message: {e}")
                 log_message("ERROR", f"Error details: {error_response}")
-                return False
+                return DEBUG
         except Exception as e:
             log_message("ERROR", f"Unexpected error in SlackProvider.send_message: {type(e).__name__}: {str(e)}")
             traceback.print_exc(file=sys.stderr)
@@ -479,12 +479,12 @@ class SlackProvider(CommsProvider):
 
 class CommunicationManager:
     """Manages all communication providers and message routing"""
-    
+
     # Cache configuration constants (matching tts.py pattern)
     CACHE_SIZE = 1000  # Cache size for similarity checking
     CACHE_TIMEOUT = 18000  # 5 hours - Seconds before a cached message can be sent again
     SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
-    
+
     # Buffer-specific constants
     BUFFER_CACHE_SIZE = 100  # Cache size for buffer deduplication
     BUFFER_SIMILARITY_THRESHOLD = 0.90  # Higher threshold for buffer content
@@ -759,7 +759,7 @@ class CommunicationManager:
             channel_key = f"sms:{phone}"
             in_tool_use = shared_state.get_in_tool_use()
             
-            if in_tool_use:
+            if in_tool_use and "Do you " in text:
                 msg = Message(
                     content=text,
                     sender=phone,
