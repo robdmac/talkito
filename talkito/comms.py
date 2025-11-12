@@ -383,7 +383,7 @@ class SlackProvider(CommsProvider):
             else:
                 log_message("DEBUG", f"Failed to send Slack message: {e}")
                 log_message("ERROR", f"Error details: {error_response}")
-                return DEBUG
+                return False
         except Exception as e:
             log_message("ERROR", f"Unexpected error in SlackProvider.send_message: {type(e).__name__}: {str(e)}")
             traceback.print_exc(file=sys.stderr)
