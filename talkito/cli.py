@@ -299,12 +299,9 @@ async def run_talkito_command(args) -> int:
             provider_valid = tts.validate_provider_config(args.tts_provider)
             log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
             if not provider_valid:
-                # Don't fallback to system - just let the provider selection logic handle it
-                # The system might not have a working system TTS (e.g., Linux without espeak/festival/flite)
-                print("No fallback TTS provider available. TTS will be disabled.")
                 # Clear the invalid provider so select_best_tts_provider() can choose an alternative
+                log_message("WARNING", f"TTS provider {args.tts_provider} validation failed, will try fallbacks")
                 args.tts_provider = None
-                args.disable_tts = True  # Explicitly disable TTS
                 if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
                     del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
             else:

@@ -489,8 +489,12 @@ def preload_local_model(provider: str):
                     log_message("INFO", f"User declined download for {provider} model '{model_name}'")
                     # Fall back to next best available provider
                     fallback_provider = select_best_tts_provider(excluded_providers={'kokoro'})
+                    if fallback_provider is None:
+                        print("Download declined and no fallback TTS provider available. TTS will be disabled.")
+                        log_message("WARNING", "No fallback TTS provider available after user declined kokoro download")
+                        return
                     print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
-                    
+
                     # Update shared state with fallback provider
                     try:
                         shared_state = get_shared_state()
@@ -498,7 +502,7 @@ def preload_local_model(provider: str):
                         log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
                     except Exception as e:
                         log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
-                    
+
                     return
                 model_download_started = True
         elif provider == 'kittentts':
@@ -508,8 +512,12 @@ def preload_local_model(provider: str):
                     log_message("INFO", f"User declined download for {provider} model '{model_name}'")
                     # Fall back to next best available provider
                     fallback_provider = select_best_tts_provider(excluded_providers={'kittentts'})
+                    if fallback_provider is None:
+                        print("Download declined and no fallback TTS provider available. TTS will be disabled.")
+                        log_message("WARNING", "No fallback TTS provider available after user declined kittentts download")
+                        return
                     print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
-                    
+
                     # Update shared state with fallback provider
                     try:
                         shared_state = get_shared_state()
@@ -1075,8 +1083,8 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     
     # Azure
     accessible["azure"] = {
-        "available": bool(os.environ.get("AZURE_SPEECH_KEY") and os.environ.get("AZURE_SPEECH_REGION")),
-        "note": "Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION"
+        "available": bool(os.environ.get("AZURE_SPEECH_KEY")),
+        "note": "Requires AZURE_SPEECH_KEY (region optional, defaults to 'eastus')"
     }
     
     # Google Cloud
@@ -1672,6 +1680,17 @@ class KittenTTSProvider(TTSProvider):
     def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
         try:
             import soundfile as sf
+
+            # Validate text to avoid ONNX BERT model errors
+            if not text or not text.strip():
+                log_message("WARNING", "KittenTTS: Empty text provided, skipping synthesis")
+                return None
+
+            # KittenTTS BERT model has issues with very short text (< 3 chars)
+            if len(text.strip()) < 3:
+                log_message("WARNING", f"KittenTTS: Text too short ('{text}'), padding to avoid BERT errors")
+                text = text.strip() + "..."
+
             m = get_cached_local_model('kittentts', timeout=10.0)
             if m is None:
                 raise RuntimeError("KittenTTS model unavailable")
@@ -2688,112 +2707,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def configure_tts_provider(args):
-    """Configure TTS provider from command-line args."""
-    global tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, deepgram_voice_model, kittentts_model, kittentts_voice, kokoro_language, kokoro_voice, kokoro_speed
-    
-    # Auto-select provider if not specified
-    provider = args.tts_provider
-    if provider is None:
-        provider = select_best_tts_provider()
-        print(f"Auto-selected TTS provider: {provider}")
-    
-    tts_provider = provider
-    
-    # Validate provider configuration
-    if not validate_provider_config(tts_provider):
-        return False
-    
-    # Get provider info
-    provider_info = TTS_PROVIDERS.get(tts_provider)
-    if not provider_info:
-        # System provider
-        log_message("INFO", "Using system default TTS")
-        return True
-    
-    # Handle provider-specific configuration
-    if tts_provider == 'openai':
-        if args.voice:
-            openai_voice = args.voice
-        log_message("INFO", f"Using OpenAI TTS with voice: {openai_voice}")
-        
-    elif tts_provider in ['aws', 'polly']:
-        polly_region = args.tts_region or 'us-east-1'
-        if args.voice:
-            polly_voice = args.voice
-        log_message("INFO", f"Using AWS Polly TTS with voice: {polly_voice} in region: {polly_region}")
-        
-    elif tts_provider == 'azure':
-        # Additional Azure-specific validation
-        try:
-            import azure.cognitiveservices.speech as speechsdk  # noqa: F401
-        except ImportError:
-            print(f"Error: {provider_info['install']} required")
-            return False
-            
-        azure_region = args.tts_region or 'eastus'
-        if args.voice:
-            azure_voice = args.voice
-        log_message("INFO", f"Using Microsoft Azure TTS with voice: {azure_voice} in region: {azure_region}")
-        
-    elif tts_provider == 'gcloud':
-        # Additional Google Cloud validation
-        try:
-            from google.cloud import texttospeech
-            texttospeech.TextToSpeechClient()  # Test instantiation to verify availability
-        except ImportError:
-            print(f"Error: {provider_info['install']} required")
-            print("Note: On macOS, grpcio may require a clean reinstall:")
-            print("      pip uninstall grpcio && pip install grpcio --force-reinstall --no-cache-dir")
-            return False
-        except Exception as e:
-            print(f"Error: Google Cloud credentials not configured or invalid: {e}")
-            print("Please check your GOOGLE_APPLICATION_CREDENTIALS file")
-            return False
-            
-        gcloud_language_code = args.language
-        if args.voice:
-            gcloud_voice = args.voice
-        log_message("INFO", f"Using Google Cloud TTS with voice: {gcloud_voice} in language: {gcloud_language_code}")
-        
-    elif tts_provider == 'elevenlabs':
-        if args.voice:
-            elevenlabs_voice_id = args.voice
-        log_message("INFO", f"Using ElevenLabs TTS with voice ID: {elevenlabs_voice_id}")
-    
-    elif tts_provider == 'deepgram':
-        if args.voice:
-            deepgram_voice_model = args.voice
-        log_message("INFO", f"Using Deepgram TTS with model: {deepgram_voice_model}")
-    
-    elif tts_provider == 'kittentts':
-        # Additional KittenTTS validation
-        try:
-            with suppress_ai_warnings():
-                from kittentts import KittenTTS  # noqa: F401
-        except ImportError:
-            install_cmd = TTS_PROVIDERS['kittentts']['install']
-            print("Error: KittenTTS dependencies not installed")
-            print(f"Please install with: {install_cmd}")
-            return False
-        
-        if args.voice:
-            kittentts_voice = args.voice
-        log_message("INFO", f"Using KittenTTS with model: {kittentts_model} and voice: {kittentts_voice}")
-    
-    elif tts_provider == 'kokoro':
-        # Skip expensive kokoro import - will validate during actual model loading
-        log_message("DEBUG", "Skipping kokoro validation in configure_tts_provider - will validate during model loading")
-        
-        kokoro_language = args.language if hasattr(args, 'language') else 'a'
-        if args.voice:
-            kokoro_voice = args.voice
-        log_message("INFO", f"Using KokoroTTS with language: {kokoro_language} and voice: {kokoro_voice}")
-    
-    return True
-
-
-def select_best_tts_provider(excluded_providers=None) -> str:
+def select_best_tts_provider(excluded_providers=None) -> str | None:
     """Select best available TTS provider by preference order with thorough validation."""
     log_message("INFO", "select_best_tts_provider called")
     excluded_providers = excluded_providers or set()
@@ -2844,9 +2758,9 @@ def select_best_tts_provider(excluded_providers=None) -> str:
         else:
             log_message("WARNING", "System TTS provider failed validation")
 
-    # Last resort: return system anyway (it should always work)
-    log_message("WARNING", "No fully validated TTS providers available, defaulting to system")
-    return 'system'
+    # No valid TTS providers available
+    log_message("ERROR", "No TTS providers available or all validation failed")
+    return None
 
 
 def configure_tts_from_args(args) -> bool:
@@ -2860,6 +2774,9 @@ def configure_tts_from_args(args) -> bool:
         log_message("WARNING", f"TTS provider {tts_provider} validation failed")
         # Fall back to best available provider
         fallback_provider = select_best_tts_provider()
+        if fallback_provider is None:
+            log_message("ERROR", "No TTS providers available")
+            return False
         if fallback_provider != tts_provider:
             log_message("INFO", f"Falling back to TTS provider: {fallback_provider}")
             provider = fallback_provider
@@ -2910,8 +2827,14 @@ def configure_tts_from_args(args) -> bool:
         except ImportError:
             print(f"Error: {provider_info['install']} required")
             return False
-            
-        azure_region = args.tts_region
+
+        # Verify Azure credentials are configured (key required, region optional with default)
+        speech_key = os.environ.get('AZURE_SPEECH_KEY')
+        if not speech_key:
+            print("Error: Azure TTS requires AZURE_SPEECH_KEY environment variable")
+            return False
+
+        azure_region = args.tts_region or os.environ.get('AZURE_SPEECH_REGION') or 'eastus'
         if args.tts_voice:
             azure_voice = args.tts_voice
         log_message("INFO", f"Using Microsoft Azure TTS with voice: {azure_voice} in region: {azure_region}")
@@ -2991,9 +2914,23 @@ if __name__ == "__main__":
 
     # Parse arguments
     args = parse_arguments()
-    
-    # Configure TTS provider
-    if not configure_tts_provider(args):
+
+    # Normalize args for configure_tts_from_args (it expects tts_voice/tts_region/tts_language)
+    args.tts_voice = getattr(args, 'voice', None)
+    args.tts_region = getattr(args, 'region', None)
+    args.tts_language = getattr(args, 'language', 'en-US')
+    args.tts_rate = None  # Not supported in standalone mode
+
+    # Auto-select provider if not specified
+    if args.tts_provider is None:
+        args.tts_provider = select_best_tts_provider()
+        if args.tts_provider is None:
+            print("No TTS provider available. TTS will be disabled.")
+            exit(1)
+        print(f"Auto-selected TTS provider: {args.tts_provider}")
+
+    # Configure TTS provider (use same function as main application)
+    if not configure_tts_from_args(args):
         exit(1)
     
     # Set up logging - if log-file is specified

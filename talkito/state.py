@@ -708,18 +708,27 @@ def initialize_providers_early(args):
                 # Set the requested provider in shared state so select_best_tts_provider knows what was requested
                 shared_state.tts_provider = preferred
             selected_tts = tts.select_best_tts_provider()
-            shared_state.tts_provider = selected_tts
-            log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
 
-            # Start preloading TTS models early for local providers
-            if selected_tts in ['kokoro', 'kittentts']:
-                try:
-                    preload_start = time.time()
-                    log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
-                    tts.preload_local_model(selected_tts)
-                    log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
-                except Exception as preload_e:
-                    log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
+            if selected_tts is None:
+                log_message("WARNING", f"No TTS provider available. TTS will be disabled.")
+                print("No fallback TTS provider available. TTS will be disabled.")
+                shared_state.tts_provider = None
+                # Disable TTS since no providers are available
+                if hasattr(args, 'disable_tts'):
+                    args.disable_tts = True
+            else:
+                shared_state.tts_provider = selected_tts
+                log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
+
+                # Start preloading TTS models early for local providers
+                if selected_tts in ['kokoro', 'kittentts']:
+                    try:
+                        preload_start = time.time()
+                        log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
+                        tts.preload_local_model(selected_tts)
+                        log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")
+                    except Exception as preload_e:
+                        log_message("ERROR", f"Early TTS model preloading failed for {selected_tts}: {preload_e}")
 
         except Exception as e:
             log_message("ERROR", f"TTS provider selection failed: {e}")
