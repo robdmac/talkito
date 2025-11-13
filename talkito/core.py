@@ -3074,8 +3074,13 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
     if shared_state.tts_provider and shared_state.tts_provider != args.tts_provider:
         log_message("INFO", f"Using TTS provider from early initialization: {shared_state.tts_provider} (overriding args: {args.tts_provider})")
         args.tts_provider = shared_state.tts_provider
-
-    if args and args.tts_provider != 'system':
+    
+    no_tts_provider = not args.tts_provider
+    if no_tts_provider:
+        log_message("WARNING", "No TTS provider is configured. Keeping TTS disabled.")
+        tts.disable_tts_completely("no TTS provider configured", args)
+        engine = "cloud"
+    elif args and args.tts_provider != 'system':
         if not tts.configure_tts_from_args(args):
             print("Error: Failed to configure TTS provider", file=sys.stderr)
             sys.stderr.flush()
@@ -3518,8 +3523,13 @@ async def run_with_talkito(command: List[str], args) -> int:
     if shared_state.tts_provider and shared_state.tts_provider != args.tts_provider:
         log_message("INFO", f"Using TTS provider from early initialization: {shared_state.tts_provider} (overriding args: {args.tts_provider})")
         args.tts_provider = shared_state.tts_provider
-
-    if args and args.tts_provider != 'system':
+    
+    no_tts_provider = not args.tts_provider
+    if no_tts_provider:
+        log_message("WARNING", "No TTS provider is configured. Keeping TTS disabled.")
+        tts.disable_tts_completely("no TTS provider configured", args)
+        engine = "cloud"
+    elif args and args.tts_provider != 'system':
         if not tts.configure_tts_from_args(args):
             print("Error: Failed to configure TTS provider", file=sys.stderr)
             sys.stderr.flush()
