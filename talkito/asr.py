@@ -2001,10 +2001,26 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     
     # local_whisper - Smart backend selection (PyWhisperCpp CoreML on Apple Silicon, faster-whisper elsewhere)
     whisper_backend_info = _get_local_whisper_backend_info()
-    
+
+    # Check if model is cached
+    whisper_note = whisper_backend_info["note"]
+    if whisper_backend_info["available"]:
+        from .models import check_model_cached
+        model_name = os.environ.get('WHISPER_MODEL', 'small')
+        is_cached = check_model_cached('local_whisper', model_name)
+        if is_cached:
+            cache_status = " [cached]"
+        else:
+            cache_status = " [needs download]"
+
+        if whisper_note:
+            whisper_note += cache_status
+        else:
+            whisper_note = f"Model: {model_name}{cache_status}"
+
     accessible["local_whisper"] = {
         "available": whisper_backend_info["available"],
-        "note": whisper_backend_info["note"]
+        "note": whisper_note
     }
     
     return accessible
