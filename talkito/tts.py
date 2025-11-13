@@ -1117,12 +1117,21 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
             install_cmd = TTS_PROVIDERS['kittentts']['install']
             kittentts_note = f"Requires KittenTTS package ({install_cmd})"
     
+    # Check if model is cached
+    if kittentts_available:
+        from .models import check_model_cached
+        is_cached = check_model_cached('kittentts', kittentts_model)
+        if is_cached:
+            kittentts_note += " [cached]"
+        else:
+            kittentts_note += " [needs download]"
+
     accessible["kittentts"] = {
         "available": kittentts_available,
         "note": kittentts_note
     }
-    
-    
+
+
     # KokoroTTS - Check if dependencies are installed
     kokoro_available = False
     kokoro_note = "High-quality 82M parameter TTS model (no API key required)"
@@ -1148,7 +1157,16 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
             else:
                 kokoro_note = f"Kokoro package error: {str(e)}"
         log_message("INFO", f"KokoroTTS availability check completed - available: {kokoro_available}")
-    
+
+    # Check if model is cached
+    if kokoro_available:
+        from .models import check_model_cached
+        is_cached = check_model_cached('kokoro', 'hexgrad/Kokoro-82M')
+        if is_cached:
+            kokoro_note += " [cached]"
+        else:
+            kokoro_note += " [needs download]"
+
     accessible["kokoro"] = {
         "available": kokoro_available,
         "note": kokoro_note
