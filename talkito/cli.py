@@ -299,12 +299,10 @@ async def run_talkito_command(args) -> int:
             provider_valid = tts.validate_provider_config(args.tts_provider)
             log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
             if not provider_valid:
-                # Don't fallback to system - just let the provider selection logic handle it
-                # The system might not have a working system TTS (e.g., Linux without espeak/festival/flite)
-                print("No fallback TTS provider available. TTS will be disabled.")
                 # Clear the invalid provider so select_best_tts_provider() can choose an alternative
+                print(f"Warning: TTS provider '{args.tts_provider}' validation failed. Searching for alternative providers...")
+                log_message("WARNING", f"TTS provider {args.tts_provider} validation failed, will try fallbacks")
                 args.tts_provider = None
-                args.disable_tts = True  # Explicitly disable TTS
                 if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
                     del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
             else:
@@ -816,8 +814,8 @@ def show_welcome_and_config(args):
     # Normal exit - show help text
     print("\n" + "─" * 65)
     print("🚀 Quick Start Examples:")
-    print("  talkito echo 'Hello World!'          # Basic TTS demo")
-    print("  talkito --asr-mode auto-input claude # Voice-enabled Claude")
+    print("  talkito codex                        # Use Codex Cli with TalkiTo")
+    print("  talkito --asr-mode auto-input claude # Use Claude Code with TalkiTo in always listening mode")
     print("  talkito --setup-slack                # Setup Slack integration")
     print("  talkito --setup-whatsapp             # Setup WhatsApp integration")
     print("\n📚 For more info: talkito --help")
@@ -1003,22 +1001,31 @@ def show_interactive_menu(title, options, current_choice, test_function=None):
             selected = i
             break
 
-    # Display menu header
-    print(f"\n═══ {title} Configuration ═══")
-    print(f"{title} selection (Use ↑↓ arrows, Enter to select, 't' to test, 'q' to quit):")
+    status_message = ""
+    menu_lines = len(options) + 6  # blank line + header + instructions + blank + controls + status
 
-    # Calculate how many lines the menu will take
-    menu_lines = len(options) + 2  # options + controls line + spacing
+    def render_menu(move_cursor=False):
+        nonlocal menu_lines
+        if move_cursor:
+            print(f'\033[{menu_lines}A', end='')
+        lines = [
+            "",
+            f"═══ {title} Configuration ═══",
+            f"{title} selection (Use ↑↓ arrows, Enter to select, 't' to test, 'q' to quit):"
+        ]
+        for i, (provider, available, note) in enumerate(options):
+            cursor = "➤ " if i == selected else "  "
+            status = "✅" if available else "❌"
+            current_marker = " (current)" if provider == current_choice else ""
+            test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
+            lines.append(f"{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
+        lines.append("")
+        lines.append("Controls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+        lines.append(status_message)
+        for line in lines:
+            print(f"\033[2K{line}")
 
-    # Display initial menu
-    for i, (provider, available, note) in enumerate(options):
-        cursor = "➤ " if i == selected else "  "
-        status = "✅" if available else "❌"
-        current_marker = " (current)" if provider == current_choice else ""
-        test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
-        print(f"{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
-
-    print("\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+    render_menu()
 
     while True:
         # Get user input
@@ -1026,27 +1033,13 @@ def show_interactive_menu(title, options, current_choice, test_function=None):
 
         if key == '\x1b[A':  # Up arrow
             selected = (selected - 1) % len(options)
-            # Move cursor up to start of menu and redraw
-            print(f'\033[{menu_lines}A', end='')  # Move up
-            for i, (provider, available, note) in enumerate(options):
-                cursor = "➤ " if i == selected else "  "
-                status = "✅" if available else "❌"
-                current_marker = " (current)" if provider == current_choice else ""
-                test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
-                print(f"\033[2K{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
-            print("\033[2K\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+            status_message = ""
+            render_menu(move_cursor=True)
 
         elif key == '\x1b[B':  # Down arrow
             selected = (selected + 1) % len(options)
-            # Move cursor up to start of menu and redraw
-            print(f'\033[{menu_lines}A', end='')  # Move up
-            for i, (provider, available, note) in enumerate(options):
-                cursor = "➤ " if i == selected else "  "
-                status = "✅" if available else "❌"
-                current_marker = " (current)" if provider == current_choice else ""
-                test_marker = " [Press 't' to test]" if i == selected and available and provider != 'auto' and test_function else ""
-                print(f"\033[2K{cursor}{provider:<15} {status} {note}{current_marker}{test_marker}")
-            print("\033[2K\nControls: ↑/↓ = navigate, Enter = select, 't' = test, 'q' = quit")
+            status_message = ""
+            render_menu(move_cursor=True)
 
         elif key == '\x03':  # Ctrl+C
             print()  # Just move to next line
@@ -1058,7 +1051,8 @@ def show_interactive_menu(title, options, current_choice, test_function=None):
                 print()  # Just move to next line
                 return provider
             else:
-                print(f"\n❌ {provider} is not available. Please choose an available provider.")
+                status_message = f"❌ {provider} is not available. Please choose an available provider."
+                render_menu(move_cursor=True)
 
         elif key == 't' or key == 'T':  # Test
             provider = options[selected][0]

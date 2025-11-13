@@ -19,6 +19,7 @@
 """Utilities for model downloads with user consent and progress."""
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -47,7 +48,7 @@ def _configure_hf_timeouts():
 
         # If we have cached models, use shorter timeout for HEAD requests (checking for updates)
         # If no cache, use longer timeout to allow first download
-        etag_timeout = '3' if has_cache else '10'
+        etag_timeout = '5' if has_cache else '10'
 
         # Set environment variables (these are read by huggingface_hub.constants on import)
         os.environ.setdefault('HF_HUB_ETAG_TIMEOUT', etag_timeout)  # HEAD request timeout
@@ -97,8 +98,6 @@ def check_spacy_model_consent(provider: str, spacy_model: str = "en_core_web_sm"
             
             # Download the model
             show_download_progress(f"{provider} (spaCy dependency)", f"language model '{spacy_model}'")
-            import subprocess
-            import sys
             result = subprocess.run([
                 sys.executable, '-m', 'spacy', 'download', spacy_model
             ], capture_output=True, text=True)
