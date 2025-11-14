@@ -2171,8 +2171,13 @@ def tts_worker(engine: str):
 
                 log_message("DEBUG", f"{is_currently_speaking=} {is_currently_playing=} {playing_long_enough=} {time_playing=}")
 
-                # Only skip current item if something is actually speaking AND a process exists AND it's not an exception
-                if is_currently_speaking and is_currently_playing and (not current_speech_item or not current_speech_item.is_exception):
+                # Only skip current item if something is actually speaking, a process exists, and neither item is an exception
+                current_is_exception = bool(current_speech_item and current_speech_item.is_exception)
+
+                if current_is_exception:
+                    log_message("INFO", "Current speech item is an exception; skipping auto-skip")
+
+                if is_currently_speaking and is_currently_playing and not current_is_exception:
                     needs_skip = True
                     log_message("INFO", f"Auto-skipping current audio for new text ({len(text_to_speak)} chars)")
 

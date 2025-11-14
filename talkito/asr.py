@@ -1529,7 +1529,7 @@ class FasterWhisperProvider(ASRProvider):
 
         try:
             # Get the cached model with timeout
-            model = get_cached_local_whisper_model(timeout_seconds=10.0)
+            model = get_cached_local_whisper_model(timeout_seconds=60.0)
             if model is None:
                 raise ValueError("Failed to load local whisper model within timeout")
 
