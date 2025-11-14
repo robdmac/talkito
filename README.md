@@ -18,7 +18,7 @@ TalkiTo lets developers talk, slack and whatsapp with Claude Code and OpenAI Cod
 curl -sSL https://raw.githubusercontent.com/robdmac/talkito/main/install.sh | bash
 ```
 
-### Option 2: PyPI (Coming Soon)
+### Option 2: PyPI
 ```bash
 pip install talkito
 ```
