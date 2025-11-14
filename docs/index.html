@@ -67,7 +67,7 @@
         <div class="hero-content">
             <h1 class="hero-title">
                 <span class="hero-text-medium">What if </span>
-                <span class="rotating-text" id="rotatingText">claude code</span>
+                <span class="rotating-text" id="rotatingText">Codex Cli</span>
                 <span class="hero-text-medium"> could </span>
                 <span class="rotating-text-2" id="rotatingText2">talk</span>
                 <span class="hero-text-medium">?</span>
@@ -126,20 +126,20 @@
 
             <div class="quick-start-tabs">
                 <div class="tab-buttons">
-                    <button class="tab-button active" data-tab="web-extension">
+                    <button class="tab-button active" data-tab="applications">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect width="18" height="18" x="3" y="3" rx="2"/>
+                            <path d="M9 9h6v6H9z"/>
+                        </svg>
+                        <span>Applications</span>
+                    </button>
+                    <button class="tab-button" data-tab="web-extension">
                         <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
                             <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
                             <path d="M2 12h20"/>
                         </svg>
                         <span>Web Extension</span>
-                    </button>
-                    <button class="tab-button" data-tab="applications">
-                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect width="18" height="18" x="3" y="3" rx="2"/>
-                            <path d="M9 9h6v6H9z"/>
-                        </svg>
-                        <span>Applications</span>
                     </button>
                     <button class="tab-button" data-tab="python-library">
                         <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -151,13 +151,124 @@
                 </div>
 
                 <div class="tab-content">
+                    <!-- Applications Tab -->
+                    <div class="tab-panel active" id="applications">
+                        <div class="guide-header">
+                            <h3 class="guide-title">Application Setup</h3>
+                            <p class="guide-subtitle">Add voice control directly to Claude Code and other desktop applications</p>
+                        </div>
+
+                        <div class="steps-container">
+                            <div class="step">
+                                <div class="step-number">1</div>
+                                <div class="step-content">
+                                    <h4 class="step-title">Setup & Install</h4>
+                                    <p class="step-description">Clone the repository and install all required dependencies</p>
+                                    <div class="code-block multi-line">
+    <code>git clone https://github.com/robdmac/talkito.git
+    cd talkito
+    pip install -e .</code>
+                                        <button class="copy-btn" data-copy="git clone https://github.com/robdmac/talkito.git
+    cd talkito
+    pip install -e .">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                                                <path d="M4 16c-1.1 0-2-.9-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step">
+                                <div class="step-number">2</div>
+                                <div class="step-content">
+                                    <h4 class="step-title">Launch Claude Integration</h4>
+                                    <p class="step-description">Start TalkiTo with Claude desktop application support</p>
+                                    <div class="code-block">
+                                        <code>talkito claude</code>
+                                        <button class="copy-btn" data-copy="talkito claude">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                                                <path d="M4 16c-1.1 0-2-.9-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Demo Video -->
+                            <div class="demo-video" style="margin: 2rem 0;">
+                                <h4 class="step-title" style="text-align: center; margin-bottom: 1rem;">See TalkiTo in Action</h4>
+                                <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; max-width: 100%; margin: 0 auto;">
+                                    <iframe src="https://www.youtube.com/embed/pf8jFt0smqs"
+                                            title="TalkiTo Demo"
+                                            frameborder="0"
+                                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                            allowfullscreen
+                                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 8px;">
+                                    </iframe>
+                                </div>
+                            </div>
+
+                            <div class="step">
+                                <div class="step-number">3</div>
+                                <div class="step-content">
+                                    <h4 class="step-title">Configure TalkiTo</h4>
+                                    <p class="step-description">Speech input and output will now be live within the Claude application</p>
+                                    <div class="step-details">
+                                        <ol class="sub-steps">
+                                            <li>Claude will start and show the status of TalkiTo i.e.: 🟢 TTS (aws) | 🟢 ASR (assemblyai) | Comms: none</li>
+                                            <li>Start speaking to interact with Claude using your voice!</li>
+                                            <li>To turn TTS/ASR/Slack/Whatsapp on or off just type or say it i.e.: <strong>"turn off ASR"</strong></li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step">
+                                <div class="step-number">4</div>
+                                <div class="step-content">
+                                    <h4 class="step-title">Voice Commands</h4>
+                                    <p class="step-description">Use natural speech to control Claude and other applications</p>
+                                    <div class="feature-grid">
+                                        <div class="feature-item">
+                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                                <line x1="12" x2="12" y1="19" y2="22"/>
+                                                <line x1="8" x2="16" y1="22" y2="22"/>
+                                            </svg>
+                                            <span>Speech-to-text input</span>
+                                        </div>
+                                        <div class="feature-item">
+                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                            </svg>
+                                            <span>Text-to-speech responses</span>
+                                        </div>
+                                        <div class="feature-item">
+                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M8 2v4"/>
+                                                <path d="M16 2v4"/>
+                                                <rect width="18" height="18" x="3" y="4" rx="2"/>
+                                                <path d="M3 10h18"/>
+                                            </svg>
+                                            <span>Real-time conversation</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Web Extension Tab -->
-                    <div class="tab-panel active" id="web-extension">
+                    <div class="tab-panel" id="web-extension">
                         <div class="guide-header">
                             <h3 class="guide-title">Chrome Extension Setup</h3>
                             <p class="guide-subtitle">Add voice control to any website including bolt.new, Claude, and more</p>
                         </div>
-                        
+
                         <div class="steps-container">
                             <div class="step">
                                 <div class="step-number">1</div>
@@ -210,117 +321,6 @@ talkito --mcp-sse-server">
                                             <li>Select <strong>"TalkiTo: Talk"</strong> from the menu and from then on all output will be spoken aloud</li>
                                             <li>Other options include <strong>"Talkito: WhatsApp"</strong> and <strong>"Talkito: Slack"</strong></li>
                                         </ol>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Applications Tab -->
-                    <div class="tab-panel" id="applications">
-                        <div class="guide-header">
-                            <h3 class="guide-title">Application Setup</h3>
-                            <p class="guide-subtitle">Add voice control directly to Claude Code and other desktop applications</p>
-                        </div>
-                        
-                        <div class="steps-container">
-                            <div class="step">
-                                <div class="step-number">1</div>
-                                <div class="step-content">
-                                    <h4 class="step-title">Setup & Install</h4>
-                                    <p class="step-description">Clone the repository and install all required dependencies</p>
-                                    <div class="code-block multi-line">
-<code>git clone https://github.com/robdmac/talkito.git
-cd talkito
-pip install -e .</code>
-                                        <button class="copy-btn" data-copy="git clone https://github.com/robdmac/talkito.git
-cd talkito
-pip install -e .">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-                                                <path d="M4 16c-1.1 0-2-.9-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-                                            </svg>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="step">
-                                <div class="step-number">2</div>
-                                <div class="step-content">
-                                    <h4 class="step-title">Launch Claude Integration</h4>
-                                    <p class="step-description">Start TalkiTo with Claude desktop application support</p>
-                                    <div class="code-block">
-                                        <code>talkito claude</code>
-                                        <button class="copy-btn" data-copy="talkito claude">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-                                                <path d="M4 16c-1.1 0-2-.9-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-                                            </svg>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Demo Video -->
-                            <div class="demo-video" style="margin: 2rem 0;">
-                                <h4 class="step-title" style="text-align: center; margin-bottom: 1rem;">See TalkiTo in Action</h4>
-                                <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; max-width: 100%; margin: 0 auto;">
-                                    <iframe src="https://www.youtube.com/embed/FJdYTYZK_0U" 
-                                            title="TalkiTo Demo" 
-                                            frameborder="0" 
-                                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
-                                            allowfullscreen
-                                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 8px;">
-                                    </iframe>
-                                </div>
-                            </div>
-
-                            <div class="step">
-                                <div class="step-number">3</div>
-                                <div class="step-content">
-                                    <h4 class="step-title">Configure TalkiTo</h4>
-                                    <p class="step-description">Speech input and output will now be live within the Claude application</p>
-                                    <div class="step-details">
-                                        <ol class="sub-steps">
-                                            <li>Claude will start and show the status of TalkiTo i.e.: 🟢 TTS (aws) | 🟢 ASR (assemblyai) | Comms: none</li>
-                                            <li>Start speaking to interact with Claude using your voice!</li>
-                                            <li>To turn TTS/ASR/Slack/Whatsapp on or off just type or say it i.e.: <strong>"turn off ASR"</strong></li>
-                                        </ol>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="step">
-                                <div class="step-number">4</div>
-                                <div class="step-content">
-                                    <h4 class="step-title">Voice Commands</h4>
-                                    <p class="step-description">Use natural speech to control Claude and other applications</p>
-                                    <div class="feature-grid">
-                                        <div class="feature-item">
-                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-                                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                                                <line x1="12" x2="12" y1="19" y2="22"/>
-                                                <line x1="8" x2="16" y1="22" y2="22"/>
-                                            </svg>
-                                            <span>Speech-to-text input</span>
-                                        </div>
-                                        <div class="feature-item">
-                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                                            </svg>
-                                            <span>Text-to-speech responses</span>
-                                        </div>
-                                        <div class="feature-item">
-                                            <svg class="feature-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <path d="M8 2v4"/>
-                                                <path d="M16 2v4"/>
-                                                <rect width="18" height="18" x="3" y="4" rx="2"/>
-                                                <path d="M3 10h18"/>
-                                            </svg>
-                                            <span>Real-time conversation</span>
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -462,11 +462,11 @@ asr.start_dictation(handle_text)">
                             <td class="feature-name">Speech Recognition</td>
                             <td class="talkito-cell">
                                 <span class="feature-value">8 Options</span>
-                                <span class="feature-detail">Houndify, Whisper, Deepgram, AssemblyAI, AWS, Azure, Google, Whisper</span>
+                                <span class="feature-detail">Whisper, Houndify, Deepgram, AssemblyAI, AWS, Azure, Google, Bing</span>
                             </td>
                             <td class="premium-cell">
                                 <span class="feature-value">8 Options</span>
-                                <span class="feature-detail">Houndify, Whisper, Deepgram, AssemblyAI, AWS, Azure, Google, Whisper</span>
+                                <span class="feature-detail">Whisper, Houndify, Deepgram, AssemblyAI, AWS, Azure, Google, Bing</span>
                             </td>
                             <td class="competitor-cell">
                                 <span class="feature-value">1 Option</span>
@@ -476,12 +476,12 @@ asr.start_dictation(handle_text)">
                         <tr>
                             <td class="feature-name">Text-to-Speech</td>
                             <td class="talkito-cell">
-                                <span class="feature-value">6 Options</span>
-                                <span class="feature-detail">OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
+                                <span class="feature-value">8 Options</span>
+                                <span class="feature-detail">Kokoro, KittenTTS, OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
                             </td>
                             <td class="premium-cell">
                                 <span class="feature-value">6 Options</span>
-                                <span class="feature-detail">OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
+                                <span class="feature-detail">Kokoro, KittenTTS, OpenAI, ElevenLabs, AWS Polly, Azure, Google Cloud, Deepgram</span>
                             </td>
                             <td class="competitor-cell">
                                 <svg class="x-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

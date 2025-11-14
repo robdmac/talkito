@@ -80,49 +80,36 @@ then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 
 ## Demo Video
 
-[![TalkiTo Demo](https://img.youtube.com/vi/FJdYTYZK_0U/0.jpg)](https://youtu.be/FJdYTYZK_0U)
+[![TalkiTo Demo](https://img.youtube.com/vi/pf8jFt0smqs/0.jpg)](https://youtu.be/pf8jFt0smqs)
 
 ## AI Assistant Compatibility
 
-| AI Assistant                 | Method        | Status              |
-|------------------------------|---------------|---------------------|
-| **Claude Code**              | Terminal      | **Fully Supported** |
-| **Codex Cli**                | Terminal      | **Fully Supported** |
-| bolt.new                     | Web Extension | Output Only         |
-| v0.dev                       | Web Extension | Output Only         |
-| replit.com                   | Web Extension | Output Only         |
-| Gemini CLI                   | Terminal      | In Progress         |
-| Aider                        | Terminal      | In Progress         |
-| Cursor                       | Terminal      | In Progress         |
-| Continue                     | Terminal      | In Progress         |
+| AI Assistant    | Method        | Status              |
+|-----------------|---------------|---------------------|
+| **Claude Code** | Terminal      | **Fully Supported** |
+| **Codex Cli**   | Terminal      | **Fully Supported** |
+| bolt.new        | Web Extension | Output Only         |
+| v0.dev          | Web Extension | Output Only         |
+| replit.com      | Web Extension | Output Only         |
+| Other agents    | Terminal      | In Progress         |
 
 
 
-### Voice Mode
+### Run with Claude Code
 
-When you run `talkito claude`, voice mode is enabled by default:
+run `talkito claude`
 
-1. **Automatic voice interaction**: Claude will:
-   - Speak all responses using TTS
-   - Listen for your voice input after speaking
-   - Process your speech as the next user message
-   - Continue this loop automatically
+### Run with Codex Cli
 
-2. **Control voice mode**: 
-   - Voice mode starts ON by default
-   - Say or type "turn off talkito" to disable voice interaction
-   - Say or type "turn on talkito" to re-enable if turned off
+run `talkito codex`
 
-3. **Unified input handling**: All inputs are processed as user messages:
-   - Voice dictation: Your spoken words
-   - Slack messages: From configured channels
-   - WhatsApp messages: From configured numbers
+### Run as an MCP server
 
-4. **Communication modes**: 
-   - Say "start slack mode #channel-name" to auto-send responses to Slack
-   - Say "start whatsapp mode +1234567890" to auto-send responses to WhatsApp
-   - Say "stop slack/whatsapp mode" to disable
+run `talkito --mcp-server`
 
+### Run the TalkiTo configuration menu
+
+run `talkito`
 
 #### Advanced Options
 
@@ -131,13 +118,16 @@ When you run `talkito claude`, voice mode is enabled by default:
 talkito --dont-auto-skip-tts claude
 
 # Use different TTS providers
-talkito --tts-provider openai --tts-voice nova echo "Hello with OpenAI"
 talkito --tts-provider polly --tts-voice Matthew --tts-region us-west-2 echo "Hello with AWS"
 talkito --tts-provider azure --tts-voice en-US-JennyNeural echo "Hello with Azure"
 talkito --tts-provider gcloud --tts-voice en-US-Journey-F echo "Hello with Google"
+talkito --tts-provider kittentts --tts-voice expr-voice-3-f echo "Hello with KittenTTS"
+talkito --tts-provider kokoro --tts-voice af_heart echo "Hello with Kokoro (local)"
 
 # Use different ASR providers
 talkito --asr-provider gcloud --asr-language en-US claude
+AZURE_SPEECH_KEY=... AZURE_SPEECH_REGION=eastus talkito --asr-provider azure claude
+WHISPER_MODEL=small WHISPER_COMPUTE_TYPE=int8 talkito --asr-provider local_whisper claude
 talkito --asr-language es-ES echo "Hola mundo"  # Spanish recognition
 
 # Enable remote communication (configure via environment variables)
@@ -191,26 +181,6 @@ except KeyboardInterrupt:
     asr.stop_dictation()
 ```
 
-### MCP Server Usage
-
-Talkito includes an MCP (Model Context Protocol) server that allows AI applications to use TTS and ASR capabilities:
-
-```bash
-# Install TalkiTo (includes MCP support)
-pip install talkito
-
-# Run as MCP server
-talkito --mcp-server
-```
-
-The MCP server provides tools for:
-- **Core**: `turn_on`/`turn_off` (enable voice mode), `get_talkito_status`
-- **TTS**: `enable_tts`/`disable_tts`, `speak_text`, `skip_current_speech`, `configure_tts`
-- **ASR**: `enable_asr`/`disable_asr`, `start_voice_input`/`stop_voice_input`, `get_dictated_text`
-- **Communication**: `start_whatsapp_mode`/`stop_whatsapp_mode`, `start_slack_mode`/`stop_slack_mode`, `send_whatsapp`, `send_slack`, `get_messages`
-
-Configure your AI application to connect to the talkito MCP server for voice capabilities.
-
 ## Provider Configuration
 
 ### Text-to-Speech (TTS) Providers
@@ -255,6 +225,18 @@ Configure your AI application to connect to the talkito MCP server for voice cap
 - **Voices**: aura-asteria-en, aura-luna-en, aura-stella-en, and more
 - **Usage**: `--tts-provider deepgram --tts-voice aura-asteria-en`
 
+#### KittenTTS (Local / Offline)
+- **Install**: `pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer`
+- **Setup**: No API key required. First run prompts to download the selected model (default `kitten-tts-nano-0.2`) into the Hugging Face cache. Configure `KITTENTTS_MODEL` and `KITTENTTS_VOICE` to pick different quality/voice options.
+- **Best for**: Ultra-lightweight CPU-only voices that stay on-device.
+- **Usage**: `KITTENTTS_MODEL=kitten-tts-nano-0.2 talkito --tts-provider kittentts --tts-voice expr-voice-3-f`
+
+#### Kokoro (Local / Offline)
+- **Install**: `pip install 'kokoro>=0.9.4' soundfile phonemizer`
+- **Setup**: No API key required. TalkiTo will download Kokoro weights the first time you run it (set `KOKORO_LANGUAGE`, `KOKORO_VOICE`, `KOKORO_SPEED` to control defaults).
+- **Best for**: High-quality multilingual voices without sending audio to a cloud provider.
+- **Usage**: `talkito --tts-provider kokoro --tts-voice af_heart --tts-language en-US`
+
 ### Automatic Speech Recognition (ASR) Providers
 
 #### Google Speech Recognition (Default)
@@ -291,6 +273,17 @@ Configure your AI application to connect to the talkito MCP server for voice cap
 - **Setup**: Set AWS credentials
 - **Features**: Streaming transcription
 - **Usage**: `--asr-provider aws --aws-region us-west-2`
+
+#### Azure Speech Services
+- **Get API Key**: https://azure.microsoft.com/en-us/services/cognitive-services/speech-services/
+- **Setup**: Set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`, then `pip install azure-cognitiveservices-speech`
+- **Features**: Low-latency streaming dictation with automatic punctuation
+- **Usage**: `AZURE_SPEECH_KEY=... AZURE_SPEECH_REGION=eastus talkito --asr-provider azure`
+
+#### Local Whisper (On-Device)
+- **Install**: `pip install faster-whisper` (default) or `WHISPER_COREML=1 pip install pywhispercpp` for Apple Silicon/CoreML acceleration
+- **Setup**: No API key required. Configure `WHISPER_MODEL` (e.g., `small`, `medium`), `WHISPER_DEVICE` (`cpu`, `cuda`, or `mps`), and `WHISPER_COMPUTE_TYPE` (`int8`, `int8_float16`, etc.). Models are cached locally and TalkiTo will prompt before downloading unless `TALKITO_AUTO_APPROVE_DOWNLOADS=1`.
+- **Usage**: `WHISPER_MODEL=small WHISPER_COMPUTE_TYPE=int8 talkito --asr-provider local_whisper`
 
 ### Communication Providers (Remote Interaction)
 

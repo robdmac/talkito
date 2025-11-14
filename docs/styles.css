@@ -292,8 +292,9 @@ body {
     color: var(--tropical-indigo);
     display: inline-block;
     transition: opacity 0.4s ease, transform 0.4s ease;
-    width: 4.6em;
+    width: 5em;
     text-align: center;
+    letter-spacing: -0.1em;
 }
 
 .rotating-text-2 {

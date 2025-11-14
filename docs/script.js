@@ -3,7 +3,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const rotatingText = document.getElementById('rotatingText');
     const rotatingText2 = document.getElementById('rotatingText2');
     
-    const words1 = ['claude code', 'bolt.new', 'any website', 'any app'];
+    const words1 = ['Codex Cli', 'Claude Code', 'any website', 'any app'];
     const words2 = ['talk', 'listen', 'text', 'slack'];
     
     let currentIndex1 = 0;
@@ -18,12 +18,12 @@ document.addEventListener('DOMContentLoaded', function() {
             // Change text
             currentIndex1 = (currentIndex1 + 1) % words1.length;
             rotatingText.textContent = words1[currentIndex1];
-            
+
             // Add letter spacing for shorter words
-            if (words1[currentIndex1] === 'bolt.new' || words1[currentIndex1] === 'any app') {
-                rotatingText.style.letterSpacing = '0.01em';
-            } else {
+            if (words1[currentIndex1] === 'Claude Code' || words1[currentIndex1] === 'any website') {
                 rotatingText.style.letterSpacing = '-0.1em';
+            } else {
+                rotatingText.style.letterSpacing = '0.01em';
             }
             
             // Fade in
