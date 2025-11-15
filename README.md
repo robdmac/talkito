@@ -80,7 +80,7 @@ then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 
 ## Demo Video
 
-[![TalkiTo Demo](https://img.youtube.com/vi/pf8jFt0smqs/0.jpg)](https://youtu.be/pf8jFt0smqs)
+[![TalkiTo Demo](https://img.youtube.com/vi/dliBN7pNAuw/0.jpg)](https://youtu.be/dliBN7pNAuw)
 
 ## AI Assistant Compatibility
 
