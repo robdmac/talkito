@@ -80,6 +80,7 @@ TALKITO_PERMISSIONS = [
     "mcp__talkito__cycle_tts_voice",
     "mcp__talkito__set_asr_mode",
     "mcp__talkito__set_tts_mode",
+    "mcp__talkito__get_talkito_version",
 ]
 
 

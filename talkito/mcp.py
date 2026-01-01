@@ -42,6 +42,7 @@ from .core import ensure_asr_initialized
 from .logs import log_message as _base_log_message, setup_logging
 from .state import get_shared_state, save_shared_state, get_status_summary
 from .tts import AVAILABLE_VOICES, get_all_voices_for_provider, get_tts_config
+from .__version__ import __version__
 
 # Global logging setup - set from command line args
 _log_file_path = None
@@ -576,6 +577,11 @@ async def get_talkito_status() -> str:
         One-line formatted status summary (already visible in tool output - no need to repeat)
     """
     return _get_status_summary()
+
+@app.tool()
+async def get_talkito_version() -> str:
+    """Get the current version of talkito"""
+    return f"talkito version {__version__}"
 
 @app.tool()
 async def turn_on() -> str:
