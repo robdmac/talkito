@@ -96,9 +96,11 @@ install_talkito() {
     # Activate virtual environment
     source venv/bin/activate
     
-    # Upgrade pip
+    # Upgrade pip using get-pip.py (avoids SSL bug in old bundled pip)
     echo "   Upgrading pip..."
-    pip install --quiet --upgrade pip
+    curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+    python3 get-pip.py --quiet
+    rm get-pip.py
     
     # Install talkito (all features included by default)
     echo "   Installing talkito..."
