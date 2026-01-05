@@ -96,15 +96,15 @@ install_talkito() {
     # Activate virtual environment
     source venv/bin/activate
     
-    # Upgrade pip using get-pip.py (avoids SSL bug in old bundled pip)
+    # Upgrade pip using get-pip.py with trusted hosts (avoids SSL bug in Python 3.10)
     echo "   Upgrading pip..."
     curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-    python3 get-pip.py --quiet
+    python3 get-pip.py --quiet --trusted-host pypi.org --trusted-host files.pythonhosted.org
     rm get-pip.py
-    
+
     # Install talkito (all features included by default)
     echo "   Installing talkito..."
-    pip install --quiet -e .
+    pip install --quiet --trusted-host pypi.org --trusted-host files.pythonhosted.org -e .
     
     # Create a wrapper script
     echo "   Creating launcher script..."
