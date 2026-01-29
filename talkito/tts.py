@@ -1248,6 +1248,8 @@ def _orcabot_env_ready() -> bool:
         return False
     session_id = os.environ.get("ORCABOT_SESSION_ID")
     pty_id = os.environ.get("ORCABOT_PTY_ID")
+    if not session_id or not pty_id:
+        log_message("WARNING", "Orcabot playback requested but ORCABOT_SESSION_ID/ORCABOT_PTY_ID not set")
     return bool(session_id and pty_id)
 
 
@@ -1278,6 +1280,8 @@ def _emit_orcabot_audio(audio_path: Optional[str] = None,
             json=body,
             timeout=5
         )
+        if resp.status_code != 200:
+            log_message("ERROR", f"Orcabot playback failed: status={resp.status_code} body={resp.text[:200]}")
         return resp.status_code == 200
     except Exception as e:
         log_message("ERROR", f"Failed to emit audio via Orcabot: {e}")
@@ -1307,6 +1311,7 @@ def _play_audio_file_orcabot(audio_path: str, speech_item: Optional[SpeechItem])
         return False
 
     try:
+        log_message("INFO", f"Orcabot playback: sending audio bytes format={fmt} size={len(audio_bytes)}")
         return _emit_orcabot_audio(audio_data=audio_bytes, format=fmt)
     finally:
         _mark_playback_finished(speech_item)
@@ -2910,6 +2915,8 @@ def configure_tts_from_args(args) -> bool:
     
     tts_provider = args.tts_provider
     use_orcabot_playback = bool(getattr(args, "orcabot", False))
+    if use_orcabot_playback:
+        log_message("INFO", "Orcabot playback enabled")
 
     # If no provider survived selection, disable TTS instead of pretending configuration succeeded.
     if not tts_provider:
