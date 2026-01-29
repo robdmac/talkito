@@ -2662,19 +2662,33 @@ def configure_asr_from_args(args) -> bool:
         if not provider_class:
             log_message("WARNING", f"Unknown ASR provider: {config.provider}, falling back to best available")
             # Fall back to best available provider
-            fallback_provider = select_best_asr_provider()
+            excluded = set()
+            if getattr(args, 'orcabot', False):
+                excluded.add('local_whisper')
+            fallback_provider = select_best_asr_provider(excluded_providers=excluded)
             config.provider = fallback_provider
             provider_class = PROVIDERS.get(fallback_provider)
             if not provider_class:
                 return False
         
+        if getattr(args, 'orcabot', False) and config.provider == 'local_whisper':
+            log_message("WARNING", "Orcabot playback disables local Whisper; selecting fallback ASR provider")
+            fallback_provider = select_best_asr_provider(excluded_providers={'local_whisper'})
+            config.provider = fallback_provider
+            provider_class = PROVIDERS.get(fallback_provider)
+            if not provider_class:
+                return False
+
         provider = provider_class(config)
         success, error = provider.validate()
         if not success:
             log_message("WARNING", f"ASR provider {config.provider} validation failed: {error}")
             print(error)
             # Fall back to best available provider
-            fallback_provider = select_best_asr_provider()
+            excluded = set()
+            if getattr(args, 'orcabot', False):
+                excluded.add('local_whisper')
+            fallback_provider = select_best_asr_provider(excluded_providers=excluded)
             if fallback_provider != config.provider:
                 log_message("INFO", f"Falling back to ASR provider: {fallback_provider}")
                 config.provider = fallback_provider

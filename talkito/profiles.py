@@ -353,6 +353,10 @@ CLAUDE_PROFILE = Profile(
         (3, r'^│'),
         (3, r'^\s*/'),
 
+        (4, r'Browser didn\'t open'),
+        (4, r'Use the url below to sign in'),
+        (4, r'Paste code here'),
+
         (4, r'^\s*>\s*'),
     ],
     skip_progress=['Forming', 'Exploring'],

@@ -707,7 +707,10 @@ def initialize_providers_early(args):
             if preferred:
                 # Set the requested provider in shared state so select_best_tts_provider knows what was requested
                 shared_state.tts_provider = preferred
-            selected_tts = tts.select_best_tts_provider()
+            excluded_tts = set()
+            if getattr(args, 'orcabot', False):
+                excluded_tts.update({'kokoro', 'kittentts'})
+            selected_tts = tts.select_best_tts_provider(excluded_providers=excluded_tts)
 
             if selected_tts is None:
                 log_message("WARNING", f"No TTS provider available. TTS will be disabled.")
@@ -721,7 +724,7 @@ def initialize_providers_early(args):
                 log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
 
                 # Start preloading TTS models early for local providers
-                if selected_tts in ['kokoro', 'kittentts']:
+                if selected_tts in ['kokoro', 'kittentts'] and not getattr(args, 'orcabot', False):
                     try:
                         preload_start = time.time()
                         log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
@@ -755,7 +758,10 @@ def initialize_providers_early(args):
         log_message("INFO", f"Starting ASR provider selection for: {preferred}")
         if asr_module is None:
             asr_module = _import_asr()
-        shared_state.asr_provider = asr_module.select_best_asr_provider(preferred)
+        excluded_asr = set()
+        if getattr(args, 'orcabot', False):
+            excluded_asr.add('local_whisper')
+        shared_state.asr_provider = asr_module.select_best_asr_provider(preferred, excluded_providers=excluded_asr)
         log_message("INFO", f"ASR provider selection completed: {shared_state.asr_provider} [{time.time() - step_start:.3f}s]")
 
         # Start preloading local whisper models early for local_whisper provider
