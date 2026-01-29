@@ -19,6 +19,7 @@
 """Text-to-Speech engine and text processing utilities with TTS engine detection, symbol conversion, and speech synthesis support."""
 
 import argparse
+import base64
 import io
 import json
 import queue
@@ -44,6 +45,11 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import requests
+except Exception:
+    requests = None
 
 from .state import get_shared_state
 
@@ -175,6 +181,7 @@ RE_HAS_LETTERS = re.compile(r'[a-zA-Z]')
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
 disable_tts = False  # Whether to disable TTS completely (for testing)
 tts_provider = "system"  # Current TTS provider (system, openai, polly, azure, gcloud, elevenlabs, deepgram, etc.)
+use_orcabot_playback = False  # Use Orcabot audio playback via HTTP
 openai_voice = os.environ.get('OPENAI_VOICE', 'alloy')  # Default OpenAI voice
 polly_voice = os.environ.get('AWS_POLLY_VOICE', 'Joanna')  # Default AWS Polly voice
 polly_region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')  # Default AWS region for Polly
@@ -888,6 +895,8 @@ class PlaybackControl:
         """Pause current TTS playback."""
         with self.lock:
             self.is_paused = True
+            if use_orcabot_playback:
+                _stop_orcabot_audio()
             if self.current_playback_thread:
                 self.current_playback_thread.stop()
             elif self.current_process:
@@ -905,6 +914,8 @@ class PlaybackControl:
         """Skip the currently playing TTS item."""
         with self.lock:
             self.skip_current = True
+            if use_orcabot_playback:
+                _stop_orcabot_audio()
             if self.current_playback_thread:
                 self.current_playback_thread.stop()
             elif self.current_process:
@@ -917,6 +928,8 @@ class PlaybackControl:
         """Skip all remaining items in TTS queue."""
         with self.lock:
             self.skip_all = True
+            if use_orcabot_playback:
+                _stop_orcabot_audio()
             if self.current_playback_thread:
                 self.current_playback_thread.stop()
             elif self.current_process:
@@ -1229,6 +1242,76 @@ def _create_temp_audio_file(suffix: str = ".mp3") -> str:
         return tmp_file.name
 
 
+def _orcabot_env_ready() -> bool:
+    if requests is None:
+        log_message("ERROR", "Orcabot playback requested but requests is not available")
+        return False
+    session_id = os.environ.get("ORCABOT_SESSION_ID")
+    pty_id = os.environ.get("ORCABOT_PTY_ID")
+    return bool(session_id and pty_id)
+
+
+def _emit_orcabot_audio(audio_path: Optional[str] = None,
+                        audio_data: Optional[bytes] = None,
+                        format: str = "mp3",
+                        action: str = "play") -> bool:
+    if requests is None:
+        log_message("ERROR", "Orcabot playback requested but requests is not available")
+        return False
+    session_id = os.environ.get("ORCABOT_SESSION_ID")
+    pty_id = os.environ.get("ORCABOT_PTY_ID")
+    if not session_id or not pty_id:
+        log_message("WARNING", "Orcabot playback requested but ORCABOT_SESSION_ID/ORCABOT_PTY_ID not set")
+        return False
+
+    body = {"action": action}
+    if action == "play":
+        if audio_path:
+            body["path"] = audio_path
+        elif audio_data:
+            body["data"] = base64.b64encode(audio_data).decode()
+            body["format"] = format
+
+    try:
+        resp = requests.post(
+            f"http://localhost:8080/sessions/{session_id}/ptys/{pty_id}/audio",
+            json=body,
+            timeout=5
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        log_message("ERROR", f"Failed to emit audio via Orcabot: {e}")
+        return False
+
+
+def _stop_orcabot_audio() -> bool:
+    return _emit_orcabot_audio(action="stop")
+
+
+def _play_audio_file_orcabot(audio_path: str, speech_item: Optional[SpeechItem]) -> bool:
+    if not _orcabot_env_ready():
+        return False
+
+    path = Path(audio_path)
+    if not path.exists():
+        log_message("ERROR", f"Audio file not found: {audio_path}")
+        return False
+
+    ext = path.suffix.lower().lstrip('.')
+    fmt = ext if ext in {"mp3", "wav", "ogg"} else "mp3"
+
+    try:
+        audio_bytes = path.read_bytes()
+    except Exception as e:
+        log_message("ERROR", f"Failed to read audio file for Orcabot: {e}")
+        return False
+
+    try:
+        return _emit_orcabot_audio(audio_data=audio_bytes, format=fmt)
+    finally:
+        _mark_playback_finished(speech_item)
+
+
 def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     """Play audio file using non-blocking threaded playback.
     Returns immediately after starting the playback thread.
@@ -1236,6 +1319,8 @@ def _play_audio_file(audio_path: str, use_process_control: bool = True) -> bool:
     log_message("DEBUG", "_play_audio_file")
     with _state_lock:
         active_item = current_speech_item
+    if use_orcabot_playback:
+        return _play_audio_file_orcabot(audio_path, active_item)
     if not use_process_control:
         # For backward compatibility, if process control is disabled,
         # fall back to the old blocking behavior
@@ -1265,6 +1350,8 @@ def _play_audio_file_blocking(audio_path: str, use_process_control: bool = True,
     if speech_item is None:
         with _state_lock:
             speech_item = current_speech_item
+    if use_orcabot_playback:
+        return _play_audio_file_orcabot(audio_path, speech_item)
 
     try:
         path = Path(audio_path)
@@ -2574,6 +2661,8 @@ def stop_tts_immediately():
     shutdown_event.set()
     
     # Kill any current TTS process
+    if use_orcabot_playback:
+        _stop_orcabot_audio()
     playback_control.skip_all_items()
     
     # Clear the queue completely
@@ -2751,6 +2840,8 @@ def parse_arguments():
                        help='Region for cloud providers (AWS Polly/Azure)')
     parser.add_argument('--log-file', type=str, default=None,
                        help='Enable debug logging to file (e.g., ~/.talkito_tts.log)')
+    parser.add_argument('--orcabot', action='store_true',
+                       help='Play audio via Orcabot HTTP playback instead of local audio player')
     parser.add_argument('text', nargs='*', help='Text to speak (multiple words allowed)')
     return parser.parse_args()
 
@@ -2815,9 +2906,10 @@ def select_best_tts_provider(excluded_providers=None) -> str | None:
 
 def configure_tts_from_args(args) -> bool:
     """Configure TTS provider from config dictionary."""
-    global disable_tts, tts_provider, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
+    global disable_tts, tts_provider, use_orcabot_playback, openai_voice, polly_voice, polly_region, azure_voice, azure_region, gcloud_voice, gcloud_language_code, elevenlabs_voice_id, elevenlabs_model_id, deepgram_voice_model, kittentts_model, kittentts_voice
     
     tts_provider = args.tts_provider
+    use_orcabot_playback = bool(getattr(args, "orcabot", False))
 
     # If no provider survived selection, disable TTS instead of pretending configuration succeeded.
     if not tts_provider:

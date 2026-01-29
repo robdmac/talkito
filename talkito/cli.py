@@ -128,6 +128,8 @@ def parse_arguments():
                            choices=['off', 'full', 'auto-skip'],
                            default='auto-skip',
                            help='TTS mode (default: auto-skip)')
+    tts_group.add_argument('--orcabot', action='store_true',
+                           help='Play audio via Orcabot HTTP playback instead of local audio player')
     
     # ASR options
     asr_group = parser.add_argument_group('ASR options')
@@ -226,7 +228,7 @@ def parse_arguments():
     if args.command and args.arguments:
         talkito_options = {
             '--log-file', '--tts-provider', '--asr-provider', '--tts-voice', '--tts-region', '--tts-language',
-            '--tts-rate', '--tts-pitch', '--tts-mode', '--capture-tts-output', '--asr-mode', '--asr-language', '--asr-model',
+            '--tts-rate', '--tts-pitch', '--tts-mode', '--capture-tts-output', '--orcabot', '--asr-mode', '--asr-language', '--asr-model',
             '--sms-recipients', '--whatsapp-recipients', '--slack-channel', '--webhook-port', '--record', '--replay',
             '--no-output', '--port', '--disable-mcp', '--dont-auto-skip-tts', '--disable-tts', '--profile', '--verbosity',
             '-v', '--verbose', '--mcp-server', '--mcp-sse-server', '--setup-slack', '--setup-whatsapp'
