@@ -1941,6 +1941,7 @@ class FasterWhisperProvider(ASRProvider):
 def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
     """Check which ASR providers are accessible based on API keys and environment"""
     accessible = {}
+    orcabot_enabled = os.environ.get("TALKITO_ORCABOT_ENABLED") == "1"
     
     # Google (free)
     accessible["google"] = {
@@ -2018,10 +2019,16 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         else:
             whisper_note = f"Model: {model_name}{cache_status}"
 
-    accessible["local_whisper"] = {
-        "available": whisper_backend_info["available"],
-        "note": whisper_note
-    }
+    if orcabot_enabled:
+        accessible["local_whisper"] = {
+            "available": False,
+            "note": "Disabled when Orcabot playback is enabled"
+        }
+    else:
+        accessible["local_whisper"] = {
+            "available": whisper_backend_info["available"],
+            "note": whisper_note
+        }
     
     return accessible
 

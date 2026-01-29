@@ -1079,6 +1079,8 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     log_message("INFO", f"check_tts_provider_accessibility called with requested_provider={requested_provider}")
     
     accessible = {}
+    if use_orcabot_playback:
+        log_message("INFO", "Orcabot playback enabled - skipping local TTS provider checks")
     
     # System TTS
     detected_engine = detect_tts_engine()
@@ -1154,7 +1156,9 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     
     # For accessibility check, assume kittentts is available if requested
     # Actual validation happens during model loading with user consent
-    if requested_provider == 'kittentts':
+    if use_orcabot_playback:
+        kittentts_note = "Disabled when Orcabot playback is enabled"
+    elif requested_provider == 'kittentts':
         kittentts_available = True
         kittentts_note = "KittenTTS package (validation deferred to model loading)"
     else:
@@ -1189,7 +1193,9 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
     
     # For accessibility check, assume kokoro is available if requested
     # Actual validation happens during model loading with user consent
-    if requested_provider == 'kokoro':
+    if use_orcabot_playback:
+        kokoro_note = "Disabled when Orcabot playback is enabled"
+    elif requested_provider == 'kokoro':
         kokoro_available = True
         kokoro_note = "KokoroTTS package (validation deferred to model loading)"
         log_message("INFO", "KokoroTTS availability assumed for requested provider")
@@ -2927,6 +2933,7 @@ def configure_tts_from_args(args) -> bool:
     use_orcabot_playback = bool(getattr(args, "orcabot", False))
     if use_orcabot_playback:
         log_message("INFO", "Orcabot playback enabled")
+        os.environ["TALKITO_ORCABOT_ENABLED"] = "1"
         if tts_provider in {"kokoro", "kittentts"}:
             log_message("WARNING", f"Orcabot playback disables local TTS provider {tts_provider}; selecting fallback")
             fallback_provider = select_best_tts_provider(excluded_providers={"kokoro", "kittentts"})
