@@ -124,7 +124,10 @@ def update_claude_settings():
 def update_claude_hooks(webhook_port=8080):
     """Update Claude hooks to use webhook server with the correct port"""
     settings_file = Path(".claude") / "settings.local.json"
-    
+
+    # Create .claude directory if it doesn't exist
+    settings_file.parent.mkdir(exist_ok=True)
+
     # Load existing settings
     settings = {}
     if settings_file.exists():

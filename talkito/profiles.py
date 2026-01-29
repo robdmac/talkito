@@ -275,7 +275,7 @@ COMMON_SKIP_PATTERNS = [
     (2, r'^  \+'),
     (2, r'^  \['),
     (2, r'(import|include|require|use)\s+\w+…\)'),  # Import statements (Python/JS/Rust/PHP)
-    (2, r'     '),                                  # Indent usually means code
+    (2, r'^\s{5,}'),                                # 5+ leading spaces = code indent (must be at start)
     (2, r'  - '),                                   # Indent with dash usually means code
     (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#/]'),            # Line numbers + code/comments (added / for C++)
     (2, r'(/usr/bin/|#!/)'),                        # Shebang path prefix or shebang start
@@ -288,6 +288,7 @@ COMMON_SKIP_PATTERNS = [
     (3, r'^\/help'),
     (3, r'sc to interrupt|sc interrupt|enter send'),  # UI hints
     (3, r'ctrl\s*\+r\s*to\s*expand'),  # UI hints
+    (3, r'ctrl\s*\+\s*to\s*(edit|open)'),  # ctrl+ to edit in Vim hints
     (3, r'^\s*⏺\s+Task\('),  # Claude Code task indicator
     (3, r'^Task\([^)]+\)'),  # Task() without prefix
     (3, r'Read \d+ lines'),  # Skip "Read X lines" messages
@@ -312,6 +313,13 @@ COMMON_SKIP_PATTERNS = [
     (4, r'^\['),
     (4, r'⏵⏵ auto-accept edits'),
     (4, r'===|▀▀▀▀|………|╌╌'),
+    (4, r'stop hook'),                              # Claude Code hook status indicator
+    (4, r'[Pp]roofing…|[Tt]hinking…'),              # Claude Code thinking/status indicators
+    (4, r'^[✳✶✻✽✢·•]\s'),                           # Spinner/status indicator lines
+    (4, r'oov|oof|oo[a-z]ing'),                     # Partial "Grooving/Proofing" fragments
+    (4, r'ought for \d'),                           # Timing indicator "(thought for Xs)" fragments
+    (4, r'^\s+[a-z]\s+.*ought'),                    # Garbled timing indicator fragments
+    (4, r'^[✳✶✻✽✢·•]'),                             # Single spinner characters (no space needed)
 ]
 
 
@@ -330,6 +338,7 @@ CLAUDE_PROFILE = Profile(
     ],
     exception_patterns=[
         (0, r'Claude Code v'),       # ✻ Welcome to Claude Code
+        (0, r'^⏺[A-Za-z]'),          # Response lines starting with bullet + letter
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
@@ -352,8 +361,9 @@ CLAUDE_PROFILE = Profile(
         r'^│\s*>\s*',        # Line starting with box character and prompt
         r'^>\s*.+',          # Line starting with >
         r'^\s*│\s*>\s*',     # Line starting with optional spaces, box, prompt
+        r'^❯\s+\S',          # Line starting with ❯ prompt followed by text (user input)
     ],
-    input_start=['>'],
+    input_start=['❯ ', '│ > '],
     input_mic_replace='🎤',
     input_speaker_replace='📢',
 )

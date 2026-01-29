@@ -114,6 +114,12 @@ ALT_SCREEN_SEQUENCES = [
 # ANSI escape code pattern - comprehensive
 ANSI_CHAR_PATTERN = re.compile(r'(?:\x1B\[[0-9;?]*[a-zA-Z])+([A-Za-z])(?=(?:\x1B\[[0-9;?]*[a-zA-Z])|$)')
 ANSI_MOVE_LINE_PATTERN = re.compile(r'\x1B\[(\d+);(\d+)[Hf]')
+# Cursor forward command - converts to spaces to preserve word boundaries
+# Note: \d* allows for [C] with no number (defaults to 1) as well as [nC]
+CURSOR_FORWARD_PATTERN = re.compile(r'\x1B\[(\d*)C')
+# Cursor down movement (string) - indicates end of response, start of status area
+# Note: There's also a bytes version CURSOR_DOWN_PATTERN at line ~195 for byte parsing
+CURSOR_DOWN_STR_PATTERN = re.compile(r'\x1B\[\d+B')
 ANSI_PATTERN = re.compile(
     r'(\x1B\[[0-9;]*[a-zA-Z]|'  # Standard codes
     r'\x1B\]([0-9]+;[^\x07\x1B]*)?\x07|'  # OSC sequences
@@ -202,9 +208,29 @@ comm_manager: Optional[Any] = None  # Will be CommunicationManager when initiali
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='talkito-io')
 
 def _trim_after_cursor_move(s):
+    # Find the earliest position of any cursor movement that indicates section boundary
+    positions = []
+
+    # Check for absolute cursor positioning
     match = ANSI_MOVE_LINE_PATTERN.search(s)
     if match:
-        return s[:match.start()]
+        positions.append(match.start())
+
+    # Check for cursor down movements (separates response from status indicators)
+    for vmatch in CURSOR_DOWN_STR_PATTERN.finditer(s):
+        positions.append(vmatch.start())
+
+    if positions:
+        # Trim at the earliest cursor movement
+        trim_pos = min(positions)
+        log_message("DEBUG", f"_trim_after_cursor_move: trimming at position {trim_pos}, found {len(positions)} cursor movements")
+        return s[:trim_pos]
+
+    # Debug: Check if escape bytes are present at all
+    if '\x1B' in s:
+        log_message("DEBUG", f"_trim_after_cursor_move: escape bytes present but no cursor down found")
+    else:
+        log_message("DEBUG", f"_trim_after_cursor_move: NO escape bytes in string!")
     return s
 
 # Register cleanup on exit
@@ -571,16 +597,30 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
         should_skip = active_profile and active_profile.should_skip(text, verbosity_level)
             
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
-        append = terminal.previous_line_was_queued and not terminal.previous_line_was_queued_space_seperated
-        terminal.last_line_number = line_number
+        # Only append if previous line was queued AND line numbers are sequential (or close)
+        # This prevents appending unrelated lines when cursor jumps around the screen
+        line_jump = 0
+        if line_number is not None and terminal.last_line_number:
+            line_jump = abs(line_number - terminal.last_line_number)
+        append = (terminal.previous_line_was_queued and
+                  not terminal.previous_line_was_queued_space_seperated and
+                  line_jump <= 2)  # Allow appending only if within 2 lines
+        if line_jump > 2 and terminal.previous_line_was_queued:
+            log_message("DEBUG", f"queue_output: NOT appending due to line jump ({terminal.last_line_number} -> {line_number})")
+        if line_number is not None:
+            terminal.last_line_number = line_number
+        if should_skip:
+            log_message("FILTER", f"queue_output skipped by profile (verbosity={verbosity_level}): '{text}'")
+            if terminal.pending_speech_text:
+                send_pending_text()
+            return
         if append:
             log_message("DEBUG", "queue_output appending")
             if text.startswith("  "):
                 text = "\n" + text
             terminal.pending_speech_text.append(text)
-            # When appending, keep the more permissive skip decision (False wins over True)
-            terminal.pending_text_should_skip = terminal.pending_text_should_skip and should_skip
-            log_message("DEBUG", f"queue_output setting should skip to be terminal.pending_text_should_skip {terminal.pending_text_should_skip} and should_skip {should_skip} = {terminal.pending_text_should_skip}")
+            # Skip status already handled above; keep existing decision for pending buffer
+            log_message("DEBUG", f"queue_output keeping pending_text_should_skip={terminal.pending_text_should_skip}")
 
             # Restart the 2-second timer since new text was appended
             with terminal.pending_text_timer_lock:
@@ -611,8 +651,33 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
 def clean_text(text: str) -> str:
     """Strip ANSI escape codes and terminal control sequences"""
 
+    # Debug: check for escape bytes at start of function
+    escape_count = text.count('\x1B')
+    if escape_count > 0:
+        log_message("DEBUG", f"clean_text input has {escape_count} escape bytes, len={len(text)}")
+        # Check specifically for cursor down pattern
+        import re as re_debug
+        cursor_down_matches = re_debug.findall(r'\x1B\[\d+B', text)
+        if cursor_down_matches:
+            log_message("DEBUG", f"clean_text: found {len(cursor_down_matches)} cursor DOWN patterns: {cursor_down_matches}")
+        # Also check what's after 'today?' if present
+        if 'today?' in text:
+            idx = text.find('today?')
+            snippet = text[idx:idx+20]
+            log_message("DEBUG", f"clean_text: bytes after 'today?': {repr(snippet)}")
+    elif '[' in text and any(c in text for c in 'ABCDEFGHJ'):
+        log_message("DEBUG", f"clean_text input has NO escape bytes but contains bracket patterns! len={len(text)}")
+
     text = _trim_after_cursor_move(text)
-    text = text.replace("’", "'")
+
+    # Convert cursor forward commands to spaces (preserves word boundaries in streaming output)
+    # Default to 1 space if no number specified (e.g., [C] instead of [1C])
+    cursor_forward_matches = CURSOR_FORWARD_PATTERN.findall(text)
+    if cursor_forward_matches:
+        log_message("DEBUG", f"clean_text: found {len(cursor_forward_matches)} cursor forward commands")
+    text = CURSOR_FORWARD_PATTERN.sub(lambda m: ' ' * (int(m.group(1)) if m.group(1) else 1), text)
+
+    text = text.replace("'", "'")
 
     text = re.sub(
         r"(?<=[A-Za-z0-9])'(?:(?:\s|\x1B\[[0-9;?]*[ -/]*[@-~])+)" +
@@ -713,12 +778,17 @@ def modify_prompt_for_asr(data: bytes, input_prompts, input_replace) -> bytes:
         return data
     try:
         text = data.decode('utf-8', errors='ignore')
-        for input_prompt in input_prompts:
-            if input_prompt in text:
-                # When we find the prompt, mark that we've seen it
-                asr_state.prompt_detected = True
-                text = text.replace(input_prompt, input_replace, 1)
-                return text.encode('utf-8')
+        lines = text.splitlines(keepends=True)
+        for idx, line in enumerate(lines):
+            for input_prompt in input_prompts:
+                if not input_prompt:
+                    continue
+                prompt_pattern = re.compile(r'^\s*' + re.escape(input_prompt))
+                if prompt_pattern.search(line):
+                    # When we find the prompt at line start, mark that we've seen it
+                    asr_state.prompt_detected = True
+                    lines[idx] = prompt_pattern.sub(lambda m: m.group(0).replace(input_prompt, input_replace, 1), line, count=1)
+                    return ''.join(lines).encode('utf-8')
         # log_message("WARNING", f"input prompt {input_prompt} not found in text {text}")
         return data
     except Exception:
@@ -1167,28 +1237,25 @@ def process_line(line: str, buffer: List[str], prev_line: str,
         log_message("INFO", f"Detected prompt in line ({line_number}): '{cleaned_line}'")
         return _skip_line_and_return(buffer, line, True)
 
-    if cleaned_line:
-        # Skip echoed user input when we're waiting at the prompt for the next command.
-        if asr_state.waiting_for_input and not is_prompt:
-            log_message("FILTER", f"Suppressed input echo while waiting for prompt: '{cleaned_line}'")
-            return _skip_line_and_return(buffer, line)
-        # Check if extracted text should be filtered based on verbosity
-        if active_profile and active_profile.should_skip(cleaned_line, verbosity_level):
-            log_message("FILTER", f"Skipped extracted text by profile (verbosity={verbosity_level}): '{cleaned_line}'")
-            return _skip_line_and_return(buffer, line)
-        return _queue_and_return(cleaned_line, buffer, line, line_number)
-
     if skip_duplicates and cleaned_line:
         if is_duplicate_screen_content(cleaned_line):
             log_message("WARNING", f"Skipping duplicate content: '{cleaned_line[:MAX_LINE_PREVIEW]}...'")
             return _skip_line_and_return(buffer, line)
 
-    box_content = extract_box_content(cleaned_line)
-    if box_content and not is_prompt:
-        cleaned_line = box_content
+    if cleaned_line:
+        box_content = extract_box_content(cleaned_line)
+        if box_content and not is_prompt:
+            cleaned_line = box_content
 
-    if should_skip_line(cleaned_line):
-        return _skip_line_and_return(buffer, prev_line)
+        # Skip echoed user input when we're waiting at the prompt for the next command.
+        if asr_state.waiting_for_input and not is_prompt:
+            log_message("FILTER", f"Suppressed input echo while waiting for prompt: '{cleaned_line}'")
+            return _skip_line_and_return(buffer, line)
+
+        if should_skip_line(cleaned_line):
+            return _skip_line_and_return(buffer, prev_line)
+
+        return _queue_and_return(cleaned_line, buffer, line, line_number)
 
     # Process buffer and handle final queuing
     return _process_buffer_and_queue(cleaned_line, line, buffer, line_number)
