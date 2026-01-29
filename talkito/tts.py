@@ -154,7 +154,13 @@ RE_WORD_DASH = re.compile(r'(\w+)\s+-\s+')
 RE_NUMBER_RANGE = re.compile(r'(\d+)-(\d+)')
 RE_PLUS_SIGN = re.compile(r'\+')
 RE_DIVISION = re.compile(r'(\d+)\s+/\s+(\d+)')
+RE_HTTP_URL_ALL = re.compile(r'https?://\S+')
 RE_HTTP_URL = re.compile(r'(https?:)//([^\s]+)')
+RE_SUSPICIOUS_QUERY = re.compile(
+    r'\b(?:code|client_id|redirect_uri|response_type|code_challenge|code_challenge_method|state|scope)=[^\s]+',
+    re.IGNORECASE
+)
+RE_PERCENT_ENCODE = re.compile(r'%[0-9A-Fa-f]{2}')
 RE_SLASH_PATH = re.compile(r'(?<![.\w])/([a-zA-Z][\w-]+)')
 RE_SLASH_OR = re.compile(r'(?<![.\w])(\w+)/(\w+)(?![.\w])')
 RE_QUOTE_PREFIX = re.compile(r'^> ')
@@ -1952,8 +1958,8 @@ def context_aware_symbol_replacement(text: str) -> str:
     # Division: number / number with spaces (e.g., "10 / 2")
     text = RE_DIVISION.sub(r'\1 divided by \2', text)
 
-    # URLs: http://example.com or https://example.com - MUST come before other slash handling
-    text = RE_HTTP_URL.sub(r'\1 slash slash \2', text)
+    # URLs: drop all http/https URLs before slash handling
+    text = RE_HTTP_URL_ALL.sub('', text)
 
     # Commands that start with slash (e.g., /install-github-app, /help)
     text = RE_SLASH_PATH.sub(r'slash \1', text)
@@ -2007,6 +2013,10 @@ def clean_punctuation_sequences(text: str) -> str:
 
 def extract_speakable_text(text: str) -> (str, str):
     """Extract speakable text and convert mathematical symbols."""
+
+    # Drop OAuth/login URLs or query fragments entirely
+    if RE_HTTP_URL_ALL.search(text) or RE_SUSPICIOUS_QUERY.search(text) or RE_PERCENT_ENCODE.search(text):
+        return "", ""
 
     text = RE_GREATER_UNDERSCORE.sub('', text)
 
@@ -2917,6 +2927,15 @@ def configure_tts_from_args(args) -> bool:
     use_orcabot_playback = bool(getattr(args, "orcabot", False))
     if use_orcabot_playback:
         log_message("INFO", "Orcabot playback enabled")
+        if tts_provider in {"kokoro", "kittentts"}:
+            log_message("WARNING", f"Orcabot playback disables local TTS provider {tts_provider}; selecting fallback")
+            fallback_provider = select_best_tts_provider(excluded_providers={"kokoro", "kittentts"})
+            if fallback_provider is None:
+                log_message("ERROR", "No non-local TTS providers available with Orcabot playback")
+                disable_tts_completely("no non-local TTS providers available with Orcabot playback", args)
+                return False
+            tts_provider = fallback_provider
+            setattr(args, "tts_provider", fallback_provider)
 
     # If no provider survived selection, disable TTS instead of pretending configuration succeeded.
     if not tts_provider:
