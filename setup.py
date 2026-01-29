@@ -32,7 +32,7 @@ def get_version():
         exec(compile(f.read(), version_file, "exec"), version_locals)
     return version_locals["__version__"]
 
-# Core dependencies (full feature set)
+# Core dependencies (cloud-based providers, no torch required)
 install_requires = [
     "SpeechRecognition>=3.8.1",
     "pyaudio>=0.2.11",
@@ -49,11 +49,22 @@ install_requires = [
     "slack-sdk>=3.19.0",
     "flask>=2.0.0",
     "waitress>=2.0.0",
-    "kokoro>=0.9.4",
     "soundfile>=0.12.0",
     "numpy<2.0",
     "fastmcp>=0.1.0",
 ]
+
+# Optional dependencies for local AI models (requires torch)
+extras_require = {
+    'local': [
+        "kokoro>=0.9.4",
+        "faster-whisper>=1.0.0",
+    ],
+    'all': [
+        "kokoro>=0.9.4",
+        "faster-whisper>=1.0.0",
+    ],
+}
 
 setup(
     name="talkito",
@@ -88,6 +99,7 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=install_requires,
+    extras_require=extras_require,
     entry_points={
         "console_scripts": [
             "talkito=talkito.cli:main",
