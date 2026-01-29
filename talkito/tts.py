@@ -1276,13 +1276,13 @@ def _emit_orcabot_audio(audio_path: Optional[str] = None,
 
     try:
         resp = requests.post(
-            f"http://localhost:8080/sessions/{session_id}/ptys/{pty_id}/audio",
+            f"http://localhost:8081/sessions/{session_id}/ptys/{pty_id}/audio",
             json=body,
             timeout=5
         )
-        if resp.status_code != 200:
+        if resp.status_code != 204:
             log_message("ERROR", f"Orcabot playback failed: status={resp.status_code} body={resp.text[:200]}")
-        return resp.status_code == 200
+        return resp.status_code == 204
     except Exception as e:
         log_message("ERROR", f"Failed to emit audio via Orcabot: {e}")
         return False
