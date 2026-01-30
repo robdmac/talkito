@@ -37,7 +37,6 @@ from .state import (
     get_shared_state,
     get_status_summary,
     initialize_providers_early,
-    show_tap_to_talk_notification_once,
     set_key,
     unset_key,
     sync_communication_state_from_config,
@@ -273,9 +272,6 @@ def print_configuration_status(args):
     # Preview communication configuration so status summary reflects upcoming providers
     comms_config = build_comms_config(args)
     sync_communication_state_from_config(comms_config)
-    
-    # Show one-time notification about tap-to-talk change if needed
-    show_tap_to_talk_notification_once()
     
     # Don't pass configured providers to allow showing actual working providers after fallback
     status = get_status_summary(

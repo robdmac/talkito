@@ -891,33 +891,6 @@ def get_status_summary(comms_manager=None, whatsapp_recipient=None, slack_channe
         return f"Error getting status: {str(e)}"
 
 
-def show_tap_to_talk_notification_once():
-    """Show one-time notification about tap-to-talk mode change, if not already shown."""
-    shared_state = get_shared_state()
-    
-    # Check if we've already shown this notification
-    with shared_state._lock:
-        if shared_state.tap_to_talk_notification_shown:
-            return
-        
-        # Mark as shown and persist
-        shared_state.tap_to_talk_notification_shown = True
-    
-    # Show the notification
-    notice = (
-        "TALKITO DEFAULT ASR MODE HAS CHANGED\n"
-        "* The default ASR mode has changed to 'tap-to-talk' for better control.\n"
-        "* Hold the backtick key (`) to toggle voice input.\n"
-        "* You can change this back with: talkito --asr-mode auto-input or typing \"Switch to always on voice mode\""
-    )
-    if is_orcabot_mode():
-        emit_orcabot_notice(notice, level="info", category="asr")
-    else:
-        print(f"\n{notice}\n")
-
-    save_shared_state()
-
-
 def set_tts_config_thread_safe(provider: Optional[str] = None, voice: Optional[str] = None,
                                region: Optional[str] = None, language: Optional[str] = None,
                                model: Optional[str] = None, rate: Optional[float] = None,
