@@ -71,7 +71,7 @@ from .core import (
     TalkitoCore,
 )
 from .clients import run_terminal_agent_extensions
-from .logs import log_message, setup_logging
+from .logs import log_message, setup_logging, emit_orcabot_notice, is_orcabot_mode, install_orcabot_print_hook
 from .mcp import main as mcp_main
 from .templates import SLACK_BOT_MANIFEST
 from .update import check_and_apply_staged_update, TalkitoUpdater
@@ -247,6 +247,9 @@ def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
     if getattr(args, "orcabot", False):
+        os.environ["TALKITO_ORCABOT_ENABLED"] = "1"
+        os.environ["TALKITO_ORCABOT_MODE"] = "1"
+        install_orcabot_print_hook()
         args.asr_mode = 'off'
         args.asr_provider = None
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = 'off'
@@ -299,6 +302,9 @@ async def run_talkito_command(args) -> int:
     global core_instance
 
     if getattr(args, "orcabot", False):
+        os.environ["TALKITO_ORCABOT_ENABLED"] = "1"
+        os.environ["TALKITO_ORCABOT_MODE"] = "1"
+        install_orcabot_print_hook()
         args.asr_mode = 'off'
         args.asr_provider = None
         os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = 'off'
@@ -325,7 +331,11 @@ async def run_talkito_command(args) -> int:
             log_message("INFO", f"TTS provider validation completed - valid: {provider_valid}")
             if not provider_valid:
                 # Clear the invalid provider so select_best_tts_provider() can choose an alternative
-                print(f"Warning: TTS provider '{args.tts_provider}' validation failed. Searching for alternative providers...")
+                warning_msg = f"Warning: TTS provider '{args.tts_provider}' validation failed. Searching for alternative providers..."
+                if is_orcabot_mode():
+                    emit_orcabot_notice(warning_msg, level="warning", category="tts")
+                else:
+                    print(warning_msg)
                 log_message("WARNING", f"TTS provider {args.tts_provider} validation failed, will try fallbacks")
                 args.tts_provider = None
                 if 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:

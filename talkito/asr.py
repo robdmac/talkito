@@ -122,7 +122,7 @@ _suppress_alsa_jack_warnings()
 import speech_recognition as sr
 import pyaudio
 
-from .logs import log_message as _base_log_message
+from .logs import log_message as _base_log_message, emit_orcabot_notice, is_orcabot_mode
 from .state import load_dotenv
 
 load_dotenv()
@@ -752,7 +752,11 @@ class GoogleCloudProvider(ASRProvider):
                         continue
                     elif engine.is_active:
                         log_message("ERROR", f"Google Cloud streaming error: {e}")
-                        print(f"\nGoogle Cloud Error: {e}")
+                        message = f"Google Cloud Error: {e}"
+                        if is_orcabot_mode():
+                            emit_orcabot_notice(message, level="error", category="asr")
+                        else:
+                            print(f"\n{message}")
                         # Don't exit on DeadlineExceeded errors
                         if "DeadlineExceeded" not in error_msg:
                             break
