@@ -8,7 +8,7 @@ from pathlib import Path
 
 from typing import Optional, Dict, Any, Callable, List, TYPE_CHECKING
 from dataclasses import dataclass, field
-from .logs import log_message
+from .logs import log_message, emit_orcabot_notice, is_orcabot_mode
 
 if TYPE_CHECKING:
     from .comms import CommsConfig
@@ -713,8 +713,11 @@ def initialize_providers_early(args):
             selected_tts = tts.select_best_tts_provider(excluded_providers=excluded_tts)
 
             if selected_tts is None:
-                log_message("WARNING", f"No TTS provider available. TTS will be disabled.")
-                print("No fallback TTS provider available. TTS will be disabled.")
+                log_message("WARNING", "No TTS provider available. TTS will be disabled.")
+                if is_orcabot_mode():
+                    emit_orcabot_notice("No fallback TTS provider available. TTS will be disabled.", level="warning", category="tts")
+                else:
+                    print("No fallback TTS provider available. TTS will be disabled.")
                 shared_state.tts_provider = None
                 # Disable TTS since no providers are available
                 if hasattr(args, 'disable_tts'):
@@ -901,12 +904,16 @@ def show_tap_to_talk_notification_once():
         shared_state.tap_to_talk_notification_shown = True
     
     # Show the notification
-    print("""
-TALKITO DEFAULT ASR MODE HAS CHANGED
-* The default ASR mode has changed to 'tap-to-talk' for better control.
-* Hold the backtick key (`) to toggle voice input.
-* You can change this back with: talkito --asr-mode auto-input or typing \"Switch to always on voice mode\"
-""")
+    notice = (
+        "TALKITO DEFAULT ASR MODE HAS CHANGED\n"
+        "* The default ASR mode has changed to 'tap-to-talk' for better control.\n"
+        "* Hold the backtick key (`) to toggle voice input.\n"
+        "* You can change this back with: talkito --asr-mode auto-input or typing \"Switch to always on voice mode\""
+    )
+    if is_orcabot_mode():
+        emit_orcabot_notice(notice, level="info", category="asr")
+    else:
+        print(f"\n{notice}\n")
 
     save_shared_state()
 

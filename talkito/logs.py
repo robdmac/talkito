@@ -1,6 +1,11 @@
 """Centralized logging configuration for talkito - provides DRY logging setup across all modules."""
 import logging
+import os
 import sys
+import builtins
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +18,7 @@ _log_file = None
 _is_configured = False
 _original_stderr = None
 _stderr_file = None
+_original_print = None
 
 def setup_logging(log_file_path: Optional[str] = None, mode: str = 'w') -> None:
     """Set up centralized logging configuration with optional file output."""
@@ -142,7 +148,10 @@ def log_message(level: str, message: str, logger_name: Optional[str] = None) -> 
     """Log a message with custom level handling (supports BUFFER and FILTER levels)."""
 
     if level in ["ERROR", "CRITICAL"]:
-        print(message)
+        if is_orcabot_mode():
+            emit_orcabot_notice(message, level=level.lower())
+        else:
+            print(message)
 
     if not _log_enabled:
         return
@@ -192,3 +201,72 @@ def is_logging_enabled() -> bool:
 def get_log_file() -> Optional[Path]:
     """Get the current log file path."""
     return _log_file
+
+def is_orcabot_mode() -> bool:
+    """Check whether TalkiTo is running in Orcabot mode."""
+    if os.environ.get("TALKITO_ORCABOT_ENABLED") == "1":
+        return True
+    if os.environ.get("TALKITO_ORCABOT_MODE") == "1":
+        return True
+    return bool(os.environ.get("ORCABOT_SESSION_ID") and os.environ.get("ORCABOT_PTY_ID"))
+
+def _emit_orcabot_status(payload: dict) -> bool:
+    session_id = os.environ.get("ORCABOT_SESSION_ID")
+    pty_id = os.environ.get("ORCABOT_PTY_ID")
+    if not session_id or not pty_id:
+        return False
+
+    url = f"http://localhost:8081/sessions/{session_id}/ptys/{pty_id}/status"
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status in (200, 204)
+    except Exception:
+        return False
+
+def emit_orcabot_notice(message: str, level: str = "info", category: Optional[str] = None) -> bool:
+    """Send a structured notice to Orcabot instead of printing to console."""
+    if not is_orcabot_mode():
+        return False
+    payload = {
+        "action": "notice",
+        "level": level,
+        "message": message,
+    }
+    if category:
+        payload["category"] = category
+    return _emit_orcabot_status(payload)
+
+def install_orcabot_print_hook() -> None:
+    """Route stdout/stderr print calls to Orcabot in Orcabot mode."""
+    global _original_print
+    if _original_print is not None:
+        return
+
+    if not is_orcabot_mode():
+        return
+
+    _original_print = builtins.print
+
+    def _orcabot_print(*args, **kwargs):
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        file = kwargs.get("file", sys.stdout)
+        if file not in (sys.stdout, sys.stderr):
+            return _original_print(*args, **kwargs)
+        message = sep.join(str(a) for a in args)
+        if end and end != "\n":
+            message += end
+        level = "error" if file is sys.stderr else "info"
+        emit_orcabot_notice(message, level=level)
+
+    builtins.print = _orcabot_print
+
+def restore_print_hook() -> None:
+    """Restore the original print function if it was overridden."""
+    global _original_print
+    if _original_print is None:
+        return
+    builtins.print = _original_print
+    _original_print = None
