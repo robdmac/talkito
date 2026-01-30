@@ -56,10 +56,15 @@ from .state import get_shared_state
 # Import centralized logging utilities
 try:
     from .logs import log_message as _base_log_message
+    from .logs import emit_orcabot_notice, is_orcabot_mode
 except ImportError:
     # Fallback for standalone execution
     def _base_log_message(level: str, message: str, logger_name: str = None):
         print(f"[{level}] {message}")
+    def emit_orcabot_notice(message: str, level: str = "info", category: str = None):
+        return False
+    def is_orcabot_mode() -> bool:
+        return False
 
 # def patch_hf_hub_download():
 
@@ -3084,13 +3089,27 @@ def configure_tts_from_args(args) -> bool:
             from google.cloud import texttospeech  # noqa: F401
             texttospeech.TextToSpeechClient()  # Test instantiation to verify availability
         except ImportError:
-            print(f"Error: {provider_info['install']} required")
-            print("Note: On macOS, grpcio may require a clean reinstall:")
-            print("      pip uninstall grpcio && pip install grpcio --force-reinstall --no-cache-dir")
+            message = f"Error: {provider_info['install']} required"
+            note = (
+                "Note: On macOS, grpcio may require a clean reinstall:\n"
+                "      pip uninstall grpcio && pip install grpcio --force-reinstall --no-cache-dir"
+            )
+            if is_orcabot_mode():
+                emit_orcabot_notice(message, level="error", category="tts")
+                emit_orcabot_notice(note, level="warning", category="tts")
+            else:
+                print(message)
+                print(note)
             return False
         except Exception as e:
-            print(f"Error: Google Cloud credentials not configured or invalid: {e}")
-            print("Please check your GOOGLE_APPLICATION_CREDENTIALS file")
+            message = f"Error: Google Cloud credentials not configured or invalid: {e}"
+            note = "Please check your GOOGLE_APPLICATION_CREDENTIALS file"
+            if is_orcabot_mode():
+                emit_orcabot_notice(message, level="error", category="tts")
+                emit_orcabot_notice(note, level="warning", category="tts")
+            else:
+                print(message)
+                print(note)
             return False
             
         gcloud_language_code = args.tts_language

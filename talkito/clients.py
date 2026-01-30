@@ -38,9 +38,9 @@ import talkito.logs
 from .api import start_api_server
 from . import tts
 from .core import build_comms_config
-from .logs import log_message, setup_logging
+from .logs import log_message, setup_logging, emit_orcabot_notice, is_orcabot_mode
 from .mcp import app, configure_mcp_server, find_available_port
-from .state import get_status_summary, show_tap_to_talk_notification_once, sync_communication_state_from_config, get_shared_state
+from .state import get_status_summary, sync_communication_state_from_config, get_shared_state
 from .templates import ENV_EXAMPLE_TEMPLATE
 
 
@@ -184,7 +184,10 @@ def create_talkito_env():
     with open(talkito_env_path, 'w') as f:
         f.write(ENV_EXAMPLE_TEMPLATE)
     
-    print("Created .talkito.env (copy settings to .env as needed)")
+    if is_orcabot_mode():
+        emit_orcabot_notice("Created .talkito.env (copy settings to .env as needed)", level="info", category="config")
+    else:
+        print("Created .talkito.env (copy settings to .env as needed)")
     return True
 
 
@@ -546,7 +549,10 @@ async def run_terminal_agent_extensions(args) -> int:
         try:
             create_talkito_env()
         except Exception as e:
-            print(f"Error creating .talkito.env: {e}")
+            if is_orcabot_mode():
+                emit_orcabot_notice(f"Error creating .talkito.env: {e}", level="error", category="config")
+            else:
+                print(f"Error creating .talkito.env: {e}")
 
         # Initialize coding terminal agent with streamable-http transport (only if MCP is enabled)
         if mcp_enabled:
@@ -649,13 +655,10 @@ def print_configuration_status(args):
     comms_config = build_comms_config(args)
     sync_communication_state_from_config(comms_config)
 
-    # Show one-time notification about tap-to-talk change if needed
-    show_tap_to_talk_notification_once()
-    
-    # Don't pass configured providers to allow showing actual working providers after fallback
-    status = get_status_summary(
-        tts_override=True, 
-        asr_override=(args.asr_mode != "off")
+        # Don't pass configured providers to allow showing actual working providers after fallback
+        status = get_status_summary(
+            tts_override=True, 
+            asr_override=(args.asr_mode != "off")
     )
 
     if getattr(args, "orcabot", False):
