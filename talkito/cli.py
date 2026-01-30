@@ -246,6 +246,12 @@ def parse_arguments():
 def print_configuration_status(args):
     """Print the current TTS/ASR and communication configuration"""
 
+    if getattr(args, "orcabot", False):
+        args.asr_mode = 'off'
+        args.asr_provider = None
+        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = 'off'
+        get_shared_state().set_asr_enabled(False)
+
     # Initialize providers early (triggers availability checks and download prompts)
     initialize_providers_early(args)
     
@@ -274,12 +280,29 @@ def print_configuration_status(args):
         asr_override=(args.asr_mode != "off")
     )
 
+    if getattr(args, "orcabot", False):
+        shared_state = get_shared_state()
+        tts.emit_orcabot_tts_status(
+            enabled=shared_state.get_tts_enabled(),
+            initialized=shared_state.get_tts_initialized(),
+            mode=shared_state.tts_mode,
+            provider=shared_state.get_tts_provider(),
+            voice=tts.get_tts_config().get('voice'),
+        )
+        return
+
     # Print with the same format but add the note about .talkito.env
     print(f"╭ {status}")
 
 async def run_talkito_command(args) -> int:
     """Run talkito with the given arguments"""
     global core_instance
+
+    if getattr(args, "orcabot", False):
+        args.asr_mode = 'off'
+        args.asr_provider = None
+        os.environ['TALKITO_PREFERRED_ASR_PROVIDER'] = 'off'
+        get_shared_state().set_asr_enabled(False)
 
     # Check for 'off' provider from environment if not specified on command line
     if not args.tts_provider:

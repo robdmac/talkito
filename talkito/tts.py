@@ -1300,6 +1300,46 @@ def _emit_orcabot_audio(audio_path: Optional[str] = None,
         return False
 
 
+def _emit_orcabot_status(payload: Dict[str, Any]) -> bool:
+    if requests is None:
+        log_message("ERROR", "Orcabot status requested but requests is not available")
+        return False
+    session_id = os.environ.get("ORCABOT_SESSION_ID")
+    pty_id = os.environ.get("ORCABOT_PTY_ID")
+    if not session_id or not pty_id:
+        log_message("WARNING", "Orcabot status requested but ORCABOT_SESSION_ID/ORCABOT_PTY_ID not set")
+        return False
+
+    try:
+        resp = requests.post(
+            f"http://localhost:8081/sessions/{session_id}/ptys/{pty_id}/status",
+            json=payload,
+            timeout=5
+        )
+        if resp.status_code not in (200, 204):
+            log_message("ERROR", f"Orcabot status post failed: status={resp.status_code} body={resp.text[:200]}")
+        return resp.status_code in (200, 204)
+    except Exception as e:
+        log_message("ERROR", f"Failed to emit status via Orcabot: {e}")
+        return False
+
+
+def emit_orcabot_tts_status(enabled: bool,
+                            initialized: bool,
+                            mode: Optional[str],
+                            provider: Optional[str],
+                            voice: Optional[str]) -> bool:
+    payload = {
+        "action": "tts_status",
+        "enabled": bool(enabled),
+        "initialized": bool(initialized),
+        "mode": mode or "unknown",
+        "provider": provider or "unknown",
+        "voice": voice or "unknown",
+    }
+    return _emit_orcabot_status(payload)
+
+
 def _stop_orcabot_audio() -> bool:
     return _emit_orcabot_audio(action="stop")
 

@@ -2430,7 +2430,8 @@ def advance_display_chars(s: str, start: int, n: int) -> int:
         printed += 1
     return i
 
-async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file: str = None) -> int:
+async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file: str = None,
+                      passthrough_output: bool = False) -> int:
     """Run the command and process its output with PTY support for colors"""
     global current_master_fd, current_proc, _original_tty_attrs
 
@@ -2598,10 +2599,18 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     data = await async_read(current_master_fd, PTY_READ_SIZE)
                     if not data:
                         break
+                    raw_data = data
 
-                    # Prepend any incomplete UTF-8 bytes from previous read
+                    # Prepend any incomplete UTF-8 bytes from previous read for processing
                     data = incomplete_utf8_buffer + data
                     incomplete_utf8_buffer = b""
+
+                    if passthrough_output:
+                        try:
+                            data.decode('utf-8')
+                        except UnicodeDecodeError as e:
+                            incomplete_utf8_buffer = data[e.start:]
+                            data = data[:e.start]
 
                     # Handle record mode - write raw data to file
                     if recorder.enabled:
@@ -2632,44 +2641,48 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         last_redraw_time = current_time
 
                     # Check if we should modify the output for ASR indicator or partial transcript
-                    output_data = data
+                    if passthrough_output:
+                        # In passthrough mode, write raw output and skip all UI modifications
+                        output_data = raw_data
+                    else:
+                        output_data = data
 
-                    try:
-                        data_str = output_data.decode('utf-8')
-                    except UnicodeDecodeError as e:
-                        # Save incomplete bytes for next iteration
-                        incomplete_utf8_buffer = output_data[e.start:]
-                        output_data = output_data[:e.start]
-                        data_str = output_data.decode('utf-8')
+                        try:
+                            data_str = output_data.decode('utf-8')
+                        except UnicodeDecodeError as e:
+                            # Save incomplete bytes for next iteration
+                            incomplete_utf8_buffer = output_data[e.start:]
+                            output_data = output_data[:e.start]
+                            data_str = output_data.decode('utf-8')
 
-                    if not in_input and active_profile.input_start:
-                        for input_start in active_profile.input_start:
-                            if input_start in data_str:
-                                start_idx = data_str.find(input_start) + len(input_start)
-                                log_message("DEBUG", f"Found input start at position {start_idx}")
-                                in_input = True
-                                break
+                        if not in_input and active_profile.input_start:
+                            for input_start in active_profile.input_start:
+                                if input_start in data_str:
+                                    start_idx = data_str.find(input_start) + len(input_start)
+                                    log_message("DEBUG", f"Found input start at position {start_idx}")
+                                    in_input = True
+                                    break
 
-                    # Display partial transcript if available and we're in input area
-                    if asr_state.current_partial and in_input:
-                        data_str = insert_partial_transcript(data_str, asr_state, active_profile)
-                        # data_str = data_str.replace('\u200b', ' '*len(asr_state.current_partial))
+                        # Display partial transcript if available and we're in input area
+                        if asr_state.current_partial and in_input:
+                            data_str = insert_partial_transcript(data_str, asr_state, active_profile)
+                            # data_str = data_str.replace('\u200b', ' '*len(asr_state.current_partial))
 
-                    in_input = False
+                        in_input = False
 
-                    output_data = data_str.encode('utf-8')
-                    output_data = output_data.replace(SPACE_THEN_BACK, b'')
+                        output_data = data_str.encode('utf-8')
+                        output_data = output_data.replace(SPACE_THEN_BACK, b'')
 
-                    # Show microphone emoji if ASR is active
-                    show_mic_for_auto = asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input()
-                    show_mic_for_tap_to_talk = asr_mode == "tap-to-talk" and asr_state.tap_to_talk_active
+                        # Show microphone emoji if ASR is active
+                        show_mic_for_auto = asr_state.asr_auto_started and asr_state.waiting_for_input and asr_mode != "off" and not asr.is_ignoring_input()
+                        show_mic_for_tap_to_talk = asr_mode == "tap-to-talk" and asr_state.tap_to_talk_active
 
-                    # log_message("DEBUG", f"modify_prompt_for_asr against output_data {output_data}")
-                    if show_mic_for_auto or show_mic_for_tap_to_talk:
-                        output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
-                    # elif tts.is_speaking():
-                    #     output_data = modify_prompt_for_asr(output_data, active_profile.input_start,
-                    #                                         active_profile.input_speaker_replace)
+                        # log_message("DEBUG", f"modify_prompt_for_asr against output_data {output_data}")
+                        if show_mic_for_auto or show_mic_for_tap_to_talk:
+                            output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
+                        # elif tts.is_speaking():
+                        #     output_data = modify_prompt_for_asr(output_data, active_profile.input_start,
+                        #                                         active_profile.input_speaker_replace)
 
                     # Try direct write first
                     try:
@@ -3430,8 +3443,8 @@ class TalkitoCore:
         """Log a message if logging is enabled"""
         log_message(level, message, __name__)  # Use centralized log_message with module name
     
-    async def run_command(self, args: List[str], asr_mode: str = "auto-input", 
-                         record_file: str = None) -> int:
+    async def run_command(self, args: List[str], asr_mode: str = "auto-input",
+                         record_file: str = None, passthrough_output: bool = False) -> int:
         """Run a command with TTS and optional ASR support"""
         # Update globals that are used by helper functions
         global current_master_fd, current_proc, verbosity_level, active_profile
@@ -3454,7 +3467,7 @@ class TalkitoCore:
             comm_manager = self.comm_manager
         
         # Call the existing run_command function
-        result = await run_command(args, asr_mode, record_file)
+        result = await run_command(args, asr_mode, record_file, passthrough_output)
         
         # Update instance variables
         self.current_master_fd = current_master_fd
@@ -3685,6 +3698,7 @@ async def run_with_talkito(command: List[str], args) -> int:
             command,
             asr_mode=shared_state.asr_mode,
             record_file=args.record,
+            passthrough_output=bool(getattr(args, "orcabot", False)),
         )
     except KeyboardInterrupt:
         signal_handler(signal.SIGINT)

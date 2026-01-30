@@ -36,6 +36,7 @@ import urllib.request
 import talkito.logs
 
 from .api import start_api_server
+from . import tts
 from .core import build_comms_config
 from .logs import log_message, setup_logging
 from .mcp import app, configure_mcp_server, find_available_port
@@ -656,6 +657,17 @@ def print_configuration_status(args):
         tts_override=True, 
         asr_override=(args.asr_mode != "off")
     )
+
+    if getattr(args, "orcabot", False):
+        shared_state = get_shared_state()
+        tts.emit_orcabot_tts_status(
+            enabled=shared_state.get_tts_enabled(),
+            initialized=shared_state.get_tts_initialized(),
+            mode=shared_state.tts_mode,
+            provider=shared_state.get_tts_provider(),
+            voice=tts.get_tts_config().get('voice'),
+        )
+        return
 
     # Print with the same format but add the note about .talkito.env
     print(status)
