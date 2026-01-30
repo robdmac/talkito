@@ -655,10 +655,10 @@ def print_configuration_status(args):
     comms_config = build_comms_config(args)
     sync_communication_state_from_config(comms_config)
 
-        # Don't pass configured providers to allow showing actual working providers after fallback
-        status = get_status_summary(
-            tts_override=True, 
-            asr_override=(args.asr_mode != "off")
+    # Don't pass configured providers to allow showing actual working providers after fallback
+    status = get_status_summary(
+        tts_override=True,
+        asr_override=(args.asr_mode != "off")
     )
 
     if getattr(args, "orcabot", False):
