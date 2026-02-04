@@ -123,7 +123,7 @@ def update_claude_settings():
 
 
 def update_claude_hooks(webhook_port=8080):
-    """Update Claude hooks to use webhook server with the correct port"""
+    """Update Claude hooks to use webhook server with the correct port. Merges with existing hooks."""
     settings_file = Path(".claude") / "settings.local.json"
 
     # Create .claude directory if it doesn't exist
@@ -140,29 +140,46 @@ def update_claude_hooks(webhook_port=8080):
         except Exception as e:
             print(f"Warning: Could not load existing settings.json: {e}")
             return False
-    
+
     # Define hook types needed for making sure we ask questions to the user
     hook_types = ["PreToolUse", "PostToolUse"]
-    
+
     # Create hooks structure if it doesn't exist
     if "hooks" not in settings:
         settings["hooks"] = {}
-    
-    # Update each hook to use curl command with the correct port
+
+    # Identifier to find/update our hooks
+    talkito_marker = "talkito/hook"
+
+    # Update each hook, merging with existing hooks
     for hook_type in hook_types:
         curl_cmd = f'curl -s -X POST http://127.0.0.1:{webhook_port}/hook -H \'Content-Type: application/json\' -d \'{{\"hook_type\": \"{hook_type}\", \"timestamp\": \"\'$(date -u +%Y-%m-%dT%H:%M:%SZ)\'\"}}\' > /dev/null 2>&1 || true'
-        
-        settings["hooks"][hook_type] = [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": curl_cmd
-                    }
-                ]
-            }
+
+        talkito_hook = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": curl_cmd
+                }
+            ]
+        }
+
+        existing_hooks = settings["hooks"].get(hook_type, [])
+
+        # Remove any existing talkito hooks (identified by the marker in command)
+        filtered_hooks = [
+            h for h in existing_hooks
+            if not any(
+                talkito_marker in hook.get("command", "")
+                for hook in h.get("hooks", [])
+                if hook.get("type") == "command"
+            )
         ]
-    
+
+        # Add our hook to the list
+        filtered_hooks.append(talkito_hook)
+        settings["hooks"][hook_type] = filtered_hooks
+
     # Save updated settings
     try:
         with open(settings_file, 'w') as f:
