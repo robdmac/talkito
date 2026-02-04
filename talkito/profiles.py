@@ -299,6 +299,7 @@ COMMON_SKIP_PATTERNS = [
     (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('),
     (3, r'^[^A-Za-z0-9]*[A-Za-z][a-z]+(?:-[a-z]+)*(?:\.\.\.|…|\.)'),
     (3, r'^∴'),
+    (3, r'talkito:'),
 
     (4, r'^\^C '),
     (4, r'^░█'),
@@ -315,11 +316,11 @@ COMMON_SKIP_PATTERNS = [
     (4, r'===|▀▀▀▀|………|╌╌'),
     (4, r'stop hook'),                              # Claude Code hook status indicator
     (4, r'[Pp]roofing…|[Tt]hinking…'),              # Claude Code thinking/status indicators
-    (4, r'^[✳✶✻✽✢·•]\s'),                           # Spinner/status indicator lines
+    (4, r'^[✳✶✻✽✢·]\s'),                            # Spinner/status indicator lines (• excluded: used as codex response prefix)
     (4, r'oov|oof|oo[a-z]ing'),                     # Partial "Grooving/Proofing" fragments
     (4, r'ought for \d'),                           # Timing indicator "(thought for Xs)" fragments
     (4, r'^\s+[a-z]\s+.*ought'),                    # Garbled timing indicator fragments
-    (4, r'^[✳✶✻✽✢·•]'),                             # Single spinner characters (no space needed)
+    (4, r'^[✳✶✻✽✢·]'),                              # Single spinner characters (no space needed, • excluded: codex response prefix)
 ]
 
 
@@ -349,7 +350,6 @@ CLAUDE_PROFILE = Profile(
 
         # Level 3: Filter unless -vvv (tool calling details, implementation details)
         (3, r'Claude needs your permission'), # Claude needs your permission to use X
-        (3, r'talkito:'),
         (3, r'^│'),
         (3, r'^\s*/'),
 
@@ -376,7 +376,7 @@ CLAUDE_PROFILE = Profile(
 CODEX_PROFILE = Profile(
     supported=True,
     name='codex',
-    response_prefix='⏺',
+    response_prefix='•',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
@@ -388,10 +388,45 @@ CODEX_PROFILE = Profile(
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         (2, r'^    '),
-        (3, r'talkito:'),
         (3, r'^\s*[└□✔]'),
         (3, r'^[^\s•]'),  # Skip lines not starting with space/tab or •
         (3, r'• (Ran|Explored|Edited|Added|Updated|Called)'),
+        (3, r'^› '),
+        (3, r'esc to '),
+        (3, r'\? for shortcuts'),
+        (3, r'^>>'),
+
+        (4, r'^✨⬆️'),
+        (4, r'^[A-Za-z][a-z]'),
+    ],
+    skip_progress=[],
+    strip_symbols=[],
+    prompt_patterns=[
+        r'^▌',
+    ],
+    input_start=[';3H'],
+    input_mic_replace=';3H🎤',
+    input_speaker_replace=';3H📢',
+)
+
+GEMINI_PROFILE = Profile(
+    supported=True,
+    name='gemini',
+    response_prefix='✦',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
+    question_prefix=r'│ Do',
+    raw_skip_patterns=[
+        r'\[38;5;153m│.*\[38;5;246m\d+',  # Box drawing + line numbers
+        r'\[38;5;246m\d+\s*\[39m',  # Direct line numbers
+    ],
+    exception_patterns=[
+        (0, r' Gemini'),
+    ],
+    skip_patterns=COMMON_SKIP_PATTERNS + [
+        (2, r'^    '),
+        (3, r'^\s*[└□✔]'),
+        (3, r'^[^\s✦]'),  # Skip lines not starting with space/tab or ✦ (gemini response prefix)
+        (3, r'✦ (Ran|Explored|Edited|Added|Updated|Called)'),
         (3, r'^› '),
         (3, r'esc to '),
         (3, r'\? for shortcuts'),
@@ -554,6 +589,7 @@ DEFAULT_PROFILE = Profile(
 PROFILES: Dict[str, Profile] = {
     'claude': CLAUDE_PROFILE,
     'codex': CODEX_PROFILE,
+    'gemini': GEMINI_PROFILE,
     'aider': AIDER_PROFILE,
     'ollama': OLLAMA_PROFILE,
     'pipet': PIPET_PROFILE,
