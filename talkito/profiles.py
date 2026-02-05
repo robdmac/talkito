@@ -412,15 +412,17 @@ CODEX_PROFILE = Profile(
 GEMINI_PROFILE = Profile(
     supported=True,
     name='gemini',
+    needs_full_lines=True,
     response_prefix='✦',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
-    question_prefix=r'│ Do',
+    question_prefix=r'^\s*Do you',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',  # Box drawing + line numbers
         r'\[38;5;246m\d+\s*\[39m',  # Direct line numbers
+        r'\x1b\[48;5;234m',  # Gemini input area background color
     ],
     exception_patterns=[
-        (0, r' Gemini'),
+        (0, r'^✦[A-Za-z]'),          # Response lines starting with ✦ + letter
     ],
     skip_patterns=COMMON_SKIP_PATTERNS + [
         (2, r'^    '),
@@ -434,15 +436,31 @@ GEMINI_PROFILE = Profile(
 
         (4, r'^✨⬆️'),
         (4, r'^[A-Za-z][a-z]'),
+
+        # Gemini CLI UI elements
+        (4, r'Type your message'),           # Input placeholder text
+        (4, r'~/'),                          # Working directory path in status bar
+        (4, r'no sandbox'),                  # Sandbox status indicator
+        (4, r'MCP server'),                  # MCP server count
+        (4, r'\.md file'),                   # .md file count
+        (4, r'Use Enter to select'),         # Selection hint
+        (4, r'Gemini API Key'),              # Setup menu item
+        (4, r'Login with Google'),           # Setup menu item
+        (4, r'Vertex AI'),                   # Setup menu item
+        (4, r'Terms of Service'),            # TOS text
+        (4, r'Privacy Notice'),              # Privacy notice text
+        (4, r'Get started'),                 # Setup heading
+        (4, r'Enter Gemini API Key'),        # API key prompt
     ],
     skip_progress=[],
-    strip_symbols=[],
+    strip_symbols=['✦'],
     prompt_patterns=[
-        r'^▌',
+        r'^\s*>\s+',        # Line starting with > prompt (Gemini input prompt)
+        r'^\s*>\s*$',       # Just the > prompt alone
     ],
-    input_start=[';3H'],
-    input_mic_replace=';3H🎤',
-    input_speaker_replace=';3H📢',
+    input_start=['> '],
+    input_mic_replace='🎤',
+    input_speaker_replace='📢',
 )
 
 
