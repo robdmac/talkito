@@ -223,6 +223,13 @@ def _trim_after_cursor_move(s):
     if positions:
         # Trim at the earliest cursor movement
         trim_pos = min(positions)
+        # Check if there's actual text content before the cursor movement
+        # If the part before is only escape codes/whitespace, content comes AFTER
+        # (e.g. Gemini CLI prefixes response lines with cursor-up/column/down sequences)
+        before_text = ANSI_SIMPLE_PATTERN.sub('', s[:trim_pos]).replace('\x1B', '').strip()
+        if not before_text:
+            log_message("DEBUG", f"_trim_after_cursor_move: no text before cursor movement at position {trim_pos}, keeping full string for ANSI cleanup")
+            return s
         log_message("DEBUG", f"_trim_after_cursor_move: trimming at position {trim_pos}, found {len(positions)} cursor movements")
         return s[:trim_pos]
 
