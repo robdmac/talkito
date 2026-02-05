@@ -1813,13 +1813,19 @@ class ElevenLabsProvider(TTSProvider):
     
     def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
         voice_id = self.get_config_value('voice_id', elevenlabs_voice_id)
-        api_key = os.environ.get('ELEVENLABS_API_KEY')
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+        # Use broker URL if available, otherwise direct API
+        base_url = os.environ.get('ELEVENLABS_BASE_URL', 'https://api.elevenlabs.io')
+        url = f"{base_url}/v1/text-to-speech/{voice_id}"
+
+        # Only include API key header if not going through broker
         headers = {
             'Accept': 'audio/mpeg',
             'Content-Type': 'application/json',
-            'xi-api-key': api_key
         }
+        if not base_url.startswith('http://localhost'):
+            api_key = os.environ.get('ELEVENLABS_API_KEY')
+            headers['xi-api-key'] = api_key
         
         data = {
             'text': text,
@@ -1845,17 +1851,25 @@ class DeepgramProvider(TTSProvider):
 
     def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
         model = self.get_config_value('model', deepgram_voice_model)  # <-- use 'model'
-        api_key = os.environ.get('DEEPGRAM_API_KEY')
-        if not api_key or not model:
-            log_message("ERROR", "Deepgram missing API key or model")
+        if not model:
+            log_message("ERROR", "Deepgram missing model")
             return None
 
-        url = f"https://api.deepgram.com/v1/speak?model={model}"
+        # Use broker URL if available, otherwise direct API
+        base_url = os.environ.get('DEEPGRAM_BASE_URL', 'https://api.deepgram.com')
+        url = f"{base_url}/v1/speak?model={model}"
+
         headers = {
-            'Authorization': f'Token {api_key}',
             'Accept': 'audio/mpeg',
             'Content-Type': 'application/json',
         }
+        # Only add auth header if not going through broker
+        if not base_url.startswith('http://localhost'):
+            api_key = os.environ.get('DEEPGRAM_API_KEY')
+            if not api_key:
+                log_message("ERROR", "Deepgram missing API key")
+                return None
+            headers['Authorization'] = f'Token {api_key}'
         try:
             req = Request(url,
                          data=json.dumps({'text': text}).encode('utf-8'),
