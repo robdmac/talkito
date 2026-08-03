@@ -50,7 +50,7 @@ install_requires = [
     "flask>=2.0.0",
     "waitress>=2.0.0",
     "soundfile>=0.12.0",
-    "numpy<2.0",
+    "numpy",
     "fastmcp>=0.1.0",
 ]
 
@@ -60,7 +60,7 @@ extras_require = {
         "kokoro>=0.9.4",
         "faster-whisper>=1.0.0",
     ],
-    # NeuTTS local models; note these require numpy>=2.2.6, which conflicts with the core numpy<2.0 pin
+    # NeuTTS local models; these require numpy>=2.2.6, which is why core numpy carries no upper bound
     'neutts': [
         "neutts>=1.4.0",
     ],
