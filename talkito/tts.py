@@ -209,13 +209,14 @@ kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'Jasper')  # Default KittenT
 kokoro_language = os.environ.get('KOKORO_LANGUAGE', 'a')  # Default Kokoro language (American English)
 kokoro_voice = os.environ.get('KOKORO_VOICE', 'af_heart')  # Default Kokoro voice
 kokoro_speed = os.environ.get('KOKORO_SPEED', '1.0')  # Default Kokoro speed
-neutts_model = os.environ.get('NEUTTS_MODEL', 'neuphonic/neutts-nano')  # Default NeuTTS backbone repo
-neutts_voice = os.environ.get('NEUTTS_VOICE', 'emily')  # Bundled reference speaker, or a path to a reference .wav
-neutts_ref_text = os.environ.get('NEUTTS_REF_TEXT', '')  # Transcript of the reference audio, when using a custom .wav
-neutts2e_model = os.environ.get('NEUTTS2E_MODEL', 'neuphonic/neutts-2e')  # Default NeuTTS 2E backbone repo
+# Only the quantized 2E backbone is shipped: it is the one NeuTTS configuration that runs faster
+# than real time (RTF ~0.9 vs ~2.4 for the fp32 models) and the only one that supports streaming.
+# The nano and fp32 variants live on the benchmark/tts-model-comparison branch.
+neutts2e_model = os.environ.get('NEUTTS2E_MODEL', 'neuphonic/neutts-2e-q4-gguf')  # Default NeuTTS 2E backbone
 neutts2e_voice = os.environ.get('NEUTTS2E_VOICE', 'emily')  # Default NeuTTS 2E speaker
 neutts2e_emotion = os.environ.get('NEUTTS2E_EMOTION', 'neutral')  # Default NeuTTS 2E emotion
-neutts_codec = os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec')  # Codec repo shared by both NeuTTS models
+# The decoder-only ONNX codec avoids ~3GB of torch codec and semantic encoder that inference never runs
+neutts_codec = os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec-onnx-decoder-int8')
 neutts_device = os.environ.get('NEUTTS_DEVICE', 'cpu')  # Device for the NeuTTS backbone and codec
 NEUTTS_SAMPLE_RATE = 24000  # Both NeuTTS models emit 24 kHz audio
 NEUTTS_VARIANT_SEP = '|'  # Separates backbone from codec inside a neutts cache variant
@@ -314,26 +315,18 @@ TTS_PROVIDERS = {
         'install': 'pip install \'kokoro>=0.9.4\' soundfile phonemizer',
         'config_keys': ['language', 'voice', 'speed']
     },
-    'neutts': {
-        'env_var': None,  # NeuTTS doesn't need an API key
-        'model_var': 'neutts_model',
-        'voice_var': 'neutts_voice',
-        'display_name': 'NeuTTS Nano',
-        'install': 'pip install neutts soundfile',
-        'config_keys': ['model', 'voice']
-    },
     'neutts2e': {
         'env_var': None,  # NeuTTS 2E doesn't need an API key
         'model_var': 'neutts2e_model',
         'voice_var': 'neutts2e_voice',
         'display_name': 'NeuTTS 2E',
-        'install': 'pip install neutts soundfile',
+        'install': 'pip install neutts llama-cpp-python soundfile',
         'config_keys': ['model', 'voice', 'emotion']
     }
 }
 
 # Local providers whose models are loaded in-process and cached by (provider, variant)
-LOCAL_MODEL_PROVIDERS = ('kokoro', 'kittentts', 'neutts', 'neutts2e')
+LOCAL_MODEL_PROVIDERS = ('kokoro', 'kittentts', 'neutts2e')
 
 # Available voices for each TTS provider (organized by language using BCP 47 codes)
 AVAILABLE_VOICES = {
@@ -441,10 +434,6 @@ AVAILABLE_VOICES = {
         'it-IT': ['if_sara', 'im_nicola'],
         'pt-BR': ['pf_dora', 'pm_alex', 'pm_santa']
     },
-    'neutts': {
-        # NeuTTS clones any reference sample; these are the references bundled with the neutts package
-        'en-US': ['emily', 'paul', 'sophie', 'steven']
-    },
     'neutts2e': {
         'en-US': ['emily', 'paul', 'sophie', 'steven']
     },
@@ -498,25 +487,21 @@ def _model_variant(provider: str) -> str:
         return _normalize_kokoro_lang(config.get('language') or kokoro_language)
     if provider == 'kittentts':
         return kittentts_model
-    if provider in ('neutts', 'neutts2e'):
+    if provider == 'neutts2e':
         # The codec is part of the identity: the same backbone built on a different codec is a
         # different model, so it must not be served from the same cache slot
-        if provider == 'neutts':
-            config = get_tts_config()
-            backbone = str(config.get('model') or neutts_model)
-        else:
-            backbone = neutts2e_model
+        config = get_tts_config()
+        backbone = str(config.get('model') or neutts2e_model)
         return f"{backbone}{NEUTTS_VARIANT_SEP}{neutts_codec}"
     return ''
 
 
-def _split_neutts_variant(variant: str, provider: str) -> Tuple[str, str]:
+def _split_neutts_variant(variant: str) -> Tuple[str, str]:
     """Split a neutts cache variant back into its backbone repo and codec repo."""
-    default_backbone = neutts2e_model if provider == 'neutts2e' else neutts_model
     if not variant:
-        return default_backbone, neutts_codec
+        return neutts2e_model, neutts_codec
     backbone, _, codec = variant.partition(NEUTTS_VARIANT_SEP)
-    return backbone or default_backbone, codec or neutts_codec
+    return backbone or neutts2e_model, codec or neutts_codec
 
 
 def _create_model_instance(provider: str, variant: str = ''):
@@ -571,8 +556,7 @@ def _create_model_instance(provider: str, variant: str = ''):
         log_message("DEBUG", f"KittenTTS(model_name) with model_name = {model_name}")
         return KittenTTS(model_name)
 
-    elif provider in ('neutts', 'neutts2e'):
-        # Both NeuTTS backbones share one package and one codec, and differ only in the class used
+    elif provider == 'neutts2e':
         try:
             with suppress_ai_warnings():
                 import neutts  # noqa: F401
@@ -584,33 +568,20 @@ def _create_model_instance(provider: str, variant: str = ''):
             )
 
         with suppress_ai_warnings():
-            from neutts import NeuTTS, NeuTTS2E
+            from neutts import NeuTTS2E
 
-        model_class = NeuTTS2E if provider == 'neutts2e' else NeuTTS
-        backbone_repo, codec_repo = _split_neutts_variant(variant, provider)
+        backbone_repo, codec_repo = _split_neutts_variant(variant)
         resolved_backbone = _resolve_neutts_backbone(backbone_repo)
+        log_message("DEBUG", f"Creating NeuTTS2E(backbone_repo='{resolved_backbone}', codec_repo='{codec_repo}')")
 
-        extra: Dict[str, Any] = {}
-        if model_class is NeuTTS:
-            # Resolving a GGUF repo to a file path loses the repo-id language lookup, so pass the
-            # language explicitly; NeuTTS2E is a BPE model and loads no phonemizer at all
-            try:
-                from neutts import BACKBONE_LANGUAGE_MAP
-                language = BACKBONE_LANGUAGE_MAP.get(backbone_repo)
-            except ImportError:
-                language = None
-            if language and resolved_backbone != backbone_repo:
-                extra['language'] = language
-
-        log_message("DEBUG", f"Creating {model_class.__name__}(backbone_repo='{resolved_backbone}', codec_repo='{codec_repo}')")
+        # 2E is a BPE model, so it loads no phonemizer and needs no language argument
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            return model_class(
+            return NeuTTS2E(
                 backbone_repo=resolved_backbone,
                 backbone_device=neutts_device,
                 codec_repo=_resolve_neutts_codec(codec_repo),
                 codec_device=neutts_device,
-                **extra,
             )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -654,54 +625,6 @@ def _resolve_neutts_backbone(backbone_repo: str) -> str:
     except Exception as e:
         log_message("WARNING", f"Could not resolve GGUF backbone {backbone_repo}, passing through: {e}")
     return backbone_repo
-
-
-def _load_bundled_neutts_reference(name: str) -> Tuple[Any, str]:
-    """Load one of the pre-encoded speaker references bundled with the neutts package."""
-    import torch
-    from neutts import NeuTTS2E
-
-    sample_dir = Path(NeuTTS2E.SAMPLE_DIR)
-    codes_path, text_path = sample_dir / f"{name}.pt", sample_dir / f"{name}.txt"
-    if not codes_path.is_file():
-        available = ', '.join(sorted(p.stem for p in sample_dir.glob('*.pt')))
-        raise ValueError(
-            f"Unknown NeuTTS reference voice '{name}'; bundled voices are: {available}. "
-            f"Set NEUTTS_VOICE to one of those, or to the path of a reference .wav"
-        )
-    return torch.load(codes_path), text_path.read_text().strip()
-
-
-def _neutts_reference(model: Any, voice: str, ref_text: str) -> Tuple[Any, str]:
-    """Resolve a NeuTTS voice to (ref_codes, ref_text), caching the costly encode step on the model."""
-    cache = getattr(model, '_talkito_ref_cache', None)
-    if cache is None:
-        cache = {}
-        setattr(model, '_talkito_ref_cache', cache)
-
-    key = (voice, ref_text)
-    if key in cache:
-        return cache[key]
-
-    if os.path.isfile(voice):
-        text = ref_text
-        if not text:
-            sidecar = os.path.splitext(voice)[0] + '.txt'
-            if os.path.isfile(sidecar):
-                with open(sidecar) as f:
-                    text = f.read().strip()
-        if not text:
-            raise ValueError(
-                f"NeuTTS reference audio '{voice}' needs its transcript; "
-                f"set NEUTTS_REF_TEXT or place a matching .txt beside the .wav"
-            )
-        resolved = (model.encode_reference(voice), text)
-    else:
-        codes, bundled_text = _load_bundled_neutts_reference(voice)
-        resolved = (codes, ref_text or bundled_text)
-
-    cache[key] = resolved
-    return resolved
 
 
 def _evict_stale_models_locked() -> None:
@@ -762,8 +685,8 @@ def _model_needs_download(provider: str, variant: str) -> bool:
 
     if provider == 'kokoro':
         return not check_model_cached('kokoro', KOKORO_REPO_ID)
-    if provider in ('neutts', 'neutts2e'):
-        backbone_repo, codec_repo = _split_neutts_variant(variant, provider)
+    if provider == 'neutts2e':
+        backbone_repo, codec_repo = _split_neutts_variant(variant)
         return not check_model_cached(provider, backbone_repo, codec_repo)
     return not check_model_cached(provider, variant or kittentts_model)
 
@@ -1514,7 +1437,6 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
 
     # NeuTTS (nano backbone) and NeuTTS 2E - one package, two backbones
     for neutts_provider, description in (
-        ("neutts", "Voice-cloning TTS from a reference sample (no API key required)"),
         ("neutts2e", "Emotional TTS with built-in speakers (no API key required)"),
     ):
         neutts_available = False
@@ -1537,7 +1459,7 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
         # Check if model is cached
         if neutts_available:
             from .models import check_model_cached
-            backbone = neutts2e_model if neutts_provider == 'neutts2e' else neutts_model
+            backbone = neutts2e_model
             if check_model_cached(neutts_provider, backbone, neutts_codec):
                 neutts_note += " [cached]"
             else:
@@ -1947,7 +1869,7 @@ def validate_provider_config(provider: str, silent: bool = False) -> bool:
                     import kokoro  # noqa: F401
                 elif provider == 'kittentts':
                     import kittentts  # noqa: F401
-                elif provider in ('neutts', 'neutts2e'):
+                elif provider == 'neutts2e':
                     # find_spec avoids neutts' ~5s / ~466MB eager import of the neucodec torch stack
                     if importlib.util.find_spec('neutts') is None:
                         raise ImportError("neutts is not installed")
@@ -2268,38 +2190,6 @@ class KokoroTTSProvider(TTSProvider):
             log_message("ERROR", f"KokoroTTS synthesis error: {e}")
             return None
 
-class NeuTTSProvider(TTSProvider):
-    """NeuTTS provider implementation, cloning a reference voice sample."""
-
-    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
-        try:
-            import soundfile as sf
-
-            if not text or not text.strip():
-                log_message("WARNING", "NeuTTS: Empty text provided, skipping synthesis")
-                return None
-
-            config = get_tts_config()
-            backbone = self.config.get('model') or config.get('model') or neutts_model
-            voice = self.config.get('voice') or config.get('voice') or neutts_voice
-            ref_text = self.config.get('ref_text') or neutts_ref_text
-
-            model = get_cached_local_model('neutts', variant=backbone)
-            if model is None:
-                raise RuntimeError("NeuTTS model unavailable")
-
-            ref_codes, resolved_ref_text = _neutts_reference(model, voice, ref_text)
-            log_message("DEBUG", f"{text=} {voice=} {backbone=}")
-            audio = model.infer(text, ref_codes, resolved_ref_text)
-
-            buf = io.BytesIO()
-            sf.write(buf, audio, NEUTTS_SAMPLE_RATE, format='WAV')
-            return buf.getvalue(), ".wav"
-        except Exception as e:
-            log_message("ERROR", f"NeuTTS synthesis error: {e}")
-            return None
-
-
 SPEECH_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
                "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
                "seventeen", "eighteen", "nineteen"]
@@ -2455,7 +2345,6 @@ PROVIDER_CLASSES = {
     'deepgram': DeepgramProvider,
     'kittentts': KittenTTSProvider,
     'kokoro': KokoroTTSProvider,
-    'neutts': NeuTTSProvider,
     'neutts2e': NeuTTS2EProvider,
 }
 
@@ -3657,19 +3546,14 @@ def configure_tts_from_args(args) -> bool:
         
         # Background preloading started earlier in initialization
         
-    elif tts_provider in ('neutts', 'neutts2e'):
+    elif tts_provider == 'neutts2e':
         # Skip the expensive neutts import - it is validated during actual model loading
         log_message("DEBUG", f"Skipping {tts_provider} validation - will validate during model loading")
 
-        global neutts_voice, neutts_model, neutts2e_voice, neutts2e_model
-        if tts_provider == 'neutts':
-            if args.tts_voice:
-                neutts_voice = args.tts_voice
-            log_message("INFO", f"Using NeuTTS with model: {neutts_model} and voice: {neutts_voice}")
-        else:
-            if args.tts_voice:
-                neutts2e_voice = args.tts_voice
-            log_message("INFO", f"Using NeuTTS 2E with model: {neutts2e_model} and speaker: {neutts2e_voice}")
+        global neutts2e_voice, neutts2e_model
+        if args.tts_voice:
+            neutts2e_voice = args.tts_voice
+        log_message("INFO", f"Using NeuTTS 2E with model: {neutts2e_model} and speaker: {neutts2e_voice}")
 
         # Background preloading started earlier in initialization
 

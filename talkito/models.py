@@ -174,7 +174,7 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
         elif provider == 'kokoro':
             repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
             return _hf_cached(repo_id=repo)
-        elif provider in ('neutts', 'neutts2e'):
+        elif provider == 'neutts2e':
             # Synthesis needs the backbone plus the codec, and the torch codec additionally pulls
             # in a semantic encoder that is a separate multi-gigabyte repo
             codec = codec or os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec')
