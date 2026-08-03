@@ -71,6 +71,10 @@ local = [
     "kokoro>=0.9.4",
     "faster-whisper>=1.0.0",
 ]
+# NeuTTS local models; note these require numpy>=2.2.6, which conflicts with the core numpy<2.0 pin
+neutts = [
+    "neutts>=1.4.0",
+]
 # Full installation with all optional dependencies
 all = [
     "kokoro>=0.9.4",
