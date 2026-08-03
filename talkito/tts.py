@@ -2141,7 +2141,8 @@ class KittenTTSProvider(TTSProvider):
             m = get_cached_local_model('kittentts', variant=model_name)
             if m is None:
                 raise RuntimeError("KittenTTS model unavailable")
-            audio = m.generate(text, voice=self.get_config_value('voice', kittentts_voice))
+            audio = m.generate(maybe_expand_numbers(text),
+                               voice=self.get_config_value('voice', kittentts_voice))
             buf = io.BytesIO()
             sf.write(buf, audio, 24000, format='WAV')
             return buf.getvalue(), ".wav"
@@ -2171,7 +2172,8 @@ class KokoroTTSProvider(TTSProvider):
             # Generate audio with the specified voice and speed
             # Kokoro returns a generator, we need to process all chunks
             audio_chunks = []
-            for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
+            for i, (gs, ps, audio) in enumerate(
+                    pipeline(maybe_expand_numbers(text), voice=voice, speed=speed)):
                 log_message("DEBUG", f"Appending audio chunk {i}")
                 audio_chunks.append(audio)
 
@@ -2252,6 +2254,9 @@ def expand_acronyms_for_speech(text: str) -> str:
     eSpeak spells unknown uppercase runs out automatically; BPE models split them into subwords
     and guess, turning 'SDK' into 'send god'. Words that happen to be uppercase and acronyms that
     are pronounced as words are left alone.
+
+    Spelling the letters phonetically instead ("ess dee kay") measured no better than spacing them,
+    so the simpler form stands.
     """
     def replace(match: 're.Match') -> str:
         token = match.group(0)
@@ -2265,6 +2270,28 @@ def expand_acronyms_for_speech(text: str) -> str:
 def normalize_for_bpe_speech(text: str) -> str:
     """Apply the text normalisation that phoneme-input models get from eSpeak for free."""
     return expand_acronyms_for_speech(expand_numbers_for_speech(text))
+
+
+# Phoneme front ends expand digits themselves, but not always well; measured against the benchmark
+# corpus this helps. Acronyms are deliberately excluded - spelling those out makes phoneme models
+# worse, so only the number pass is applied here.
+expand_numbers_for_phoneme_models = os.environ.get(
+    'TALKITO_EXPAND_NUMBERS', '1').lower() in ('1', 'true', 'yes')
+
+
+# Acronym expansion is off for phoneme models by default: eSpeak already spells unknown uppercase
+# runs, and expanding them again measured worse. Kept as a toggle so the benchmark can retest it.
+expand_acronyms_for_phoneme_models = os.environ.get(
+    'TALKITO_EXPAND_ACRONYMS', '0').lower() in ('1', 'true', 'yes')
+
+
+def maybe_expand_numbers(text: str) -> str:
+    """Expand digits, and optionally acronyms, for a phoneme-input provider."""
+    if expand_numbers_for_phoneme_models:
+        text = expand_numbers_for_speech(text)
+    if expand_acronyms_for_phoneme_models:
+        text = expand_acronyms_for_speech(text)
+    return text
 
 
 def expand_numbers_for_speech(text: str) -> str:
