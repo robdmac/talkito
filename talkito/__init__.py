@@ -31,6 +31,15 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="weasel")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
+# These emit through logging rather than warnings, so a filter cannot reach them. The level has to
+# be set before torch is imported because the message is logged at import time.
+import logging
+for _noisy_logger in (
+    "torch.distributed.elastic.multiprocessing.redirects",
+    "torchao",
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.ERROR)
+
 from . import asr, comms, profiles, tts
 
 # TTS API

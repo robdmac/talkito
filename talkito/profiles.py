@@ -55,8 +55,21 @@ class Profile:
     skip_progress: List[str] = field(default_factory=list)
     strip_symbols: List[str] = field(default_factory=list)
 
+    # Some TUIs repaint by absolute cursor addressing and emit no newlines at all. When set, any
+    # sequence that moves the cursor to another row is treated as a line break.
+    repaints_with_cursor_moves: bool = False
+
     # Input handling
+    # Repainting TUIs position the prompt with cursor moves instead of putting it at the start of a
+    # line, so the marker has to be looked for anywhere in the chunk rather than anchored
+    input_prompt_anywhere: bool = False
     input_start: List[str] = field(default_factory=list)
+    # What the microphone stands in for, when that differs from what marks the start of input.
+    # Repainting TUIs never redraw the prompt glyph itself, so the microphone has to be hung off a
+    # cursor move they do emit, and put back when dictation ends
+    input_mic_start: List[str] = field(default_factory=list)
+    input_mic_pattern: Optional[str] = None   # regex alternative for relative cursor moves
+    input_mic_restore: Optional[str] = None   # repaints the prompt glyph once the mic goes away
     input_mic_replace: Optional[str] = None
     input_speaker_replace: Optional[str] = None
 
@@ -330,6 +343,7 @@ CLAUDE_PROFILE = Profile(
     name='claude',
     needs_full_lines=True,
     response_prefix='⏺',
+    repaints_with_cursor_moves=True,
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'^\s*Do you',
     raw_skip_patterns=[
@@ -344,6 +358,8 @@ CLAUDE_PROFILE = Profile(
     skip_patterns=COMMON_SKIP_PATTERNS + [
         # Level 1: Filter unless -v (tips, hints, usage info, single-word status)
         (1, r'Tip:'),                         # Tips
+        (1, r'[Ff]ast mode disabled'),        # Status bar notice
+        (1, r'usage credits exhausted'),      # Status bar notice
         (1, r'usage limit'),                  # Usage limit messages
         (1, r'to use best available model'),  # Model suggestions
         (1, r'Update Todos'),                 # Update Todos
@@ -358,6 +374,21 @@ CLAUDE_PROFILE = Profile(
         (4, r'Paste code here'),
 
         (4, r'^\s*>\s*'),
+
+        # Level 4: the v2 status bar and banner, which repaint constantly
+        (4, r'⏵⏵'),                           # auto mode / auto-accept indicator
+        (4, r'↯'),                            # fast mode indicator
+        (4, r'●\s*(high|medium|low)\b'),      # effort indicator
+        (4, r'for agents'),                   # '← for agents' hint, arrow already stripped
+        (4, r'^\s*~/'),                       # working directory in the banner
+        (4, r'Claude Max|Claude Pro'),        # plan line in the banner
+
+        # Level 4: shutdown chrome. 'Press Ctrl-C' is painted a character at a time, so the C is
+        # already gone by the time the text is cleaned
+        (4, r'Press Ctrl-'),
+        (4, r'Resume this session with'),
+        (4, r'--\s?resume\b'),                # claude --resume <session id>
+        (4, r'copied \d+ char|auto-copy'),    # clipboard notice
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
@@ -367,8 +398,11 @@ CLAUDE_PROFILE = Profile(
         r'^\s*│\s*>\s*',     # Line starting with optional spaces, box, prompt
         r'^❯\s+\S',          # Line starting with ❯ prompt followed by text (user input)
     ],
-    input_start=['❯ ', '│ > '],
-    input_mic_replace='🎤',
+    input_prompt_anywhere=True,
+    input_start=['❯\xa0', '❯ ', '│ > '],
+    input_mic_pattern=r'\r\x1b\[2C(\x1b\[\d*[AB])?',
+    input_mic_replace=r'\r\1🎤',
+    input_mic_restore='\r\\1❯\x1b[1C',   # glyph is one cell, the emoji was two
     input_speaker_replace='📢',
 )
 
@@ -404,8 +438,11 @@ CODEX_PROFILE = Profile(
     prompt_patterns=[
         r'^▌',
     ],
+    input_prompt_anywhere=True,
     input_start=[';3H'],
-    input_mic_replace=';3H🎤',
+    input_mic_start=[';3H'],      # the glyph at column 1 is never repainted, this reposition is
+    input_mic_replace=';1H🎤',    # so paint over the glyph and let the emoji land the cursor at 3
+    input_mic_restore=';1H›\x1b[1C',   # glyph is one cell, the emoji was two
     input_speaker_replace=';3H📢',
 )
 
