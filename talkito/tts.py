@@ -20,6 +20,7 @@
 
 import argparse
 import base64
+import importlib.util
 import io
 import json
 import queue
@@ -203,17 +204,45 @@ gcloud_language_code = os.environ.get('GCLOUD_LANGUAGE_CODE', 'en-US')  # Defaul
 elevenlabs_voice_id = os.environ.get('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default ElevenLabs voice (Rachel)
 elevenlabs_model_id = os.environ.get('ELEVENLABS_MODEL_ID', 'eleven_monolingual_v1')  # Default ElevenLabs model
 deepgram_voice_model = os.environ.get('DEEPGRAM_VOICE_MODEL', 'aura-asteria-en')  # Default Deepgram model
-kittentts_model = os.environ.get('KITTENTTS_MODEL', 'kitten-tts-nano-0.2')  # Default KittenTTS model
-kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'expr-voice-3-f')  # Default KittenTTS voice
+kittentts_model = os.environ.get('KITTENTTS_MODEL', 'KittenML/kitten-tts-mini-0.8')  # Default KittenTTS model
+kittentts_voice = os.environ.get('KITTENTTS_VOICE', 'Jasper')  # Default KittenTTS voice
 kokoro_language = os.environ.get('KOKORO_LANGUAGE', 'a')  # Default Kokoro language (American English)
 kokoro_voice = os.environ.get('KOKORO_VOICE', 'af_heart')  # Default Kokoro voice
 kokoro_speed = os.environ.get('KOKORO_SPEED', '1.0')  # Default Kokoro speed
+# Only the quantized 2E backbone is shipped: it is the one NeuTTS configuration that runs faster
+# than real time (RTF ~0.9 vs ~2.4 for the fp32 models) and the only one that supports streaming.
+# The nano and fp32 variants live on the benchmark/tts-model-comparison branch.
+neutts2e_model = os.environ.get('NEUTTS2E_MODEL', 'neuphonic/neutts-2e-q4-gguf')  # Default NeuTTS 2E backbone
+neutts2e_voice = os.environ.get('NEUTTS2E_VOICE', 'emily')  # Default NeuTTS 2E speaker
+neutts2e_emotion = os.environ.get('NEUTTS2E_EMOTION', 'neutral')  # Default NeuTTS 2E emotion
+# The decoder-only ONNX codec avoids ~3GB of torch codec and semantic encoder that inference never runs
+neutts_codec = os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec-onnx-decoder-int8')
+neutts_device = os.environ.get('NEUTTS_DEVICE', 'cpu')  # Device for the NeuTTS backbone and codec
+NEUTTS_SAMPLE_RATE = 24000  # Both NeuTTS models emit 24 kHz audio
+NEUTTS_VARIANT_SEP = '|'  # Separates backbone from codec inside a neutts cache variant
 
 # Local model caching for offline TTS providers (kokoro/kittentts)
-_local_model_cache = None
-_local_model_provider = None  # Track which provider is cached ('kokoro' or 'kittentts')
-_local_model_loading = False
-_local_model_error = None
+KOKORO_REPO_ID = 'hexgrad/Kokoro-82M'
+MODEL_LOAD_TIMEOUT = 30.0  # Seconds to wait for a model that is already present on disk
+MODEL_DOWNLOAD_GRACE = 0.5  # Seconds to wait on an in-flight first-run download before giving up
+MODEL_RETRY_COOLDOWN = 30.0  # Seconds before a failed model load is retried
+MAX_CACHED_MODELS = 3  # Bound memory when several providers or languages are used in one session
+
+
+@dataclass
+class _ModelEntry:
+    """Cache slot for one locally loaded TTS model."""
+    model: Any = None
+    loading: bool = False
+    downloading: bool = False
+    error: Optional[str] = None
+    error_time: float = 0.0
+    reported: bool = False
+    last_used: float = 0.0
+
+
+# Keyed by (provider, variant) so switching provider or language does not evict the other model
+_local_models: Dict[Tuple[str, str], _ModelEntry] = {}
 _local_model_cache_lock = threading.Lock()
 _delayed_items_lock = threading.Lock()
 _delayed_timer = None
@@ -273,7 +302,8 @@ TTS_PROVIDERS = {
         'model_var': 'kittentts_model',
         'voice_var': 'kittentts_voice',
         'display_name': 'KittenTTS',
-        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.1/kittentts-0.1.0-py3-none-any.whl soundfile phonemizer',
+        # The 0.8.x line is published only as a GitHub release; PyPI still stops at the old 0.1 line
+        'install': 'pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl soundfile phonemizer',
         'config_keys': ['model', 'voice']
     },
     'kokoro': {
@@ -284,8 +314,19 @@ TTS_PROVIDERS = {
         'display_name': 'KokoroTTS',
         'install': 'pip install \'kokoro>=0.9.4\' soundfile phonemizer',
         'config_keys': ['language', 'voice', 'speed']
+    },
+    'neutts2e': {
+        'env_var': None,  # NeuTTS 2E doesn't need an API key
+        'model_var': 'neutts2e_model',
+        'voice_var': 'neutts2e_voice',
+        'display_name': 'NeuTTS 2E',
+        'install': 'pip install neutts llama-cpp-python soundfile',
+        'config_keys': ['model', 'voice', 'emotion']
     }
 }
+
+# Local providers whose models are loaded in-process and cached by (provider, variant)
+LOCAL_MODEL_PROVIDERS = ('kokoro', 'kittentts', 'neutts2e')
 
 # Available voices for each TTS provider (organized by language using BCP 47 codes)
 AVAILABLE_VOICES = {
@@ -379,7 +420,8 @@ AVAILABLE_VOICES = {
         ]
     },
     'kittentts': {
-        'en-US': ['expr-voice-2-m', 'expr-voice-2-f', 'expr-voice-3-m', 'expr-voice-3-f', 'expr-voice-4-m', 'expr-voice-4-f', 'expr-voice-5-m', 'expr-voice-5-f']
+        # Voice names for the 0.8 model line; the older 0.1/0.2 models used expr-voice-N-{m,f}
+        'en-US': ['Bella', 'Jasper', 'Luna', 'Bruno', 'Rosie', 'Hugo', 'Kiki', 'Leo']
     },
     'kokoro': {
         'en-US': ['af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa'],
@@ -392,8 +434,14 @@ AVAILABLE_VOICES = {
         'it-IT': ['if_sara', 'im_nicola'],
         'pt-BR': ['pf_dora', 'pm_alex', 'pm_santa']
     },
+    'neutts2e': {
+        'en-US': ['emily', 'paul', 'sophie', 'steven']
+    },
     'system': {}  # System voices depend on the OS
 }
+
+# Emotions supported by the NeuTTS 2E backbone
+NEUTTS2E_EMOTIONS = ('angry', 'disgusted', 'fearful', 'happy', 'neutral', 'sad', 'surprised')
 
 
 def disable_tts_completely(reason: str = None, args: Any = None) -> None:
@@ -418,7 +466,45 @@ def disable_tts_completely(reason: str = None, args: Any = None) -> None:
         log_message("WARNING", f"Could not update shared state to disable TTS: {e}")
 
 
-def _create_model_instance(provider: str):
+def _normalize_kokoro_lang(lang_code: str) -> str:
+    """Map a configured Kokoro language onto a code KPipeline accepts, falling back to American English."""
+    lang_code = str(lang_code or 'a').lower()
+    try:
+        from kokoro.pipeline import ALIASES, LANG_CODES
+    except ImportError:
+        return lang_code
+    normalized = ALIASES.get(lang_code, lang_code)
+    if normalized not in LANG_CODES:
+        log_message("WARNING", f"Unknown Kokoro language {lang_code!r}, falling back to 'a' (American English)")
+        return 'a'
+    return normalized
+
+
+def _model_variant(provider: str) -> str:
+    """Return the cache variant for a provider: language for kokoro, model name for kittentts."""
+    if provider == 'kokoro':
+        config = get_tts_config()
+        return _normalize_kokoro_lang(config.get('language') or kokoro_language)
+    if provider == 'kittentts':
+        return kittentts_model
+    if provider == 'neutts2e':
+        # The codec is part of the identity: the same backbone built on a different codec is a
+        # different model, so it must not be served from the same cache slot
+        config = get_tts_config()
+        backbone = str(config.get('model') or neutts2e_model)
+        return f"{backbone}{NEUTTS_VARIANT_SEP}{neutts_codec}"
+    return ''
+
+
+def _split_neutts_variant(variant: str) -> Tuple[str, str]:
+    """Split a neutts cache variant back into its backbone repo and codec repo."""
+    if not variant:
+        return neutts2e_model, neutts_codec
+    backbone, _, codec = variant.partition(NEUTTS_VARIANT_SEP)
+    return backbone or neutts2e_model, codec or neutts_codec
+
+
+def _create_model_instance(provider: str, variant: str = ''):
     """Create model instance for the specified provider."""
     if provider == 'kokoro':
         # First check if kokoro module is installed
@@ -442,14 +528,14 @@ def _create_model_instance(provider: str):
             from kokoro import KPipeline
 
         # Model creation - consent was already obtained in main thread
-        repo_id = 'hexgrad/Kokoro-82M'
-        log_message("DEBUG", f"About to create KPipeline(lang_code='en-us', repo_id='{repo_id}')")
+        lang_code = _normalize_kokoro_lang(variant or kokoro_language)
+        log_message("DEBUG", f"About to create KPipeline(lang_code='{lang_code}', repo_id='{KOKORO_REPO_ID}')")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            pipeline = KPipeline(lang_code='en-us', repo_id=repo_id)
+            pipeline = KPipeline(lang_code=lang_code, repo_id=KOKORO_REPO_ID)
         log_message("DEBUG", "KPipeline created successfully")
         return pipeline
-        
+
     elif provider == 'kittentts':
         # First check if kittentts module is installed
         try:
@@ -466,166 +552,281 @@ def _create_model_instance(provider: str):
             from kittentts import KittenTTS
 
         # Model creation - consent was already obtained in main thread
-        model_name = kittentts_model
+        model_name = variant or kittentts_model
         log_message("DEBUG", f"KittenTTS(model_name) with model_name = {model_name}")
         return KittenTTS(model_name)
+
+    elif provider == 'neutts2e':
+        try:
+            with suppress_ai_warnings():
+                import neutts  # noqa: F401
+        except ImportError:
+            install_cmd = TTS_PROVIDERS[provider]['install']
+            raise ImportError(
+                f"NeuTTS module is not installed. "
+                f"Install it with: {install_cmd}"
+            )
+
+        with suppress_ai_warnings():
+            from neutts import NeuTTS2E
+
+        backbone_repo, codec_repo = _split_neutts_variant(variant)
+        resolved_backbone = _resolve_neutts_backbone(backbone_repo)
+        log_message("DEBUG", f"Creating NeuTTS2E(backbone_repo='{resolved_backbone}', codec_repo='{codec_repo}')")
+
+        # 2E is a BPE model, so it loads no phonemizer and needs no language argument
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+            return NeuTTS2E(
+                backbone_repo=resolved_backbone,
+                backbone_device=neutts_device,
+                codec_repo=_resolve_neutts_codec(codec_repo),
+                codec_device=neutts_device,
+            )
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
 
-def _load_model_background(provider: str):
+def _resolve_neutts_codec(codec_repo: str) -> str:
+    """Resolve an ONNX codec repo id to its local model.onnx path.
+
+    The neucodec ONNX repos ship no config.json, so NeuCodecOnnxDecoder.from_pretrained() fails on
+    them; neutts accepts a direct .onnx file path instead, which is what we hand it.
+    """
+    if 'onnx' not in codec_repo or codec_repo.endswith('.onnx'):
+        return codec_repo
+
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=codec_repo, filename='model.onnx')
+        log_message("DEBUG", f"Resolved ONNX codec {codec_repo} to {path}")
+        return path
+    except Exception as e:
+        log_message("WARNING", f"Could not resolve ONNX codec {codec_repo}, passing through: {e}")
+        return codec_repo
+
+
+def _resolve_neutts_backbone(backbone_repo: str) -> str:
+    """Resolve a GGUF backbone repo id to its local .gguf file.
+
+    neutts loads GGUF repos via Llama.from_pretrained, which queries the Hub even when the file is
+    already cached, so it fails offline. Handing it a file path takes the local-file branch instead.
+    """
+    if not backbone_repo.lower().endswith('gguf') or os.path.isfile(backbone_repo):
+        return backbone_repo
+
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot = snapshot_download(repo_id=backbone_repo, allow_patterns=['*.gguf'])
+        candidates = sorted(Path(snapshot).glob('*.gguf'))
+        if candidates:
+            log_message("DEBUG", f"Resolved GGUF backbone {backbone_repo} to {candidates[0]}")
+            return str(candidates[0])
+    except Exception as e:
+        log_message("WARNING", f"Could not resolve GGUF backbone {backbone_repo}, passing through: {e}")
+    return backbone_repo
+
+
+def _evict_stale_models_locked() -> None:
+    """Drop least recently used models once the cache exceeds MAX_CACHED_MODELS; caller holds the lock."""
+    loaded = [(key, entry) for key, entry in _local_models.items() if entry.model is not None]
+    while len(loaded) > MAX_CACHED_MODELS:
+        key, _ = min(loaded, key=lambda item: item[1].last_used)
+        log_message("INFO", f"Evicting cached model {key} to bound memory")
+        _local_models.pop(key, None)
+        loaded = [(k, e) for k, e in loaded if k != key]
+
+
+def _any_model_loading() -> bool:
+    """True while any local model is loading, used to hold off the speech worker."""
+    with _local_model_cache_lock:
+        return any(entry.loading for entry in _local_models.values())
+
+
+def _record_model_error(key: Tuple[str, str], message: str) -> None:
+    """Store a load failure against a cache slot so it is retried after a cooldown rather than forever."""
+    with _local_model_cache_lock:
+        entry = _local_models.setdefault(key, _ModelEntry())
+        entry.loading = False
+        entry.downloading = False
+        entry.error = message
+        entry.error_time = time.monotonic()
+
+
+def _load_model_background(provider: str, variant: str):
     """Load model in background thread."""
-    global _local_model_cache, _local_model_provider, _local_model_loading, _local_model_error
+    key = (provider, variant)
 
     try:
         log_message("INFO", f"Background loading {provider} model...")
-        log_message("DEBUG", f"About to call _create_model_instance({provider})")
-        model = _create_model_instance(provider)
-        log_message("DEBUG", f"_create_model_instance({provider}) returned successfully")
+        model = _create_model_instance(provider, variant)
 
         with _local_model_cache_lock:
-            _local_model_cache = model
-            _local_model_provider = provider
-            _local_model_loading = False
-            _local_model_error = None
+            entry = _local_models.setdefault(key, _ModelEntry())
+            entry.model = model
+            entry.loading = False
+            entry.downloading = False
+            entry.error = None
+            entry.reported = False
+            entry.last_used = time.monotonic()
+            _evict_stale_models_locked()
 
         log_message("INFO", f"{provider} model loaded successfully in background")
 
     except Exception as e:
-        with _local_model_cache_lock:
-            _local_model_loading = False
-            _local_model_error = f"{provider} model loading failed: {e}"
+        _record_model_error(key, f"{provider} model loading failed: {e}")
         log_message("ERROR", f"Background {provider} model loading failed: {e}")
         log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
 
-def preload_local_model(provider: str):
+def _model_needs_download(provider: str, variant: str) -> bool:
+    """Return True when the provider's model still has to be fetched from the network."""
+    from .models import check_model_cached
+
+    if provider == 'kokoro':
+        return not check_model_cached('kokoro', KOKORO_REPO_ID)
+    if provider == 'neutts2e':
+        backbone_repo, codec_repo = _split_neutts_variant(variant)
+        return not check_model_cached(provider, backbone_repo, codec_repo)
+    return not check_model_cached(provider, variant or kittentts_model)
+
+
+def _fall_back_from_declined_download(provider: str) -> None:
+    """Switch to the next usable TTS provider after the user declines a model download."""
+    fallback_provider = select_best_tts_provider(excluded_providers={provider})
+    if fallback_provider is None:
+        print("Download declined and no fallback TTS provider available. TTS will be disabled.")
+        log_message("WARNING", f"No fallback TTS provider available after user declined {provider} download")
+        disable_tts_completely(f"user declined {provider} download and no fallback available")
+        return
+
+    print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
+
+    # Update shared state with fallback provider
+    try:
+        shared_state = get_shared_state()
+        shared_state.set_tts_config(provider=fallback_provider)
+        log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
+    except Exception as e:
+        log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
+
+
+def preload_local_model(provider: str, variant: Optional[str] = None):
     """Start background preloading of local model for specified provider."""
-    global _local_model_loading
-    
-    if provider not in ['kokoro', 'kittentts']:
+    if provider not in LOCAL_MODEL_PROVIDERS:
         log_message("WARNING", f"Unknown provider for preloading: {provider}")
         return
-    
+
+    if variant is None:
+        variant = _model_variant(provider)
+    key = (provider, variant)
+
     with _local_model_cache_lock:
-        # Skip if already loading or loaded the same provider
-        if _local_model_loading:
-            log_message("DEBUG", f"Model already loading, skipping preload for {provider}")
+        entry = _local_models.get(key)
+        if entry is not None:
+            if entry.loading:
+                log_message("DEBUG", f"Model already loading, skipping preload for {provider}")
+                return
+            if entry.model is not None:
+                log_message("DEBUG", f"Model already cached for {provider}, skipping preload")
+                return
+
+    # Consent is gathered outside the lock so a prompt never blocks other speech threads.
+    # input() only works on the main thread, so a worker that needs a download records an
+    # error instead of silently competing for stdin with the wrapped program.
+    needs_download = _model_needs_download(provider, variant)
+    if needs_download:
+        if threading.current_thread() is not threading.main_thread():
+            message = (f"{provider} model needs downloading but consent cannot be requested from thread "
+                       f"'{threading.current_thread().name}'; preload it at startup or set "
+                       f"TALKITO_AUTO_APPROVE_DOWNLOADS=1")
+            log_message("WARNING", message)
+            _record_model_error(key, message)
             return
-        
-        if _local_model_provider == provider and _local_model_cache is not None:
-            log_message("DEBUG", f"Model already cached for {provider}, skipping preload")
+
+        from .models import ask_user_consent
+        model_name = variant or provider
+        if not ask_user_consent(provider, model_name):
+            log_message("INFO", f"User declined download for {provider} model '{model_name}'")
+            _record_model_error(key, f"user declined download of {provider} model '{model_name}'")
+            _fall_back_from_declined_download(provider)
             return
-        
-        # Check if model needs consent BEFORE starting background thread
-        # This must happen in main thread where input() works
-        from .models import check_model_cached, ask_user_consent
-        
-        model_download_started = False
-        if provider == 'kokoro':
-            model_name = 'default'  # Kokoro uses 'default' model name
-            if not check_model_cached('kokoro', model_name):
-                if not ask_user_consent('kokoro', model_name):
-                    log_message("INFO", f"User declined download for {provider} model '{model_name}'")
-                    # Fall back to next best available provider
-                    fallback_provider = select_best_tts_provider(excluded_providers={'kokoro'})
-                    if fallback_provider is None:
-                        print("Download declined and no fallback TTS provider available. TTS will be disabled.")
-                        log_message("WARNING", "No fallback TTS provider available after user declined kokoro download")
-                        disable_tts_completely("user declined kokoro download and no fallback available")
-                        return
-                    print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
 
-                    # Update shared state with fallback provider
-                    try:
-                        shared_state = get_shared_state()
-                        shared_state.set_tts_config(provider=fallback_provider)
-                        log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
-                    except Exception as e:
-                        log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
+    # Start background loading (consent already obtained)
+    with _local_model_cache_lock:
+        entry = _local_models.setdefault(key, _ModelEntry())
+        if entry.loading or entry.model is not None:
+            return
+        entry.loading = True
+        entry.downloading = needs_download
+        entry.error = None
+        entry.reported = False
 
-                    return
-                model_download_started = True
-        elif provider == 'kittentts':
-            model_name = kittentts_model  # Use current kittentts model setting  
-            if not check_model_cached('kittentts', model_name):
-                if not ask_user_consent('kittentts', model_name):
-                    log_message("INFO", f"User declined download for {provider} model '{model_name}'")
-                    # Fall back to next best available provider
-                    fallback_provider = select_best_tts_provider(excluded_providers={'kittentts'})
-                    if fallback_provider is None:
-                        print("Download declined and no fallback TTS provider available. TTS will be disabled.")
-                        log_message("WARNING", "No fallback TTS provider available after user declined kittentts download")
-                        disable_tts_completely("user declined kittentts download and no fallback available")
-                        return
-                    print(f"Download declined. Falling back to {fallback_provider} TTS provider.")
-
-                    # Update shared state with fallback provider
-                    try:
-                        shared_state = get_shared_state()
-                        shared_state.set_tts_config(provider=fallback_provider)
-                        log_message("INFO", f"[TTS_PRELOAD] Updated shared state to use fallback provider: {fallback_provider}")
-                    except Exception as e:
-                        log_message("WARNING", f"[TTS_PRELOAD] Could not update shared state with fallback: {e}")
-
-                    return
-                model_download_started = True
-        
-        # Start background loading (consent already obtained)
-        _local_model_loading = True
-        _local_model_error = None
-    
-    thread = threading.Thread(target=_load_model_background, args=(provider,), daemon=True)
+    thread = threading.Thread(target=_load_model_background, args=(provider, variant), daemon=True)
     thread.start()
     log_message("INFO", f"Started background loading of {provider} model")
-    
+
     # Show confirmation message if download was started
-    if model_download_started:
+    if needs_download:
         print(f"Downloading {provider} model in background. TTS will start automatically when ready.")
 
 
-def get_cached_local_model(provider: str, timeout: float = 10.0):
+def get_cached_local_model(provider: str, timeout: Optional[float] = None, variant: Optional[str] = None):
     """Get cached local model, waiting for background loading if needed."""
-    global _local_model_cache, _local_model_provider, _local_model_loading, _local_model_error
+    if variant is None:
+        variant = _model_variant(provider)
+    key = (provider, variant)
+    if timeout is None:
+        timeout = MODEL_LOAD_TIMEOUT
 
-    start_time = time.time()
-    need_to_preload = False
+    start_time = time.monotonic()
 
     while True:
+        need_to_preload = False
+
         with _local_model_cache_lock:
-            # Check for errors
-            if _local_model_error and not _local_model_loading:
-                print(f"Error loading {provider} model: {_local_model_error}")
-                return None
+            entry = _local_models.get(key)
 
-            # Check if we have the right model cached
-            if _local_model_provider == provider and _local_model_cache is not None:
-                return _local_model_cache
+            if entry is not None:
+                # Model is ready
+                if entry.model is not None:
+                    entry.last_used = time.monotonic()
+                    return entry.model
 
-            # If we have a different provider cached, clear it to load the new one
-            if (_local_model_provider is not None and
-                _local_model_provider != provider and
-                _local_model_cache is not None and
-                not _local_model_loading):
-                log_message("INFO", f"Switching from {_local_model_provider} to {provider}, clearing cache")
-                _local_model_cache = None
-                _local_model_provider = None
-                _local_model_error = None
+                # A previous failure is honoured for a cooldown, then retried rather than being permanent
+                if entry.error and not entry.loading:
+                    if time.monotonic() - entry.error_time < MODEL_RETRY_COOLDOWN:
+                        if not entry.reported:
+                            entry.reported = True
+                            print(f"Error loading {provider} model: {entry.error}")
+                        else:
+                            log_message("DEBUG", f"{provider} model still in error cooldown: {entry.error}")
+                        return None
+                    log_message("INFO", f"Retrying {provider} model load after previous failure")
+                    entry.error = None
+                    entry.reported = False
 
-            # Check if not loading and not cached - this means no one started loading
-            if not _local_model_loading:
-                print(f"{provider} model not loaded and no background loading in progress. Starting now...")
+                # A first-run download outlasts any sensible per-utterance wait, so drop this
+                # utterance immediately instead of stalling the speech queue for every phrase
+                if entry.loading and entry.downloading:
+                    if time.monotonic() - start_time > MODEL_DOWNLOAD_GRACE:
+                        log_message("INFO", f"{provider} model is still downloading, skipping this utterance")
+                        return None
+
+            if entry is None or not (entry.loading or entry.model is not None):
+                log_message("DEBUG", f"{provider} model not loaded and no background loading in progress, starting now")
                 need_to_preload = True
 
         if need_to_preload:
-            preload_local_model(provider)
-        
+            preload_local_model(provider, variant)
+
         # Check timeout
-        if time.time() - start_time > timeout:
-            print(f"Timeout waiting for {provider} model to load after {timeout} seconds")
+        if time.monotonic() - start_time > timeout:
+            log_message("WARNING", f"Timeout waiting for {provider} model to load after {timeout} seconds")
             return None
-        
-        time.sleep(0.1)
+
+        time.sleep(0.05)
+
 
 def get_all_voices_for_provider(provider: str) -> list:
     """Get flattened list of all voices for a provider across all languages."""
@@ -1234,6 +1435,41 @@ def check_tts_provider_accessibility(requested_provider: str = None) -> Dict[str
         "note": kokoro_note
     }
 
+    # NeuTTS (nano backbone) and NeuTTS 2E - one package, two backbones
+    for neutts_provider, description in (
+        ("neutts2e", "Emotional TTS with built-in speakers (no API key required)"),
+    ):
+        neutts_available = False
+        neutts_note = description
+
+        if use_orcabot_playback:
+            neutts_note = "Disabled when Orcabot playback is enabled"
+        elif requested_provider == neutts_provider:
+            neutts_available = True
+            neutts_note = "NeuTTS package (validation deferred to model loading)"
+        else:
+            # Only check that the package exists; importing neutts costs ~5s and ~466MB because it
+            # eagerly pulls neucodec's torch stack, which is far too expensive for a probe
+            if importlib.util.find_spec('neutts') is not None:
+                neutts_available = True
+            else:
+                install_cmd = TTS_PROVIDERS[neutts_provider]['install']
+                neutts_note = f"Requires NeuTTS package ({install_cmd})"
+
+        # Check if model is cached
+        if neutts_available:
+            from .models import check_model_cached
+            backbone = neutts2e_model
+            if check_model_cached(neutts_provider, backbone, neutts_codec):
+                neutts_note += " [cached]"
+            else:
+                neutts_note += " [needs download]"
+
+        accessible[neutts_provider] = {
+            "available": neutts_available,
+            "note": neutts_note
+        }
+
     log_message("INFO", f"check_tts_provider_accessibility completed - providers checked: {list(accessible.keys())}")
     return accessible
 
@@ -1626,13 +1862,17 @@ def validate_provider_config(provider: str, silent: bool = False) -> bool:
 
     # For local providers, validate that the module is installed (but don't load the model yet)
     # This is lightweight - just checks if the module exists
-    if provider in ['kittentts', 'kokoro']:
+    if provider in LOCAL_MODEL_PROVIDERS:
         try:
             with suppress_ai_warnings():
                 if provider == 'kokoro':
                     import kokoro  # noqa: F401
                 elif provider == 'kittentts':
                     import kittentts  # noqa: F401
+                elif provider == 'neutts2e':
+                    # find_spec avoids neutts' ~5s / ~466MB eager import of the neucodec torch stack
+                    if importlib.util.find_spec('neutts') is None:
+                        raise ImportError("neutts is not installed")
             log_message("DEBUG", f"Local provider {provider} module is installed")
             return True
         except ImportError:
@@ -1897,10 +2137,12 @@ class KittenTTSProvider(TTSProvider):
                 log_message("WARNING", f"KittenTTS: Text too short ('{text}'), padding to avoid BERT errors")
                 text = text.strip() + "..."
 
-            m = get_cached_local_model('kittentts', timeout=10.0)
+            model_name = self.config.get('model') or kittentts_model
+            m = get_cached_local_model('kittentts', variant=model_name)
             if m is None:
                 raise RuntimeError("KittenTTS model unavailable")
-            audio = m.generate(text, voice=self.get_config_value('voice', kittentts_voice))
+            audio = m.generate(maybe_expand_numbers(text),
+                               voice=self.get_config_value('voice', kittentts_voice))
             buf = io.BytesIO()
             sf.write(buf, audio, 24000, format='WAV')
             return buf.getvalue(), ".wav"
@@ -1913,11 +2155,12 @@ class KokoroTTSProvider(TTSProvider):
 
     def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
         try:
-            # Get configuration from shared state
+            # Instance config wins, then shared state, then module defaults
             config = get_tts_config()
-            voice = config.get('voice') or kokoro_voice
-            speed = float(config.get('speed') or kokoro_speed)
-            pipeline = get_cached_local_model('kokoro', timeout=10.0)
+            voice = self.config.get('voice') or config.get('voice') or kokoro_voice
+            speed = float(self.config.get('speed') or config.get('speed') or kokoro_speed)
+            language = self.config.get('language') or config.get('language') or kokoro_language
+            pipeline = get_cached_local_model('kokoro', variant=_normalize_kokoro_lang(language))
 
             if pipeline is None:
                 log_message("ERROR", "Failed to get cached Kokoro model")
@@ -1929,7 +2172,8 @@ class KokoroTTSProvider(TTSProvider):
             # Generate audio with the specified voice and speed
             # Kokoro returns a generator, we need to process all chunks
             audio_chunks = []
-            for i, (gs, ps, audio) in enumerate(pipeline(text, voice=voice, speed=speed)):
+            for i, (gs, ps, audio) in enumerate(
+                    pipeline(maybe_expand_numbers(text), voice=voice, speed=speed)):
                 log_message("DEBUG", f"Appending audio chunk {i}")
                 audio_chunks.append(audio)
 
@@ -1948,6 +2192,175 @@ class KokoroTTSProvider(TTSProvider):
             log_message("ERROR", f"KokoroTTS synthesis error: {e}")
             return None
 
+SPEECH_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+               "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+               "seventeen", "eighteen", "nineteen"]
+SPEECH_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+RE_SPEECH_NUMBER = re.compile(r'\d[\d,]*(?:\.\d+)*')
+RE_SPEECH_TIME = re.compile(r'\b(\d{1,2}):([0-5]\d)\b')
+RE_SPEECH_ACRONYM = re.compile(r'\b[A-Z][A-Z0-9]{1,4}\b')
+
+# Acronyms that are pronounced as words, so spelling them out would make them worse
+ACRONYMS_SPOKEN_AS_WORDS = {
+    'JSON', 'YAML', 'REST', 'SOAP', 'ASCII', 'CRUD', 'JPEG', 'RAID', 'NASA', 'SCUBA',
+    'LAN', 'WAN', 'GIF', 'SIM', 'AJAX', 'ARIA', 'ONNX', 'CUDA', 'MIME', 'BIOS',
+}
+
+# All-caps words common in terminal output that are ordinary words, not acronyms
+UPPERCASE_WORDS_NOT_ACRONYMS = {
+    'ERROR', 'WARN', 'INFO', 'DEBUG', 'FATAL', 'TRACE', 'NOTE', 'TODO', 'FIXME', 'HACK',
+    'PASS', 'FAIL', 'SKIP', 'OK', 'YES', 'NO', 'TRUE', 'FALSE', 'NULL', 'NONE', 'AND',
+    'OR', 'NOT', 'IF', 'ELSE', 'FOR', 'NEW', 'ADD', 'GET', 'PUT', 'SET', 'RUN', 'END',
+}
+
+
+def _int_to_speech_words(n: int) -> str:
+    """Spell out a non-negative integer; values of a million or more are read digit by digit."""
+    if n < 20:
+        return SPEECH_ONES[n]
+    if n < 100:
+        return (SPEECH_TENS[n // 10] + (" " + SPEECH_ONES[n % 10] if n % 10 else "")).strip()
+    if n < 1000:
+        rest = n % 100
+        return (SPEECH_ONES[n // 100] + " hundred"
+                + (" " + _int_to_speech_words(rest) if rest else "")).strip()
+    if n < 1_000_000:
+        rest = n % 1000
+        return (_int_to_speech_words(n // 1000) + " thousand"
+                + (" " + _int_to_speech_words(rest) if rest else "")).strip()
+    return " ".join(SPEECH_ONES[int(d)] for d in str(n))
+
+
+def _number_to_speech_words(token: str) -> str:
+    """Convert one numeric token (possibly comma-grouped, decimal, or dotted) into words."""
+    token = token.replace(',', '')
+    if '.' not in token:
+        return _int_to_speech_words(int(token)) if token.isdigit() else token
+
+    parts = token.split('.')
+    words = [_int_to_speech_words(int(parts[0]))] if parts[0].isdigit() else [parts[0]]
+    for chunk in parts[1:]:
+        words.append("point")
+        # A short segment reads as a number (version-like); a long tail reads digit by digit
+        if chunk.isdigit():
+            words.append(_int_to_speech_words(int(chunk)) if len(chunk) <= 2
+                         else " ".join(SPEECH_ONES[int(d)] for d in chunk))
+    return " ".join(words)
+
+
+def expand_acronyms_for_speech(text: str) -> str:
+    """Space out letter-by-letter acronyms so BPE tokenizers do not read them as invented words.
+
+    eSpeak spells unknown uppercase runs out automatically; BPE models split them into subwords
+    and guess, turning 'SDK' into 'send god'. Words that happen to be uppercase and acronyms that
+    are pronounced as words are left alone.
+
+    Spelling the letters phonetically instead ("ess dee kay") measured no better than spacing them,
+    so the simpler form stands.
+    """
+    def replace(match: 're.Match') -> str:
+        token = match.group(0)
+        if token in ACRONYMS_SPOKEN_AS_WORDS or token in UPPERCASE_WORDS_NOT_ACRONYMS:
+            return token
+        return " ".join(token)
+
+    return RE_SPEECH_ACRONYM.sub(replace, text)
+
+
+def normalize_for_bpe_speech(text: str) -> str:
+    """Apply the text normalisation that phoneme-input models get from eSpeak for free."""
+    return expand_acronyms_for_speech(expand_numbers_for_speech(text))
+
+
+# Phoneme front ends expand digits themselves, but not always well; measured against the benchmark
+# corpus this helps. Acronyms are deliberately excluded - spelling those out makes phoneme models
+# worse, so only the number pass is applied here.
+expand_numbers_for_phoneme_models = os.environ.get(
+    'TALKITO_EXPAND_NUMBERS', '1').lower() in ('1', 'true', 'yes')
+
+
+# Acronym expansion is off for phoneme models by default: eSpeak already spells unknown uppercase
+# runs, and expanding them again measured worse. Kept as a toggle so the benchmark can retest it.
+expand_acronyms_for_phoneme_models = os.environ.get(
+    'TALKITO_EXPAND_ACRONYMS', '0').lower() in ('1', 'true', 'yes')
+
+
+def maybe_expand_numbers(text: str) -> str:
+    """Expand digits, and optionally acronyms, for a phoneme-input provider."""
+    if expand_numbers_for_phoneme_models:
+        text = expand_numbers_for_speech(text)
+    if expand_acronyms_for_phoneme_models:
+        text = expand_acronyms_for_speech(text)
+    return text
+
+
+def expand_numbers_for_speech(text: str) -> str:
+    """Spell digits out as words for models that tokenize raw text instead of phonemes.
+
+    Phoneme-input models (kokoro, kittentts, NeuTTS nano) get this from eSpeak automatically, but
+    BPE-input models such as NeuTTS 2E receive the raw string and mis-speak bare digits.
+    """
+    # Clock times first, so the colon does not survive into the generic number pass
+    def _speak_time(match: 're.Match') -> str:
+        hour, minute = _int_to_speech_words(int(match.group(1))), match.group(2)
+        if minute == '00':
+            return f"{hour} o'clock"
+        if minute[0] == '0':
+            return f"{hour} oh {_int_to_speech_words(int(minute))}"
+        return f"{hour} {_int_to_speech_words(int(minute))}"
+
+    text = RE_SPEECH_TIME.sub(_speak_time, text)
+
+    def _speak_number(match: 're.Match') -> str:
+        words = _number_to_speech_words(match.group(0))
+        # Keep 'v3' from becoming 'vthree' once the digits turn into words
+        start = match.start()
+        separator = " " if start and text[start - 1].isalpha() else ""
+        return separator + words
+
+    return RE_SPEECH_NUMBER.sub(_speak_number, text)
+
+
+class NeuTTS2EProvider(TTSProvider):
+    """NeuTTS 2E provider implementation, using its built-in speakers and emotions."""
+
+    def synthesize(self, text: str) -> Optional[Tuple[bytes, str]]:
+        try:
+            import soundfile as sf
+
+            if not text or not text.strip():
+                log_message("WARNING", "NeuTTS2E: Empty text provided, skipping synthesis")
+                return None
+
+            config = get_tts_config()
+            backbone = self.config.get('model') or neutts2e_model
+            speaker = str(self.config.get('voice') or config.get('voice') or neutts2e_voice).lower()
+            emotion = str(self.config.get('emotion') or neutts2e_emotion).lower()
+
+            if speaker not in AVAILABLE_VOICES['neutts2e']['en-US']:
+                log_message("WARNING", f"Unknown NeuTTS2E speaker {speaker!r}, falling back to 'emily'")
+                speaker = 'emily'
+            if emotion not in NEUTTS2E_EMOTIONS:
+                log_message("WARNING", f"Unknown NeuTTS2E emotion {emotion!r}, falling back to 'neutral'")
+                emotion = 'neutral'
+
+            model = get_cached_local_model('neutts2e', variant=backbone)
+            if model is None:
+                raise RuntimeError("NeuTTS2E model unavailable")
+
+            # 2E is a BPE-input model with no phonemizer, so digits and acronyms are spelled here
+            spoken = normalize_for_bpe_speech(text)
+            log_message("DEBUG", f"{spoken=} {speaker=} {emotion=}")
+            audio = model.infer(spoken, speaker=speaker, emotion=emotion)
+
+            buf = io.BytesIO()
+            sf.write(buf, audio, NEUTTS_SAMPLE_RATE, format='WAV')
+            return buf.getvalue(), ".wav"
+        except Exception as e:
+            log_message("ERROR", f"NeuTTS2E synthesis error: {e}")
+            return None
+
+
 # Provider class registry
 PROVIDER_CLASSES = {
     'openai': OpenAIProvider,
@@ -1959,6 +2372,7 @@ PROVIDER_CLASSES = {
     'deepgram': DeepgramProvider,
     'kittentts': KittenTTSProvider,
     'kokoro': KokoroTTSProvider,
+    'neutts2e': NeuTTS2EProvider,
 }
 
 
@@ -2200,6 +2614,8 @@ def save_tts_audio(text: str, filename: str, provider: str = None) -> bool:
 def speak_with_default(text, engine):
     # Handle system TTS engines
     try:
+        # No number expansion here: system engines already normalise digits well, and expanding
+        # first measured no better (numeric WER 5% -> 4%, identical pass counts)
         commands = {
             "say": ["say", text],
             "espeak": ["espeak", text],
@@ -2279,7 +2695,7 @@ def tts_worker(engine: str):
                 continue
                 
             # Wait while paused
-            while (playback_control.is_paused or _local_model_loading or tts_queue.empty()) and not shutdown_event.is_set():
+            while (playback_control.is_paused or _any_model_loading() or tts_queue.empty()) and not shutdown_event.is_set():
                 time.sleep(0.1)
 
             text_to_speak = ""
@@ -2322,10 +2738,11 @@ def tts_worker(engine: str):
             needs_skip = False
 
 
+            model_loading = _any_model_loading()
             log_message("DEBUG",
-                        f"Auto-skip check: {auto_skip_tts_enabled=} {_local_model_loading=} {tts_queue.empty()=}, current_speech_item={current_speech_item is not None}")
+                        f"Auto-skip check: {auto_skip_tts_enabled=} {model_loading=} {tts_queue.empty()=}, current_speech_item={current_speech_item is not None}")
 
-            if auto_skip_tts_enabled and not _local_model_loading:
+            if auto_skip_tts_enabled and not model_loading:
                 # Check if something is currently playing and how long it's been playing
                 is_currently_speaking = is_speaking()
                 is_currently_playing = playback_control.current_process is not None
@@ -3158,6 +3575,17 @@ def configure_tts_from_args(args) -> bool:
         
         # Background preloading started earlier in initialization
         
+    elif tts_provider == 'neutts2e':
+        # Skip the expensive neutts import - it is validated during actual model loading
+        log_message("DEBUG", f"Skipping {tts_provider} validation - will validate during model loading")
+
+        global neutts2e_voice, neutts2e_model
+        if args.tts_voice:
+            neutts2e_voice = args.tts_voice
+        log_message("INFO", f"Using NeuTTS 2E with model: {neutts2e_model} and speaker: {neutts2e_voice}")
+
+        # Background preloading started earlier in initialization
+
     elif tts_provider == 'kokoro':
         # Skip expensive kokoro import - will validate during actual model loading
         log_message("DEBUG", "Skipping kokoro validation in configure_tts_from_dict - will validate during model loading")

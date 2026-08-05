@@ -18,6 +18,7 @@
 
 """Utilities for model downloads with user consent and progress."""
 
+import json
 import os
 import subprocess
 import sys
@@ -58,6 +59,10 @@ def _configure_hf_timeouts():
     except ImportError:
         # huggingface_hub not installed - skip configuration
         pass
+
+# The torch NeuCodec loads this semantic encoder at construction time; the ONNX decoder does not
+NEUCODEC_ENCODER_REPO = 'facebook/w2v-bert-2.0'
+
 
 def ask_user_consent(provider: str, model_name: str) -> bool:
     """Ask user for consent to download a model."""
@@ -142,7 +147,7 @@ def _hf_cached(repo_id: str, filename: Optional[str] = None,
     except LocalEntryNotFoundError:
         return False
 
-def check_model_cached(provider: str, model_name: str) -> bool:
+def check_model_cached(provider: str, model_name: str, codec: Optional[str] = None) -> bool:
     """Check if a model is already cached locally."""
     try:
         if provider == 'local_whisper':
@@ -155,10 +160,39 @@ def check_model_cached(provider: str, model_name: str) -> bool:
             return os.path.exists(model_path)
         elif provider == 'kittentts':
             repo = model_name if '/' in model_name else f"KittenML/{model_name}"
-            return _hf_cached(repo_id=repo, filename="config.json")
+            if not _hf_cached(repo_id=repo, filename="config.json"):
+                return False
+            # config.json arrives first, so also confirm the weights and voices it names are present
+            from huggingface_hub import hf_hub_download
+            config_path = hf_hub_download(repo_id=repo, filename="config.json", local_files_only=True)
+            with open(config_path) as f:
+                config = json.load(f)
+            return all(
+                _hf_cached(repo_id=repo, filename=config[key])
+                for key in ("model_file", "voices") if config.get(key)
+            )
         elif provider == 'kokoro':
             repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
             return _hf_cached(repo_id=repo)
+        elif provider == 'neutts2e':
+            # Synthesis needs the backbone plus the codec, and the torch codec additionally pulls
+            # in a semantic encoder that is a separate multi-gigabyte repo
+            codec = codec or os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec')
+            if not _hf_cached(repo_id=model_name):
+                return False
+            if 'onnx' in codec:
+                # ONNX decoders are a single file and need no semantic encoder
+                if codec.endswith('.onnx'):
+                    return os.path.isfile(codec)
+                return _hf_cached(repo_id=codec, filename='model.onnx')
+            if not _hf_cached(repo_id=codec):
+                return False
+            # The encoder needs its weights and its feature-extractor config; the weights land first,
+            # so checking only those reports "cached" while loading still fails
+            return all(
+                _hf_cached(repo_id=NEUCODEC_ENCODER_REPO, filename=name)
+                for name in ("model.safetensors", "preprocessor_config.json")
+            )
         
     except Exception:
         pass
