@@ -117,6 +117,8 @@ ANSI_MOVE_LINE_PATTERN = re.compile(r'\x1B\[(\d+);(\d+)[Hf]')
 # Cursor forward command - converts to spaces to preserve word boundaries
 # Note: \d* allows for [C] with no number (defaults to 1) as well as [nC]
 CURSOR_FORWARD_PATTERN = re.compile(r'\x1B\[(\d*)C')
+# Forward moves and absolute column addressing, both of which paint horizontal space
+COLUMN_MOVE_PATTERN = re.compile(r'\x1B\[(\d*)([CG])')
 # Cursor down movement (string) - indicates end of response, start of status area
 # Note: There's also a bytes version CURSOR_DOWN_PATTERN at line ~195 for byte parsing
 CURSOR_DOWN_STR_PATTERN = re.compile(r'\x1B\[\d+B')
@@ -188,6 +190,8 @@ PROMPT_PATTERN = re.compile(r'^\s*[>\$#]\s*$')
 SENTENCE_END_PATTERN = re.compile(r'[.!?]$')
 ANSI_SIMPLE_PATTERN = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 BLOCK_DRAWING_PATTERN = re.compile(r'[\u2580-\u259F]+')  # Remove Unicode block drawing characters
+# Cursor-home, absolute row/column addressing and relative row moves - each one starts a new row
+ROW_MOVE_PATTERN = re.compile(rb'\x1b\[(?:\d*;\d*)?H|\x1b\[\d*[AB]')
 
 # Additional precompiled patterns for performance
 FILE_PATH_FILTER_PATTERN = re.compile(r'^[\w/\-_.]+\.(py|js|txt|md|json|yaml|yml|sh|c|cpp|h|java|go|rs|rb|php)$')
@@ -206,6 +210,34 @@ comm_manager: Optional[Any] = None  # Will be CommunicationManager when initiali
 
 # Thread pool for blocking I/O operations
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='talkito-io')
+
+def expand_column_moves(text: str) -> str:
+    """Turn forward and absolute column moves into the spacing they paint on screen."""
+    parts = []
+    column = 0  # visible characters emitted on this line so far
+    pos = 0
+
+    for match in COLUMN_MOVE_PATTERN.finditer(text):
+        chunk = text[pos:match.start()]
+        parts.append(chunk)
+        column += len(ANSI_SIMPLE_PATTERN.sub('', chunk).replace('\x1B', ''))
+
+        amount = int(match.group(1)) if match.group(1) else 1
+        if match.group(2) == 'C':
+            padding = amount
+        else:
+            # Absolute column is 1-based; a move back over painted text still separates words
+            padding = max(0, (amount - 1) - column)
+            if padding == 0 and column > 0:
+                padding = 1
+
+        parts.append(' ' * padding)
+        column += padding
+        pos = match.end()
+
+    parts.append(text[pos:])
+    return ''.join(parts)
+
 
 def _trim_after_cursor_move(s):
     # Find the earliest position of any cursor movement that indicates section boundary
@@ -677,12 +709,17 @@ def clean_text(text: str) -> str:
 
     text = _trim_after_cursor_move(text)
 
-    # Convert cursor forward commands to spaces (preserves word boundaries in streaming output)
-    # Default to 1 space if no number specified (e.g., [C] instead of [1C])
-    cursor_forward_matches = CURSOR_FORWARD_PATTERN.findall(text)
-    if cursor_forward_matches:
-        log_message("DEBUG", f"clean_text: found {len(cursor_forward_matches)} cursor forward commands")
-    text = CURSOR_FORWARD_PATTERN.sub(lambda m: ' ' * (int(m.group(1)) if m.group(1) else 1), text)
+    if active_profile and active_profile.repaints_with_cursor_moves:
+        # These TUIs space words apart with absolute column moves as well as forward ones, and a
+        # dropped column move runs the words together
+        text = expand_column_moves(text)
+    else:
+        # Convert cursor forward commands to spaces (preserves word boundaries in streaming output)
+        # Default to 1 space if no number specified (e.g., [C] instead of [1C])
+        cursor_forward_matches = CURSOR_FORWARD_PATTERN.findall(text)
+        if cursor_forward_matches:
+            log_message("DEBUG", f"clean_text: found {len(cursor_forward_matches)} cursor forward commands")
+        text = CURSOR_FORWARD_PATTERN.sub(lambda m: ' ' * (int(m.group(1)) if m.group(1) else 1), text)
 
     text = text.replace("'", "'")
 
@@ -786,11 +823,13 @@ def modify_prompt_for_asr(data: bytes, input_prompts, input_replace) -> bytes:
     try:
         text = data.decode('utf-8', errors='ignore')
         lines = text.splitlines(keepends=True)
+        # Repainting TUIs position the prompt with cursor moves, so it never sits at a line start
+        anchor = '' if (active_profile and active_profile.input_prompt_anywhere) else r'^\s*'
         for idx, line in enumerate(lines):
             for input_prompt in input_prompts:
                 if not input_prompt:
                     continue
-                prompt_pattern = re.compile(r'^\s*' + re.escape(input_prompt))
+                prompt_pattern = re.compile(anchor + re.escape(input_prompt))
                 if prompt_pattern.search(line):
                     # When we find the prompt at line start, mark that we've seen it
                     asr_state.prompt_detected = True
@@ -801,6 +840,50 @@ def modify_prompt_for_asr(data: bytes, input_prompts, input_replace) -> bytes:
     except Exception:
         # If any error occurs, return original data
         return data
+
+
+# Repainting TUIs never redraw the prompt glyph on their own, so once we have painted over it we
+# have to put it back ourselves when dictation ends
+_mic_indicator_shown = False
+
+
+def reset_mic_indicator_state() -> None:
+    """Forget that a microphone was painted over the prompt."""
+    global _mic_indicator_shown
+    _mic_indicator_shown = False
+
+
+def apply_mic_indicator(data: bytes, wanted: bool) -> bytes:
+    """Swap the prompt marker for a microphone while dictating, and restore it afterwards."""
+    global _mic_indicator_shown
+
+    profile = active_profile
+    if not profile or not profile.input_mic_replace:
+        return data
+
+    replacement = profile.input_mic_replace if wanted else profile.input_mic_restore
+    if not wanted and (not _mic_indicator_shown or not replacement):
+        # Nothing painted, or the profile has no way to put the glyph back
+        _mic_indicator_shown = _mic_indicator_shown and not replacement
+        return data
+
+    if profile.input_mic_pattern:
+        try:
+            text = data.decode('utf-8')
+        except UnicodeDecodeError:
+            return data
+        updated, count = re.subn(profile.input_mic_pattern, replacement, text, count=1)
+        if count:
+            _mic_indicator_shown = wanted
+            asr_state.prompt_detected = True
+            return updated.encode('utf-8')
+        return data
+
+    markers = profile.input_mic_start or profile.input_start
+    updated = modify_prompt_for_asr(data, markers, replacement)
+    if updated != data:
+        _mic_indicator_shown = wanted
+    return updated
 
 
 def should_skip_line(line: str) -> bool:
@@ -2685,8 +2768,9 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         show_mic_for_tap_to_talk = asr_mode == "tap-to-talk" and asr_state.tap_to_talk_active
 
                         # log_message("DEBUG", f"modify_prompt_for_asr against output_data {output_data}")
-                        if show_mic_for_auto or show_mic_for_tap_to_talk:
-                            output_data = modify_prompt_for_asr(output_data, active_profile.input_start, active_profile.input_mic_replace)
+                        output_data = apply_mic_indicator(
+                            output_data, show_mic_for_auto or show_mic_for_tap_to_talk
+                        )
                         # elif tts.is_speaking():
                         #     output_data = modify_prompt_for_asr(output_data, active_profile.input_start,
                         #                                         active_profile.input_speaker_replace)
@@ -2897,6 +2981,25 @@ def process_remaining_buffer(buffer: List[str], line_idx: int) -> None:
             queue_output(strip_profile_symbols(final_text), line_idx, exception_match)
 
 
+# Claude Code (and any profile setting repaints_with_cursor_moves) repaints by absolute cursor
+# addressing and emits no newlines at all, so the reader below needs the row moves turned into
+# line breaks before it can see any lines.
+def insert_breaks_at_cursor_moves(line_buffer: bytes) -> bytes:
+    """Give a newline-free repainting TUI the line breaks the reader below expects."""
+    if not (active_profile and active_profile.repaints_with_cursor_moves):
+        return line_buffer
+    if b'\x1b[' not in line_buffer:
+        return line_buffer
+
+    def add_break(match):
+        # Skip moves already at a line start so running this again over retained data is a no-op
+        if match.start() == 0 or line_buffer[match.start() - 1:match.start()] == b'\n':
+            return match.group(0)
+        return b'\n' + match.group(0)
+
+    return ROW_MOVE_PATTERN.sub(add_break, line_buffer)
+
+
 def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
                            text_buffer: List[str], prev_line: str,
                            skip_duplicates: bool, cursor_row: int,
@@ -2920,6 +3023,8 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         except Exception:
             pass
     
+    line_buffer = insert_breaks_at_cursor_moves(line_buffer)
+
     while len(line_buffer) > 0:
         nl_pos = line_buffer.find(b'\n')
         if nl_pos == -1:
