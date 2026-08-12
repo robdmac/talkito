@@ -176,8 +176,10 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
             return _hf_cached(repo_id=repo)
         elif provider == 'neutts2e':
             # Synthesis needs the backbone plus the codec, and the torch codec additionally pulls
-            # in a semantic encoder that is a separate multi-gigabyte repo
-            codec = codec or os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec')
+            # in a semantic encoder that is a separate multi-gigabyte repo. The fallback must match
+            # the default in tts.py: talkito decodes pre-encoded speakers and never clones, so the
+            # decoder-only ONNX codec is the configuration it always wants.
+            codec = codec or os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec-onnx-decoder-int8')
             if not _hf_cached(repo_id=model_name):
                 return False
             if 'onnx' in codec:

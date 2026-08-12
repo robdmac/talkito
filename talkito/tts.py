@@ -25,6 +25,7 @@ import io
 import json
 import queue
 import os
+import platform
 import random
 import re
 import shutil
@@ -217,7 +218,26 @@ neutts2e_voice = os.environ.get('NEUTTS2E_VOICE', 'emily')  # Default NeuTTS 2E 
 neutts2e_emotion = os.environ.get('NEUTTS2E_EMOTION', 'neutral')  # Default NeuTTS 2E emotion
 # The decoder-only ONNX codec avoids ~3GB of torch codec and semantic encoder that inference never runs
 neutts_codec = os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec-onnx-decoder-int8')
-neutts_device = os.environ.get('NEUTTS_DEVICE', 'cpu')  # Device for the NeuTTS backbone and codec
+neutts_device = os.environ.get('NEUTTS_DEVICE', 'cpu')  # Device for the NeuTTS codec
+
+
+def _default_neutts_backbone_device() -> str:
+    """Prefer Metal on Apple Silicon, where llama.cpp measures ~1.16x faster than CPU.
+
+    Only applies when the device was left unset. An explicit NEUTTS_DEVICE is a deliberate choice
+    and keeps its previous meaning of pinning the whole model, so setting it to cpu still opts out.
+    """
+    if 'NEUTTS_DEVICE' in os.environ:
+        return neutts_device
+    if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+        return 'metal'
+    return neutts_device
+
+
+# The ONNX codec refuses any device but CPU, so a single setting would force the whole model onto
+# CPU. The GGUF backbone is the bulk of synthesis time and llama.cpp runs it on Metal, so the two
+# are configured separately.
+neutts_backbone_device = os.environ.get('NEUTTS_BACKBONE_DEVICE', _default_neutts_backbone_device())
 NEUTTS_SAMPLE_RATE = 24000  # Both NeuTTS models emit 24 kHz audio
 NEUTTS_VARIANT_SEP = '|'  # Separates backbone from codec inside a neutts cache variant
 
@@ -574,15 +594,60 @@ def _create_model_instance(provider: str, variant: str = ''):
         resolved_backbone = _resolve_neutts_backbone(backbone_repo)
         log_message("DEBUG", f"Creating NeuTTS2E(backbone_repo='{resolved_backbone}', codec_repo='{codec_repo}')")
 
+        # A rejected codec/device pairing and a missing file are both certain to fail and free to
+        # test, so rule them out before loading a backbone. Faults that only appear once the codec
+        # is constructed - a missing onnxruntime, a corrupt model, a failed session - cost far too
+        # much to exclude here, and are diagnosed below only if something actually goes wrong.
+        resolved_codec = _resolve_neutts_codec(codec_repo)
+        codec_device_error = _neutts_codec_device_error(resolved_codec, neutts_device)
+        if codec_device_error:
+            raise RuntimeError(codec_device_error)
+        if resolved_codec.endswith('.onnx') and not os.path.isfile(resolved_codec):
+            raise RuntimeError(f"NeuTTS ONNX codec is missing at {resolved_codec}")
+
         # 2E is a BPE model, so it loads no phonemizer and needs no language argument
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-            return NeuTTS2E(
-                backbone_repo=resolved_backbone,
-                backbone_device=neutts_device,
-                codec_repo=_resolve_neutts_codec(codec_repo),
-                codec_device=neutts_device,
-            )
+        def _build(backbone_device):
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+                return NeuTTS2E(
+                    backbone_repo=resolved_backbone,
+                    backbone_device=backbone_device,
+                    codec_repo=resolved_codec,
+                    codec_device=neutts_device,
+                )
+
+        try:
+            return _build(neutts_backbone_device)
+        except Exception as e:
+            # Metal is the default where the hardware suggests it, but llama.cpp may be built
+            # without it and the GPU may be unavailable under some sandboxes. Losing speech
+            # entirely is worse than losing the speed-up, so fall back rather than propagate.
+            # Only initialization is covered; a Metal fault during synthesis still surfaces.
+            if neutts_backbone_device == 'cpu':
+                raise
+            # NeuTTS2E loads the backbone before the codec, so this failure may belong to either.
+            # The codec does not vary with the backbone device: if it is the one at fault, a retry
+            # fails identically, so establish which half broke before spending a second backbone.
+            # Checking here rather than up front keeps the working path free of the cost.
+            try:
+                codec_verified = _preflight_neutts_codec(resolved_codec, neutts_device)
+            except Exception as codec_error:
+                log_message("ERROR",
+                            f"NeuTTS codec at {resolved_codec} does not load ({codec_error}); "
+                            f"the backbone device is not the cause, so not retrying on CPU")
+                raise
+            if codec_verified:
+                log_message("WARNING",
+                            f"NeuTTS backbone failed on '{neutts_backbone_device}' ({e}); "
+                            f"the codec loads, so retrying the backbone on CPU")
+            else:
+                # Say only what has been established. A torch codec cannot be checked cheaply, so
+                # the cause is unknown and the retry is a hope rather than a diagnosis.
+                log_message("WARNING",
+                            f"NeuTTS construction failed on '{neutts_backbone_device}' ({e}); "
+                            f"the codec could not be checked independently, so the cause is "
+                            f"undetermined. Retrying on CPU")
+            return _build('cpu')
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -604,6 +669,49 @@ def _resolve_neutts_codec(codec_repo: str) -> str:
     except Exception as e:
         log_message("WARNING", f"Could not resolve ONNX codec {codec_repo}, passing through: {e}")
         return codec_repo
+
+
+def _neutts_codec_device_error(resolved_codec: str, codec_device: str) -> Optional[str]:
+    """Report the codec/device combinations NeuTTS refuses, without loading anything.
+
+    NeuTTS raises for an ONNX decoder on any device but CPU. Reproducing that rule is what makes
+    the check meaningful: loading the decoder on its own always succeeds regardless of the device
+    that will be asked for, so without this a bad codec_device looks like a healthy codec.
+    """
+    if 'onnx' in resolved_codec and codec_device != 'cpu':
+        return (f"NeuTTS runs ONNX decoders on CPU only, but codec_device is '{codec_device}'. "
+                f"Set NEUTTS_DEVICE=cpu, or choose a torch codec via NEUTTS_CODEC.")
+    return None
+
+
+def _preflight_neutts_codec(resolved_codec: str, codec_device: str) -> bool:
+    """Load the codec alone, to establish whether it rather than the backbone is at fault.
+
+    Returns True when the codec was verified and False when it could not be checked independently,
+    so the caller can avoid asserting a cause it has not established. Raises when the codec is
+    definitely broken.
+    """
+    error = _neutts_codec_device_error(resolved_codec, codec_device)
+    if error:
+        raise RuntimeError(error)
+
+    if 'onnx' not in resolved_codec:
+        # The torch codecs pull a multi-gigabyte semantic encoder at construction, which costs far
+        # more to load twice than the retry it would save. talkito never selects one by default.
+        return False
+
+    try:
+        from neucodec import NeuCodecOnnxDecoder
+
+        if resolved_codec.endswith('.onnx'):
+            if not os.path.isfile(resolved_codec):
+                raise FileNotFoundError(resolved_codec)
+            NeuCodecOnnxDecoder(resolved_codec)
+        else:
+            NeuCodecOnnxDecoder.from_pretrained(resolved_codec)
+    except Exception as e:
+        raise RuntimeError(f"NeuTTS codec failed to load from {resolved_codec}: {e}") from e
+    return True
 
 
 def _resolve_neutts_backbone(backbone_repo: str) -> str:
