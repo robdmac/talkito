@@ -171,6 +171,12 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
                 _hf_cached(repo_id=repo, filename=config[key])
                 for key in ("model_file", "voices") if config.get(key)
             )
+        elif provider == 'piper':
+            # A Piper voice is a plain pair of files rather than a Hub repo, and the runtime needs
+            # the json alongside the weights
+            from .tts import piper_voice_path
+            onnx_path = piper_voice_path(model_name)
+            return onnx_path.is_file() and onnx_path.with_suffix('.onnx.json').is_file()
         elif provider == 'kokoro':
             repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
             return _hf_cached(repo_id=repo)

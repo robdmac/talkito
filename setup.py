@@ -64,9 +64,14 @@ extras_require = {
     'neutts': [
         "neutts>=1.4.0",
     ],
+    # Piper needs no torch at all; a voice is a single ONNX file of a few tens of megabytes
+    'piper': [
+        "piper-tts>=1.6.0",
+    ],
     'all': [
         "kokoro>=0.9.4",
         "faster-whisper>=1.0.0",
+        "piper-tts>=1.6.0",
     ],
 }
 
