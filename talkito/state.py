@@ -705,11 +705,17 @@ def initialize_providers_early(args):
         log_message("INFO", f"Starting TTS provider selection for: {preferred}")
         try:
             if preferred:
-                # Set the requested provider in shared state so select_best_tts_provider knows what was requested
+                # Set the requested provider in shared state so select_best_tts_provider knows what was requested.
+                # A voice belongs to the provider that defines it, so drop any carried over from a
+                # different one: left in place it is read back as this provider's voice, and
+                # OpenAI's "alloy" becomes a Piper voice file that cannot exist. Any voice actually
+                # requested for the new provider is applied further down.
+                if shared_state.tts_provider != preferred:
+                    shared_state.tts_voice = None
                 shared_state.tts_provider = preferred
             excluded_tts = set()
             if getattr(args, 'orcabot', False):
-                excluded_tts.update({'kokoro', 'kittentts'})
+                excluded_tts.update(tts.LOCAL_MODEL_PROVIDERS)
             selected_tts = tts.select_best_tts_provider(excluded_providers=excluded_tts)
 
             if selected_tts is None:
@@ -723,13 +729,41 @@ def initialize_providers_early(args):
                 if hasattr(args, 'disable_tts'):
                     args.disable_tts = True
             else:
+                # Selection can fall back to a provider other than the one asked for, so scope the
+                # voice to whichever was actually chosen. A voice named for the rejected provider
+                # means nothing here, and for a local provider it names a file to go and download.
+                if shared_state.tts_provider != selected_tts:
+                    shared_state.tts_voice = None
                 shared_state.tts_provider = selected_tts
                 log_message("INFO", f"TTS provider selection completed: {selected_tts} [{time.time() - step_start:.3f}s]")
 
-                # Start preloading TTS models early for local providers
-                if selected_tts in ['kokoro', 'kittentts'] and not getattr(args, 'orcabot', False):
+                # Start preloading TTS models early for local providers. This is the only place
+                # download consent can be gathered: the speech worker cannot prompt, so a provider
+                # missing from here can never fetch its first model and returns no audio.
+                if selected_tts in tts.LOCAL_MODEL_PROVIDERS and not getattr(args, 'orcabot', False):
                     try:
                         preload_start = time.time()
+                        # Record the requested voice first. Preloading resolves a provider's cache
+                        # variant from shared state, so without this the default voice is fetched
+                        # and --tts-voice is only applied afterwards - leaving the worker to
+                        # download the voice actually wanted, which it cannot do.
+                        # Only when the voice belongs to the provider that was actually selected:
+                        # a voice given alongside a provider that was then rejected describes the
+                        # rejected one. With no provider named there is nothing to mismatch, so the
+                        # voice is taken as meant for whatever selection chose.
+                        requested_voice = getattr(args, 'tts_voice', None)
+                        if requested_voice and preferred not in (None, selected_tts):
+                            log_message("INFO",
+                                        f"Ignoring --tts-voice '{requested_voice}': it was given for "
+                                        f"'{preferred}', but '{selected_tts}' was selected")
+                            requested_voice = None
+                            # Drop it from args as well, not just here. Configuration runs later
+                            # against the same args with only the provider swapped, and would
+                            # otherwise reapply the rejected provider's voice after preload.
+                            if hasattr(args, 'tts_voice'):
+                                args.tts_voice = None
+                        if requested_voice:
+                            shared_state.set_tts_config(provider=selected_tts, voice=requested_voice)
                         log_message("INFO", f"Starting early TTS model preloading for: {selected_tts}")
                         tts.preload_local_model(selected_tts)
                         log_message("INFO", f"Early TTS model preloading started for {selected_tts} [{time.time() - preload_start:.3f}s]")

@@ -173,10 +173,11 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
             )
         elif provider == 'piper':
             # A Piper voice is a plain pair of files rather than a Hub repo, and the runtime needs
-            # the json alongside the weights
-            from .tts import piper_voice_path
-            onnx_path = piper_voice_path(model_name)
-            return onnx_path.is_file() and onnx_path.with_suffix('.onnx.json').is_file()
+            # the json alongside the weights. Share the loader's completeness test so the two cannot
+            # disagree: reporting cached here while the loader re-fetches leaves a voice that is
+            # never repaired and never loads.
+            from .tts import piper_voice_path, _piper_voice_complete
+            return _piper_voice_complete(piper_voice_path(model_name))
         elif provider == 'kokoro':
             repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
             return _hf_cached(repo_id=repo)

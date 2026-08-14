@@ -521,6 +521,20 @@ def _normalize_kokoro_lang(lang_code: str) -> str:
     return normalized
 
 
+def _resolve_piper_voice() -> str:
+    """Return the Piper voice to use, accepting names outside the curated menu shortlist.
+
+    Piper publishes well over a hundred voices and AVAILABLE_VOICES lists fifteen of them, so that
+    entry is a menu convenience and cannot act as an allowlist. Every caller goes through here:
+    preload, configuration and synthesis resolving this separately is how a model gets fetched for
+    one voice and then spoken with another.
+    """
+    state = get_shared_state()
+    if state.tts_provider == 'piper' and state.tts_voice:
+        return str(state.tts_voice)
+    return piper_voice
+
+
 def _model_variant(provider: str) -> str:
     """Return the cache variant for a provider: language for kokoro, model name for kittentts."""
     if provider == 'kokoro':
@@ -529,7 +543,7 @@ def _model_variant(provider: str) -> str:
     if provider == 'kittentts':
         return kittentts_model
     if provider == 'piper':
-        return str(_shared_voice_for('piper') or piper_voice)
+        return _resolve_piper_voice()
     if provider == 'neutts2e':
         # The codec is part of the identity: the same backbone built on a different codec is a
         # different model, so it must not be served from the same cache slot
@@ -697,25 +711,59 @@ def _shared_voice_for(provider: str) -> Optional[str]:
     return config.get('voice')
 
 
+def _piper_voice_complete(onnx_path: Path) -> bool:
+    """Report whether both halves of a Piper voice are present and non-empty.
+
+    An interrupted download leaves a zero-byte file behind, which exists but cannot be loaded, so
+    presence alone would mark a broken voice as ready and skip the fetch that would repair it. The
+    json is parsed as well, since a truncated one is the same failure wearing a different hat.
+    """
+    config_path = onnx_path.with_suffix('.onnx.json')
+    try:
+        if not (onnx_path.is_file() and onnx_path.stat().st_size > 0):
+            return False
+        if not (config_path.is_file() and config_path.stat().st_size > 0):
+            return False
+        with open(config_path) as handle:
+            json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def piper_voice_path(voice: str) -> Path:
     """Return the on-disk path of a Piper voice, downloaded or not."""
     return Path(piper_voice_dir) / f"{voice}.onnx"
 
 
 def _ensure_piper_voice(voice: str) -> str:
-    """Download a Piper voice if it is not already on disk, and return its path."""
+    """Download a Piper voice if it is not already complete on disk, and return its path.
+
+    A voice is the pair of files, and the runtime needs both. Treating the weights alone as
+    complete leaves an interrupted download unrepairable: the fetch is skipped and the load then
+    fails every time, so both are required here and after downloading.
+    """
     path = piper_voice_path(voice)
-    if path.exists():
+    config_path = path.with_suffix('.onnx.json')
+    if _piper_voice_complete(path):
         return str(path)
+
+    # Anything already on disk failed the completeness test above, so it has to be replaced rather
+    # than kept: the downloader skips any existing non-empty file, which would leave a truncated
+    # json in place and fail the load again on every attempt.
+    partial = path.exists() or config_path.exists()
+    if partial:
+        log_message("WARNING",
+                    f"Piper voice '{voice}' is incomplete on disk; re-fetching it")
 
     # Consent was already gathered by preload_local_model; this is the fetch itself
     from piper.download_voices import download_voice
 
     path.parent.mkdir(parents=True, exist_ok=True)
     log_message("INFO", f"Downloading Piper voice '{voice}' into {path.parent}")
-    download_voice(voice, path.parent)
-    if not path.exists():
-        raise RuntimeError(f"Piper voice '{voice}' was not downloaded to {path}")
+    download_voice(voice, path.parent, force_redownload=partial)
+    if not _piper_voice_complete(path):
+        raise RuntimeError(f"Piper voice '{voice}' is incomplete after download at {path}")
     return str(path)
 
 
@@ -1076,7 +1124,9 @@ def get_tts_config():
             config['language'] = state.tts_language or kokoro_language
             config['speed'] = float(state.tts_rate or kokoro_speed)
         elif state.tts_provider == 'piper':
-            config['voice'] = get_state_voice_if_valid() or piper_voice
+            # Not get_state_voice_if_valid(): that filters against the menu shortlist, which would
+            # hand synthesis the default while preload used the requested voice
+            config['voice'] = _resolve_piper_voice()
 
         return config
     except Exception:
@@ -2075,6 +2125,9 @@ def validate_provider_config(provider: str, silent: bool = False) -> bool:
                     # find_spec avoids neutts' ~5s / ~466MB eager import of the neucodec torch stack
                     if importlib.util.find_spec('neutts') is None:
                         raise ImportError("neutts is not installed")
+                elif provider == 'piper':
+                    if importlib.util.find_spec('piper') is None:
+                        raise ImportError("piper is not installed")
             log_message("DEBUG", f"Local provider {provider} module is installed")
             return True
         except ImportError:
@@ -2574,7 +2627,7 @@ class PiperTTSProvider(TTSProvider):
                 log_message("WARNING", "Piper: Empty text provided, skipping synthesis")
                 return None
 
-            voice = str(self.config.get('voice') or _shared_voice_for('piper') or piper_voice)
+            voice = str(self.config.get('voice') or _resolve_piper_voice())
 
             model = get_cached_local_model('piper', variant=voice)
             if model is None:
@@ -3557,7 +3610,8 @@ def parse_arguments():
     """Parse TTS provider command-line arguments."""
     parser = argparse.ArgumentParser(description='Text-to-Speech with multiple provider support')
     parser.add_argument('--tts-provider', type=str, default=None,
-                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro'],
+                       choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs',
+                                'deepgram', 'kittentts', 'kokoro', 'neutts2e', 'piper'],
                        help='TTS provider to use (default: auto-select best available)')
     parser.add_argument('--voice', type=str, default=None,
                        help='Voice to use (provider-specific)')
@@ -3640,9 +3694,9 @@ def configure_tts_from_args(args) -> bool:
     if use_orcabot_playback:
         log_message("INFO", "Orcabot playback enabled")
         os.environ["TALKITO_ORCABOT_ENABLED"] = "1"
-        if tts_provider in {"kokoro", "kittentts"}:
+        if tts_provider in LOCAL_MODEL_PROVIDERS:
             log_message("WARNING", f"Orcabot playback disables local TTS provider {tts_provider}; selecting fallback")
-            fallback_provider = select_best_tts_provider(excluded_providers={"kokoro", "kittentts"})
+            fallback_provider = select_best_tts_provider(excluded_providers=set(LOCAL_MODEL_PROVIDERS))
             if fallback_provider is None:
                 log_message("ERROR", "No non-local TTS providers available with Orcabot playback")
                 disable_tts_completely("no non-local TTS providers available with Orcabot playback", args)
@@ -3813,6 +3867,17 @@ def configure_tts_from_args(args) -> bool:
         if args.tts_voice:
             neutts2e_voice = args.tts_voice
         log_message("INFO", f"Using NeuTTS 2E with model: {neutts2e_model} and speaker: {neutts2e_voice}")
+
+        # Background preloading started earlier in initialization
+
+    elif tts_provider == 'piper':
+        # Skip the piper import - it is validated during actual model loading
+        log_message("DEBUG", f"Skipping {tts_provider} validation - will validate during model loading")
+
+        global piper_voice
+        if args.tts_voice:
+            piper_voice = args.tts_voice
+        log_message("INFO", f"Using Piper TTS with voice: {piper_voice}")
 
         # Background preloading started earlier in initialization
 

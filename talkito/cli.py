@@ -1129,9 +1129,14 @@ def test_tts_provider(provider):
         old_provider = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', None)
         shared_state = get_shared_state()
         old_state_provider = shared_state.tts_provider
+        # The voice has to move with the provider. Swapping only the provider leaves the current
+        # one's voice in place, and it is then read back as the provider under test's own - so
+        # auditioning Piper while OpenAI is configured asks for a Piper voice file named "alloy".
+        old_state_voice = shared_state.tts_voice
 
         try:
             os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = actual_provider
+            shared_state.tts_voice = None
             shared_state.set_tts_config(provider=actual_provider)
 
             # For local models, ensure model is preloaded before testing
@@ -1156,7 +1161,9 @@ def test_tts_provider(provider):
             elif 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
                 del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
 
-            # Restore shared state
+            # Restore shared state. set_tts_config ignores None, so the voice is put back by hand
+            # to cover the case where there was none to begin with.
+            shared_state.tts_voice = old_state_voice
             shared_state.set_tts_config(provider=old_state_provider)
 
 
