@@ -123,6 +123,8 @@ talkito --tts-provider azure --tts-voice en-US-JennyNeural echo "Hello with Azur
 talkito --tts-provider gcloud --tts-voice en-US-Journey-F echo "Hello with Google"
 talkito --tts-provider kittentts --tts-voice expr-voice-3-f echo "Hello with KittenTTS"
 talkito --tts-provider kokoro --tts-voice af_heart echo "Hello with Kokoro (local)"
+talkito --tts-provider piper --tts-voice en_US-lessac-medium echo "Hello with Piper (local)"
+talkito --tts-provider neutts2e echo "Hello with NeuTTS (local)"
 
 # Use different ASR providers
 talkito --asr-provider gcloud --asr-language en-US claude
@@ -236,6 +238,21 @@ except KeyboardInterrupt:
 - **Setup**: No API key required. TalkiTo will download Kokoro weights the first time you run it (set `KOKORO_LANGUAGE`, `KOKORO_VOICE`, `KOKORO_SPEED` to control defaults).
 - **Best for**: High-quality multilingual voices without sending audio to a cloud provider.
 - **Usage**: `talkito --tts-provider kokoro --tts-voice af_heart --tts-language en-US`
+
+#### Piper (Local / Offline)
+- **Install**: `pip install piper-tts`
+- **Setup**: No API key required. A voice is a single ONNX file of a few tens of megabytes, downloaded on first use into `~/.cache/talkito/piper` (set `PIPER_VOICE` and `PIPER_VOICE_DIR` to change the default voice or location).
+- **Best for**: The lightest offline option by a wide margin, and the fastest. It needs no torch at all, where the other local engines pull in hundreds of megabytes of runtime.
+- **Voices**: `en_US-lessac-medium` (default), `en_GB-alan-medium`, `en_US-amy-medium` and many more — the menu lists a shortlist, but any name Piper publishes is accepted. Full list: `python -m piper.download_voices --help`
+- **Usage**: `talkito --tts-provider piper --tts-voice en_GB-alan-medium`
+
+#### NeuTTS 2E (Local / Offline)
+- **Install**: `pip install neutts llama-cpp-python soundfile`
+- **Setup**: No API key required. The first run downloads a quantized backbone and a decoder-only ONNX codec, around 600 MB together. Set `NEUTTS2E_VOICE` and `NEUTTS2E_EMOTION` to change the speaker and delivery.
+- **Best for**: Expressive, emotion-conditioned speech that stays on-device. It is a language model over a neural audio codec rather than a feed-forward synthesiser, so it sounds markedly less robotic than its size suggests.
+- **Speakers**: `emily` (default), `paul`, `sophie`, `steven`. Emotions: `neutral`, `happy`, `sad`, `angry`, `surprised`, `fearful`, `disgusted`.
+- **Devices**: On Apple Silicon the backbone runs on Metal automatically and falls back to CPU if unavailable. `NEUTTS_DEVICE=cpu` pins everything to CPU; `NEUTTS_BACKBONE_DEVICE` overrides the backbone alone.
+- **Usage**: `NEUTTS2E_EMOTION=happy talkito --tts-provider neutts2e --tts-voice sophie`
 
 ### Automatic Speech Recognition (ASR) Providers
 
