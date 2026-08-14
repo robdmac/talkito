@@ -133,8 +133,14 @@ def with_download_progress(provider: str, model_name: str, download_func: Callab
 
 def _hf_cached(repo_id: str, filename: Optional[str] = None,
                revision: Optional[str] = None,
-               cache_dir: Optional[str] = None) -> bool:
-    """Return True if a repo (or specific file) is already present in the local HF cache."""
+               cache_dir: Optional[str] = None,
+               allow_patterns: Optional[list] = None) -> bool:
+    """Return True if a repo (or specific file) is already present in the local HF cache.
+
+    allow_patterns must mirror whatever the loader downloads. Asking for a whole snapshot when the
+    loader fetches a subset reports "not cached" forever, because the files it never wanted are
+    never there.
+    """
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
         from huggingface_hub.utils import LocalEntryNotFoundError
@@ -142,7 +148,8 @@ def _hf_cached(repo_id: str, filename: Optional[str] = None,
         if filename:
             hf_hub_download(repo_id=repo_id, filename=filename, revision=revision, local_files_only=True, cache_dir=cache_dir)
         else:
-            snapshot_download(repo_id=repo_id, revision=revision, local_files_only=True, cache_dir=cache_dir)
+            snapshot_download(repo_id=repo_id, revision=revision, local_files_only=True,
+                              cache_dir=cache_dir, allow_patterns=allow_patterns)
         return True
     except LocalEntryNotFoundError:
         return False
@@ -171,6 +178,13 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
                 _hf_cached(repo_id=repo, filename=config[key])
                 for key in ("model_file", "voices") if config.get(key)
             )
+        elif provider == 'piper':
+            # A Piper voice is a plain pair of files rather than a Hub repo, and the runtime needs
+            # the json alongside the weights. Share the loader's completeness test so the two cannot
+            # disagree: reporting cached here while the loader re-fetches leaves a voice that is
+            # never repaired and never loads.
+            from .tts import piper_voice_path, _piper_voice_complete
+            return _piper_voice_complete(piper_voice_path(model_name))
         elif provider == 'kokoro':
             repo = model_name if '/' in model_name else "hexgrad/Kokoro-82M"
             return _hf_cached(repo_id=repo)
@@ -180,7 +194,12 @@ def check_model_cached(provider: str, model_name: str, codec: Optional[str] = No
             # the default in tts.py: talkito decodes pre-encoded speakers and never clones, so the
             # decoder-only ONNX codec is the configuration it always wants.
             codec = codec or os.environ.get('NEUTTS_CODEC', 'neuphonic/neucodec-onnx-decoder-int8')
-            if not _hf_cached(repo_id=model_name):
+            # A GGUF backbone is fetched with allow_patterns=['*.gguf'], so the repo's README,
+            # licence and images never arrive. Asking for the full snapshot here would report the
+            # model as missing on every run, re-prompting for a download that is already on disk
+            # and failing outright in the speech worker, which cannot ask for consent.
+            backbone_patterns = ['*.gguf'] if model_name.lower().endswith('gguf') else None
+            if not _hf_cached(repo_id=model_name, allow_patterns=backbone_patterns):
                 return False
             if 'onnx' in codec:
                 # ONNX decoders are a single file and need no semantic encoder

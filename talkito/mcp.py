@@ -826,12 +826,22 @@ async def _change_tts_internal(provider: str = "system", voice: str = None, regi
                 defaults['voice'] = tts.kokoro_voice
                 defaults['language'] = tts.kokoro_language
                 defaults['rate'] = tts.kokoro_speed
+            elif name == 'piper':
+                defaults['voice'] = tts.piper_voice
+            elif name == 'neutts2e':
+                defaults['voice'] = tts.neutts2e_voice
+                defaults['model'] = tts.neutts2e_model
             return defaults
 
         defaults = _provider_defaults(provider)
 
-        desired_model = defaults.get('model') or existing_config.get('model')
-        desired_voice = voice or defaults.get('voice') or existing_config.get('voice')
+        # A voice name belongs to the provider that defines it, so it must not survive a switch:
+        # carrying OpenAI's "alloy" into Piper asks for a voice file that cannot exist. Keep the
+        # existing value only when the provider is unchanged.
+        keep_existing = existing_config.get('provider') == provider
+
+        desired_model = defaults.get('model') or (existing_config.get('model') if keep_existing else None)
+        desired_voice = voice or defaults.get('voice') or (existing_config.get('voice') if keep_existing else None)
         desired_region = region or defaults.get('region') or existing_config.get('region')
         desired_language = language or defaults.get('language') or existing_config.get('language')
         defaults_rate = defaults.get('rate')
@@ -885,8 +895,9 @@ async def _change_tts_internal(provider: str = "system", voice: str = None, regi
             # Clear the queue but preserve spoken_cache to prevent repeats during redraws
             tts.clear_tts_queue_only()
 
-        # For local models, preload the model before starting the worker
-        if final_provider in ['kittentts', 'kokoro']:
+        # For local models, preload the model before starting the worker. The worker cannot gather
+        # download consent, so any provider left out of this list can never fetch a first model.
+        if final_provider in tts.LOCAL_MODEL_PROVIDERS:
             log_message("INFO", f"Preloading {final_provider} model...")
             tts.preload_local_model(final_provider)
 

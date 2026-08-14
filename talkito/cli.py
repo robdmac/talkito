@@ -109,7 +109,7 @@ def parse_arguments():
     # TTS options
     tts_group = parser.add_argument_group('TTS options')
     tts_group.add_argument('--tts-provider', type=str,
-                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'off'],
+                           choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'neutts2e', 'piper', 'off'],
                            help='TTS provider to use (use "off" to disable TTS)')
     tts_group.add_argument('--tts-voice', type=str, 
                            help='Voice to use (provider-specific)')
@@ -683,7 +683,7 @@ def show_welcome_and_config(args):
     accessible_comms = check_comms_provider_accessibility(args)
 
     # TTS Configuration choices (aws and polly are the same, only show polly in menu)
-    tts_choices = ['system', 'openai', 'polly (aws)', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'off', 'auto']
+    tts_choices = ['system', 'openai', 'polly (aws)', 'azure', 'gcloud', 'elevenlabs', 'deepgram', 'kittentts', 'kokoro', 'neutts2e', 'piper', 'off', 'auto']
     tts_available = []
 
     for provider in tts_choices:
@@ -1129,13 +1129,18 @@ def test_tts_provider(provider):
         old_provider = os.environ.get('TALKITO_PREFERRED_TTS_PROVIDER', None)
         shared_state = get_shared_state()
         old_state_provider = shared_state.tts_provider
+        # The voice has to move with the provider. Swapping only the provider leaves the current
+        # one's voice in place, and it is then read back as the provider under test's own - so
+        # auditioning Piper while OpenAI is configured asks for a Piper voice file named "alloy".
+        old_state_voice = shared_state.tts_voice
 
         try:
             os.environ['TALKITO_PREFERRED_TTS_PROVIDER'] = actual_provider
+            shared_state.tts_voice = None
             shared_state.set_tts_config(provider=actual_provider)
 
             # For local models, ensure model is preloaded before testing
-            if actual_provider in ['kittentts', 'kokoro']:
+            if actual_provider in tts.LOCAL_MODEL_PROVIDERS:
                 tts.preload_local_model(actual_provider)
 
             # Use direct provider approach to avoid worker synchronization issues
@@ -1156,7 +1161,9 @@ def test_tts_provider(provider):
             elif 'TALKITO_PREFERRED_TTS_PROVIDER' in os.environ:
                 del os.environ['TALKITO_PREFERRED_TTS_PROVIDER']
 
-            # Restore shared state
+            # Restore shared state. set_tts_config ignores None, so the voice is put back by hand
+            # to cover the case where there was none to begin with.
+            shared_state.tts_voice = old_state_voice
             shared_state.set_tts_config(provider=old_state_provider)
 
 
