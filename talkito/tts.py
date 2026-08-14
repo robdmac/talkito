@@ -561,6 +561,55 @@ def _split_neutts_variant(variant: str) -> Tuple[str, str]:
     return backbone or neutts2e_model, codec or neutts_codec
 
 
+class _ThreadScopedCapture:
+    """Divert one thread's stdout writes, leaving every other thread's alone.
+
+    contextlib.redirect_stdout swaps sys.stdout for the whole process, and model loading runs in a
+    background thread while the wrapped program owns the terminal - so a plain redirect would
+    swallow the program's output for as long as the load takes.
+    """
+
+    def __init__(self, real, thread_id, sink):
+        self._real, self._thread_id, self._sink = real, thread_id, sink
+
+    def write(self, data):
+        if threading.get_ident() == self._thread_id:
+            self._sink.write(data)
+            return len(data)
+        return self._real.write(data)
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+_stdout_capture_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _quiet_model_load(label: str):
+    """Send a model's loading chatter to the log instead of the terminal.
+
+    neutts and the perth watermarker announce themselves with bare print() calls, which land in
+    whatever the wrapped program is drawing - most visibly inside a TUI's input line. The text is
+    kept, at DEBUG, rather than discarded.
+    """
+    sink = io.StringIO()
+    with _stdout_capture_lock:
+        real = sys.stdout
+        sys.stdout = _ThreadScopedCapture(real, threading.get_ident(), sink)
+    try:
+        yield
+    finally:
+        with _stdout_capture_lock:
+            sys.stdout = real
+        for line in sink.getvalue().splitlines():
+            if line.strip():
+                log_message("DEBUG", f"{label}: {line.strip()}")
+
+
 def _create_model_instance(provider: str, variant: str = ''):
     """Create model instance for the specified provider."""
     if provider == 'kokoro':
@@ -882,7 +931,8 @@ def _load_model_background(provider: str, variant: str):
 
     try:
         log_message("INFO", f"Background loading {provider} model...")
-        model = _create_model_instance(provider, variant)
+        with _quiet_model_load(provider):
+            model = _create_model_instance(provider, variant)
 
         with _local_model_cache_lock:
             entry = _local_models.setdefault(key, _ModelEntry())
