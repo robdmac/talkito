@@ -2656,7 +2656,10 @@ class NeuTTS2EProvider(TTSProvider):
             # 2E is a BPE-input model with no phonemizer, so digits and acronyms are spelled here
             spoken = normalize_for_bpe_speech(text)
             log_message("DEBUG", f"{spoken=} {speaker=} {emotion=}")
-            audio = model.infer(spoken, speaker=speaker, emotion=emotion)
+            # infer() prints the sampling seed, so it needs the same treatment as loading: this
+            # runs per utterance, in the worker thread, while the wrapped program owns the terminal
+            with _quiet_model_load('neutts2e'):
+                audio = model.infer(spoken, speaker=speaker, emotion=emotion)
 
             buf = io.BytesIO()
             sf.write(buf, audio, NEUTTS_SAMPLE_RATE, format='WAV')
