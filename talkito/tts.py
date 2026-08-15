@@ -1057,6 +1057,9 @@ def preload_local_model(provider: str, variant: Optional[str] = None):
     # input() only works on the main thread, so a worker that needs a download records an
     # error instead of silently competing for stdin with the wrapped program.
     needs_download = _model_needs_download(provider, variant)
+    # Bars are worth showing for a real fetch, but a cached load draws them reporting 0.00B
+    from .models import set_hf_progress_bars
+    set_hf_progress_bars(needs_download)
     if needs_download:
         if threading.current_thread() is not threading.main_thread():
             message = (f"{provider} model needs downloading but consent cannot be requested from thread "
