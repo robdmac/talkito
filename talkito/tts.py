@@ -141,7 +141,7 @@ class SpeechItem:
             self.timestamp = datetime.now()
 
 # Configuration constants
-MIN_SPEAK_LENGTH = 4  # Minimum characters before speaking
+MIN_SPEAK_LENGTH = 2  # Minimum characters before speaking; 4 silently ate "ok", "yes", "no"
 CACHE_SIZE = 10000  # Cache size for similarity checking
 SIMILARITY_THRESHOLD = 0.85  # How similar text must be to be considered a repeat
 DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
@@ -269,6 +269,37 @@ class _ModelEntry:
 # Keyed by (provider, variant) so switching provider or language does not evict the other model
 _local_models: Dict[Tuple[str, str], _ModelEntry] = {}
 _local_model_cache_lock = threading.Lock()
+
+
+def _release_local_models() -> None:
+    """Close cached models at exit, while the interpreter can still run their teardown.
+
+    llama.cpp releases its Metal residency sets in Llama.close(). Left to __del__ during interpreter
+    shutdown, that runs after module globals have been torn down, so it raises part-way through, the
+    release never completes, and ggml-metal's own static destructor then aborts the process on an
+    assertion that the sets are empty. On CPU the same failure is only a printed traceback; on Metal
+    it kills the process with SIGABRT after the work is already done.
+
+    Closing here breaks that chain, because imports are still live at this point.
+    """
+    with _local_model_cache_lock:
+        entries = [entry for entry in _local_models.values() if entry.model is not None]
+        _local_models.clear()
+
+    for entry in entries:
+        model, entry.model = entry.model, None
+        # NeuTTS holds the llama.cpp handle as .backbone; other providers may nest it elsewhere
+        for name in ('backbone', 'model', 'llm', 'codec'):
+            close = getattr(getattr(model, name, None), 'close', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as e:
+                    log_message("DEBUG", f"Ignoring error closing {name}: {e}")
+        del model
+
+
+atexit.register(_release_local_models)
 _delayed_items_lock = threading.Lock()
 _delayed_timer = None
 _delayed_speech_item: Optional[SpeechItem] = None
@@ -816,6 +847,22 @@ def _ensure_piper_voice(voice: str) -> str:
     return str(path)
 
 
+
+def _pcm_safe(audio):
+    """Scale audio back under full scale before a PCM_16 write, which otherwise hard-clips.
+
+    Neural vocoders can overshoot [-1, 1] on short utterances: NeuTTS 2E exceeded full scale on 5 of
+    8 runs of "hi", and libsndfile clamps rather than wraps, pinning a third of the samples at the
+    rail. Returns the input untouched when it already fits, so this only engages on the overshoot.
+    """
+    import numpy as np
+    audio = np.asarray(audio)
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    if peak <= 1.0:
+        return audio
+    log_message("DEBUG", f"Normalising TTS audio from peak {peak:.3f} to avoid PCM_16 clipping")
+    return audio / peak
+
 def _resolve_neutts_codec(codec_repo: str) -> str:
     """Resolve an ONNX codec repo id to its local model.onnx path.
 
@@ -1010,6 +1057,9 @@ def preload_local_model(provider: str, variant: Optional[str] = None):
     # input() only works on the main thread, so a worker that needs a download records an
     # error instead of silently competing for stdin with the wrapped program.
     needs_download = _model_needs_download(provider, variant)
+    # Bars are worth showing for a real fetch, but a cached load draws them reporting 0.00B
+    from .models import set_hf_progress_bars
+    set_hf_progress_bars(needs_download)
     if needs_download:
         if threading.current_thread() is not threading.main_thread():
             message = (f"{provider} model needs downloading but consent cannot be requested from thread "
@@ -2449,7 +2499,7 @@ class KittenTTSProvider(TTSProvider):
             audio = m.generate(maybe_expand_numbers(text),
                                voice=self.get_config_value('voice', kittentts_voice))
             buf = io.BytesIO()
-            sf.write(buf, audio, 24000, format='WAV')
+            sf.write(buf, _pcm_safe(audio), 24000, format='WAV')
             return buf.getvalue(), ".wav"
         except Exception as e:
             log_message("ERROR", f"KittenTTS synthesis error: {e}")
@@ -2488,7 +2538,7 @@ class KokoroTTSProvider(TTSProvider):
                 import soundfile as sf
                 full_audio = np.concatenate(audio_chunks)
                 buf = io.BytesIO()
-                sf.write(buf, full_audio, 24000, format='WAV')
+                sf.write(buf, _pcm_safe(full_audio), 24000, format='WAV')
                 return buf.getvalue(), ".wav"
             else:
                 log_message("ERROR", "KokoroTTS generated no audio")
@@ -2662,7 +2712,7 @@ class NeuTTS2EProvider(TTSProvider):
                 audio = model.infer(spoken, speaker=speaker, emotion=emotion)
 
             buf = io.BytesIO()
-            sf.write(buf, audio, NEUTTS_SAMPLE_RATE, format='WAV')
+            sf.write(buf, _pcm_safe(audio), NEUTTS_SAMPLE_RATE, format='WAV')
             return buf.getvalue(), ".wav"
         except Exception as e:
             log_message("ERROR", f"NeuTTS2E synthesis error: {e}")
@@ -2826,12 +2876,12 @@ def clean_punctuation_sequences(text: str) -> str:
     return text
 
 
-def extract_speakable_text(text: str) -> (str, str):
+def extract_speakable_text(text: str) -> str:
     """Extract speakable text and convert mathematical symbols."""
 
     # Drop OAuth/login URLs or query fragments entirely
     if RE_HTTP_URL_ALL.search(text) or RE_SUSPICIOUS_QUERY.search(text) or RE_PERCENT_ENCODE.search(text):
-        return "", ""
+        return ""
 
     text = RE_GREATER_UNDERSCORE.sub('', text)
 
@@ -2860,7 +2910,7 @@ def extract_speakable_text(text: str) -> (str, str):
 
     # Skip text that contains no letters (just punctuation, numbers, spaces)
     if not RE_HAS_LETTERS.search(text):
-        return "", ""
+        return ""
 
     return spoken_text
 
