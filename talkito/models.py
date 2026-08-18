@@ -83,6 +83,22 @@ def ask_user_consent(provider: str, model_name: str) -> bool:
         return False
 
 
+def set_hf_progress_bars(enabled: bool) -> None:
+    """Show HuggingFace transfer bars only when something is actually being fetched.
+
+    hf_hub_download draws its bar before it discovers the file is already local, so every cached
+    load prints a "Fetching 1 files" bar plus xet's "Reconstruction/Download complete" pair, all
+    reporting 0.00B. An explicit HF_HUB_DISABLE_PROGRESS_BARS is left alone as a deliberate choice.
+    """
+    if os.environ.get('HF_HUB_DISABLE_PROGRESS_BARS') is not None:
+        return
+    try:
+        from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
+    except ImportError:
+        return
+    (enable_progress_bars if enabled else disable_progress_bars)()
+
+
 def show_download_progress(provider: str, model_name: str):
     """Show simple download progress."""
     print(f"Downloading {provider} model '{model_name}'...")
