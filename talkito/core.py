@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import asr, comms, tts
 from .profiles import get_profile, Profile
+from .screen import ScreenTranscript
 from .logs import setup_logging, get_logger, log_message, restore_stderr, is_logging_enabled
 from .state import get_shared_state, sync_communication_state_from_config
 from .tts import stop_tts_immediately
@@ -170,10 +171,10 @@ ANSI_RE = re.compile(ANSI_INLINE)
 
 # 4) Orphaned single-letter filter (don't remove valid 'a' or 'I' or contraction tails)
 ORPHANED_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9'])"              # not after word char or apostrophe
-    r"(?!a\b|I\b|d\b|ll\b|re\b|ve\b|m\b|t\b)"   # keep real words & contraction tails
+    r"(?<![\w'])"                     # not after word char (accented ones too) or apostrophe
+    r"(?!a\b|A\b|I\b|d\b|ll\b|re\b|ve\b|m\b|t\b)"   # keep real words & contraction tails
     r"[A-Za-z]"                       # a single stray letter
-    r"(?![A-Za-z0-9])"                # not followed by a letter or digit (preserves v2.0.13)
+    r"(?!\w)"                         # not followed by a letter or digit (preserves v2.0.13, Kōryū-ji)
 )
 
 DASH_LINE_PATTERN = re.compile(r'──+')
@@ -207,6 +208,8 @@ current_master_fd: Optional[int] = None
 current_proc: Optional[asyncio.subprocess.Process] = None
 verbosity_level: int = 0
 comm_manager: Optional[Any] = None  # Will be CommunicationManager when initialized
+screen_transcript: Optional[ScreenTranscript] = None  # Virtual screen for profiles that read_screen
+screen_line_number = 0
 
 # Thread pool for blocking I/O operations
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='talkito-io')
@@ -555,8 +558,9 @@ def send_pending_text():
         log_message("DEBUG", f"send_pending_text [{pending_text}]")
         log_message("DEBUG", f"last_sent_text {terminal.last_sent_text}")
 
-        # Check for duplicate sends (but allow questions and exceptions through)
-        if pending_text.strip() == terminal.last_sent_text.strip():
+        # Check for duplicate sends (but allow questions and exceptions through, and REPLs, which
+        # can rightly print the same thing twice)
+        if pending_text.strip() == terminal.last_sent_text.strip() and active_profile.debounce_similar:
             # Don't skip if this is a question or exception match - these should always be spoken
             if not terminal.pending_text_exception_match:
                 log_message("DEBUG", f"Skipping duplicate send: '{pending_text}'")
@@ -597,6 +601,8 @@ def send_pending_text():
                 writes_partial_output=active_profile.writes_partial_output,
                 callback=speech_callback,
                 constituent_parts=constituent_parts,
+                similarity_checks=active_profile.debounce_similar,
+                bare_numbers=active_profile.speak_bare_numbers,
             )
             if speakable_text:
                 terminal.pending_speech_text.clear()
@@ -612,7 +618,8 @@ def send_pending_text():
             terminal.pending_text_exception_match = False  # Reset flag
             terminal.pending_text_should_skip = False  # Reset flag
 
-def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False):
+def queue_output(text: str, line_number: Optional[int] = None, exception_match: bool = False,
+                 continuation: bool = False):
     """Queue text for TTS and communication channels with optional line tracking and exception matching."""
     log_message("DEBUG", f"queue_output [{text}] {line_number} exception_match={exception_match}")
     # if line_number < terminal.last_line_number and not active_profile.writes_partial_output:
@@ -633,7 +640,7 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
         text = active_profile.apply_replacements(text)
         
         # Check if text should be skipped based on profile
-        should_skip = active_profile and active_profile.should_skip(text, verbosity_level)
+        should_skip = active_profile and active_profile.should_skip(text, verbosity_level, continuation)
             
         # Queue for TTS (TTS worker will handle ASR pausing and cleaning of text)
         # Only append if previous line was queued AND line numbers are sequential (or close)
@@ -657,6 +664,10 @@ def queue_output(text: str, line_number: Optional[int] = None, exception_match: 
             log_message("DEBUG", "queue_output appending")
             if text.startswith("  "):
                 text = "\n" + text
+            if not terminal.pending_speech_text:
+                # What it continues has already been sent, so this starts a new piece of speech; keep
+                # the old line number and the TTS layer takes it for a repeat of what was spoken
+                terminal.pending_text_line_number = line_number
             terminal.pending_speech_text.append(text)
             # Skip status already handled above; keep existing decision for pending buffer
             log_message("DEBUG", f"queue_output keeping pending_text_should_skip={terminal.pending_text_should_skip}")
@@ -721,7 +732,7 @@ def clean_text(text: str) -> str:
             log_message("DEBUG", f"clean_text: found {len(cursor_forward_matches)} cursor forward commands")
         text = CURSOR_FORWARD_PATTERN.sub(lambda m: ' ' * (int(m.group(1)) if m.group(1) else 1), text)
 
-    text = text.replace("'", "'")
+    text = text.replace("\u2019", "'")   # curly apostrophe, so contraction tails are recognised
 
     text = re.sub(
         r"(?<=[A-Za-z0-9])'(?:(?:\s|\x1B\[[0-9;?]*[ -/]*[@-~])+)" +
@@ -886,6 +897,11 @@ def apply_mic_indicator(data: bytes, wanted: bool) -> bytes:
     return updated
 
 
+def _is_spoken_number(line: str) -> bool:
+    """Whether line is a single number this program means as an answer ('5', '-4' at a Python prompt)."""
+    return bool(active_profile and active_profile.speak_bare_numbers and tts.RE_BARE_NUMBER.match(line))
+
+
 def should_skip_line(line: str) -> bool:
     """Check if line should be skipped based on filters"""
     # Use Profile object if available
@@ -906,7 +922,7 @@ def should_skip_line(line: str) -> bool:
 
     # Check for progress patterns
     try:
-        if any(re.match(p, line) for p in PROGRESS_PATTERNS if p):
+        if any(re.match(p, line) for p in PROGRESS_PATTERNS if p) and not _is_spoken_number(line):
             log_message("FILTER", f"Skipped progress line: '{line}'")
             return True
     except Exception as e:
@@ -918,8 +934,9 @@ def should_skip_line(line: str) -> bool:
         log_message("FILTER", f"Skipped file path: '{line}'")
         return True
 
-    # Skip lines that are just numbers (single or multiple), catches cases like "599" or "599 603 1117"
-    if NUMBERS_ONLY_FILTER_PATTERN.match(line):
+    # Skip lines that are just numbers (single or multiple), catches cases like "599" or "599 603 1117",
+    # unless a single number is this program's answer ('5' from 2 + 3 at a Python prompt)
+    if NUMBERS_ONLY_FILTER_PATTERN.match(line) and not _is_spoken_number(line):
         log_message("FILTER", f"Skipped line with only numbers: '{line}'")
         return True
 
@@ -1146,10 +1163,10 @@ def _skip_line_and_return(buffer: List[str], line: str, detected_prompt: bool = 
     return buffer, line, detected_prompt
 
 
-def _queue_text(text: str, line_number: Optional[int] = None, is_question = False) -> None:
+def _queue_text(text: str, line_number: Optional[int] = None, is_question = False, continuation: bool = False) -> None:
     """Helper to queue text with exception matching"""
     exception_match = (active_profile and active_profile.matches_exception_pattern(text, verbosity_level)) or is_question
-    queue_output(strip_profile_symbols(text), line_number, exception_match)
+    queue_output(strip_profile_symbols(text), line_number, exception_match, continuation)
 
 
 def _queue_and_return(text: str, buffer: List[str], line: str, line_number: Optional[int] = None, 
@@ -1221,7 +1238,7 @@ def _handle_continuation_line(cleaned_line: str, line: str, buffer: List[str], l
             log_message("INFO", f"Processing interaction menu line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
         else:
             log_message("INFO", f"Processing continuation line (previous was queued): '{line[:MAX_LINE_PREVIEW]}...'")
-        _queue_text(cleaned_line, line_number)
+        _queue_text(cleaned_line, line_number, continuation=True)
         return [], line, False
         
     return None
@@ -1338,7 +1355,7 @@ def process_line(line: str, buffer: List[str], prev_line: str,
             cleaned_line = box_content
 
         # Skip echoed user input when we're waiting at the prompt for the next command.
-        if asr_state.waiting_for_input and not is_prompt:
+        if asr_state.waiting_for_input and not is_prompt and active_profile.suppress_input_echo:
             log_message("FILTER", f"Suppressed input echo while waiting for prompt: '{cleaned_line}'")
             return _skip_line_and_return(buffer, line)
 
@@ -1639,6 +1656,10 @@ async def process_pty_output(data: bytes, output_buffer: LineBuffer,
     
     if recorder.enabled:
         recorder.record_event('OUTPUT', data)
+
+    if active_profile and active_profile.reads_screen:
+        text_buffer, prev_line = process_screen_output(data, text_buffer, prev_line, asr_mode)
+        return line_buffer, text_buffer, prev_line, cursor_row
 
     # Debug logging for response lines
     if b'\xe2\x8f\xba' in data:  # UTF-8 bytes for ⏺
@@ -2562,6 +2583,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
         # Cursor tracking
         current_cursor_row = 1
         get_terminal_size()  # Initialize terminal dimensions
+        reset_screen_transcript()
 
         # Terminal state tracking
         in_alternate_buffer = False
@@ -2824,6 +2846,10 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     log_message("ERROR", f"Unexpected error in PTY read loop: {e}")
                     log_message("ERROR", f"Traceback: {traceback.format_exc()}")
 
+            if active_profile and active_profile.reads_screen:
+                # A row still being painted is held back until the screen goes quiet
+                buffer, prev_line = process_screen_output(b'', buffer, prev_line, asr_mode)
+
             if current_proc.returncode is not None:
                 if recorder.enabled:
                     # In record mode, drain and record any remaining output
@@ -3041,7 +3067,12 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         line = line_bytes.decode('utf-8', errors='ignore')
 
         line_idx, action = output_buffer.add_or_update_line(line)
-        
+        if action == 'unchanged' and not active_profile.debounce_similar and line.strip():
+            # Repeats are a repainting TUI's way of standing still, but a REPL printing the same
+            # answer twice means it ('5' again for another 2 + 3)
+            line_idx, action = output_buffer.next_index, 'added'
+            output_buffer.next_index += 1
+
         if action == 'added':
             track_line_position(line_idx, cursor_row)
 
@@ -3063,19 +3094,88 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
             # For unchanged lines, don't process but preserve state
             detected_prompt = False
 
-        response_prefix = active_profile.response_prefix
-        if clean_text(line).strip().startswith(response_prefix):
-            asr_state.waiting_for_input = False
-            asr_state.refresh_spaces_added = 0  # Reset refresh spaces when response starts
-            check_and_enable_auto_listen(asr_mode)
-
-        if detected_prompt:
-            asr_state.waiting_for_input = True
-            asr_state.refresh_spaces_added = 0  # Reset refresh spaces for new prompt
-            log_message("INFO", "Detected prompt")
-            check_and_enable_auto_listen(asr_mode)
+        _update_input_state(line, detected_prompt, asr_mode)
 
     return line_buffer, text_buffer, prev_line, cursor_row, detected_prompt
+
+
+def _update_input_state(line: str, detected_prompt: bool, asr_mode: str):
+    """Track whether the program is responding or waiting for input after a processed line."""
+    response_prefix = active_profile.response_prefix
+    if response_prefix and clean_text(line).strip().startswith(response_prefix):
+        asr_state.waiting_for_input = False
+        asr_state.refresh_spaces_added = 0  # Reset refresh spaces when response starts
+        check_and_enable_auto_listen(asr_mode)
+
+    if detected_prompt:
+        asr_state.waiting_for_input = True
+        asr_state.refresh_spaces_added = 0  # Reset refresh spaces for new prompt
+        log_message("INFO", "Detected prompt")
+        check_and_enable_auto_listen(asr_mode)
+
+
+def _visible_screen_size() -> Tuple[int, int]:
+    """Rows and columns of the terminal the output is shown in, which is where it wraps."""
+    try:
+        size = os.get_terminal_size(sys.stdout.fileno())
+        return size.lines, size.columns
+    except OSError:
+        pass
+    if current_master_fd is not None:
+        try:
+            rows, cols, _, _ = struct.unpack('HHHH', fcntl.ioctl(current_master_fd, termios.TIOCGWINSZ, b'\0' * 8))
+            if rows and cols:
+                return rows, cols
+        except OSError:
+            pass
+    return 24, 80
+
+
+def reset_screen_transcript():
+    """Forget the virtual screen so the next program starts from a blank one."""
+    global screen_transcript, screen_line_number
+    screen_transcript = None
+    screen_line_number = 0
+
+
+def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
+                          asr_mode: str, final: bool = False, now: Optional[float] = None) -> Tuple[List[str], str]:
+    """Read a screen-painting TUI through the virtual screen and process each completed row.
+
+    With no data this only releases a last row the screen has stopped changing, or any row when final.
+    """
+    global screen_transcript, screen_line_number
+    if not data:
+        if screen_transcript is None:
+            return text_buffer, prev_line
+        completed, turn_ended = screen_transcript.flush_idle(float('inf') if final else now)
+    else:
+        rows, cols = _visible_screen_size()
+        if screen_transcript is None:
+            screen_transcript = ScreenTranscript(rows, cols, active_profile.screen_composer_pattern,
+                                                 active_profile.screen_live_pattern,
+                                                 active_profile.screen_turn_end_pattern,
+                                                 active_profile.screen_margin,
+                                                 active_profile.screen_settle_frames,
+                                                 active_profile.screen_right_margin,
+                                                 active_profile.screen_quiet_seconds)
+        else:
+            screen_transcript.resize(rows, cols)
+        completed, turn_ended = screen_transcript.feed(data, now)
+
+    for row in completed:
+        screen_line_number += 1
+        log_message("INFO", f"Screen row {screen_line_number}: '{row}'")
+        text_buffer, prev_line, detected_prompt = process_line(
+            row, text_buffer, prev_line, False, screen_line_number, asr_mode
+        )
+        _update_input_state(row, detected_prompt, asr_mode)
+
+    if turn_ended:
+        # The turn's footer is up, so the program is back at its composer
+        log_message("INFO", "Screen turn ended")
+        _update_input_state('', True, asr_mode)
+    return text_buffer, prev_line
 
 
 # Global variables for cleanup
@@ -3411,6 +3511,7 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
     current_cursor_row = 1
     get_terminal_size()  # Initialize terminal dimensions
 
+    reset_screen_transcript()
     print(f"Replaying {len(entries)} session entries...")
     
     for entry in entries:
@@ -3452,7 +3553,15 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
             
             # Update cursor position tracking
             current_cursor_row = update_cursor_position(current_cursor_row, cursor_delta, did_scroll)
-            
+
+            if active_profile and active_profile.reads_screen:
+                # Recorded timing decides where output paused, which is where screens without
+                # synchronized updates are read
+                stamp = entry['timestamp']
+                buffer, prev_line = process_screen_output(b'', buffer, prev_line, "off", now=stamp - 0.001)
+                buffer, prev_line = process_screen_output(raw_bytes, buffer, prev_line, "off", now=stamp)
+                continue
+
             if time.time() - buffer_switch_time < 0.5:
                 continue
                 
@@ -3475,6 +3584,9 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
                 timestamp = time.time() - record_start_time
                 recorded_data.append((timestamp, 'INPUT', raw_bytes))
             
+
+    if active_profile and active_profile.reads_screen:
+        buffer, prev_line = process_screen_output(b'', buffer, prev_line, "off", final=True)
 
     # Process any remaining line buffer content
     if line_buffer:
