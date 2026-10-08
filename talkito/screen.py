@@ -34,6 +34,7 @@ clock = time.monotonic
 
 # Rows that open a list item are never the tail of a wrapped line
 LIST_ITEM_PATTERN = re.compile(r'^\s*(?:[-*•◦▪›>]|\d+[.)])\s')
+WORD_PATTERN = re.compile(r'\w+')
 
 
 def char_width(char: str) -> int:
@@ -305,15 +306,22 @@ class ScreenTranscript:
     def __init__(self, rows: int, cols: int, composer_pattern: Optional[str] = None,
                  live_pattern: Optional[str] = None, turn_end_pattern: Optional[str] = None,
                  margin: int = 0, settle_frames: int = 0, right_margin: int = 0,
-                 quiet_seconds: float = 0.0, busy_pattern: Optional[str] = None):
+                 quiet_seconds: float = 0.0, busy_pattern: Optional[str] = None, composer_edges: int = 1,
+                 echo_until_busy: bool = False):
         self.screen = Screen(rows, cols)
         self.composer_pattern = re.compile(composer_pattern) if composer_pattern else None
+        # Rows matching the composer pattern that frame the input box; the transcript ends at the top one
+        self.composer_edges = composer_edges
         self.live_pattern = re.compile(live_pattern) if live_pattern else None
         self.turn_end_pattern = re.compile(turn_end_pattern) if turn_end_pattern else None
         # Shown anywhere while the program works: the last row is not released for sitting still while it
         # shows, and for TUIs with no turn footer the turn ends when it goes
         self.busy_pattern = re.compile(busy_pattern) if busy_pattern else None
         self.busy = False
+        # For TUIs that mark neither the prompt echo nor the reply, rows that appear before the program
+        # shows it is working are the user's own prompt (or the startup banner), not something to read out
+        self.echo_until_busy = echo_until_busy
+        self._read_busy = False   # busy as of the last frame read, which output arriving does not change
         self.margin = margin   # columns of left padding the TUI puts before every transcript row
         self.right_margin = right_margin   # columns it leaves unused at the right before wrapping
         # TUIs that lay out the next row before finishing the one above need rows to sit unchanged
@@ -325,6 +333,8 @@ class ScreenTranscript:
         self.last_output = 0.0
         self.row_since: Dict[str, int] = {}
         self.released: List[str] = []
+        # Words already read out when the terminal was resized, which the program then re-wraps and repaints
+        self._reflow_words: Optional[set] = None
         self.last_turn_end = ''
         self.held_row = ''
         self.held_since = 0.0   # when the transcript last changed anywhere, not just its last row
@@ -340,6 +350,8 @@ class ScreenTranscript:
     def resize(self, rows: int, cols: int):
         if (rows, cols) != (self.screen.rows, self.screen.cols):
             self.screen.resize(rows, cols)
+            words = set(WORD_PATTERN.findall(' '.join(self.released + [self.held_row]).lower()))
+            self._reflow_words = words or None
 
     def transcript_rows(self, lines: Optional[List[str]] = None) -> List[str]:
         """Rows above the composer, without the live status row."""
@@ -347,7 +359,7 @@ class ScreenTranscript:
         if self.composer_pattern:
             composer = [i for i, row in enumerate(rows) if self.composer_pattern.search(row)]
             if composer:
-                rows = rows[:composer[-1]]
+                rows = rows[:composer[-min(self.composer_edges, len(composer))]]
         if self.live_pattern:
             rows = ['' if self.live_pattern.search(row) else row for row in rows]
         return rows
@@ -402,7 +414,12 @@ class ScreenTranscript:
             return []
         rows = self.transcript_rows(self.screen.closed_lines)
         self.screen.closed_lines = None
-        return self._release(rows)
+        released = self._release(rows)
+        return [] if self._echoing() else released
+
+    def _echoing(self, was_busy: Optional[bool] = None) -> bool:
+        """Whether rows released now are the user's prompt echo, since the program has not started working."""
+        return self.echo_until_busy and not (self._read_busy if was_busy is None else was_busy)
 
     def _read(self, now: float) -> Tuple[List[str], bool]:
         """Take a frame from the screen; return the rows it completes and whether a turn just ended."""
@@ -413,11 +430,14 @@ class ScreenTranscript:
         last = max((i for i, row in enumerate(rows) if row.strip()), default=-1)
 
         turn_ended = False
+        was_busy = self._read_busy
         if self.busy_pattern:
             busy = any(self.busy_pattern.search(line) for line in lines)
             # A footer is the surer sign; status rows can blink out as a reply starts streaming
             turn_ended = self.busy and not busy and not self.turn_end_pattern
-            self.busy = busy
+            self.busy = self._read_busy = busy
+        # Once the program starts working the prompt echo is complete, its last row too
+        started = self._echoing(was_busy) and self._read_busy
         if last < 0:
             return [], turn_ended
 
@@ -430,7 +450,9 @@ class ScreenTranscript:
 
         # The last painted row may still be growing; everything above it is complete once settled. At
         # the end of a turn nothing is still being painted, so every row is complete, the footer too
-        released = self._release(rows[:last + 1] if turn_ended else self._settled(rows[:last]))
+        released = self._release(rows[:last + 1] if turn_ended or started else self._settled(rows[:last]))
+        if self._echoing(was_busy):
+            released = []
 
         self.held_row = rows[last]
         if rows != self._last_rows:
@@ -461,7 +483,8 @@ class ScreenTranscript:
             return [], False
 
         released, turn_ended = [], False
-        if self.unread_output and (final or now - self.last_output >= self.quiet_seconds):
+        # Once the program has exited, read what it left even part way through a synchronized update
+        if final or (self.unread_output and now - self.last_output >= self.quiet_seconds):
             self.unread_output = False
             self.quiet_frames += 1
             released, turn_ended = self._read(now)
@@ -478,11 +501,12 @@ class ScreenTranscript:
         complete = self._settled(rows[:last])
         # Once the screen has gone quiet nothing is still being painted, settled or not, unless the
         # program still shows it is working, when the reply may only be waiting on the model. Once the
-        # program has exited, whatever it left is all there will be
-        if now - self.held_since >= self.IDLE_SECONDS and (final or not self.busy) \
+        # program has exited, whatever it left is all there will be, however recently it was painted
+        if (final or (now - self.held_since >= self.IDLE_SECONDS and not self.busy)) \
                 and not (self.released and self.released[-1] == self.held_row):
             complete = rows[:last + 1]
-        return released + self._release(complete), turn_ended
+        idle = self._release(complete)
+        return released + ([] if self._echoing() else idle), turn_ended
 
     def _release(self, complete: List[str]) -> List[str]:
         if not any(row.strip() for row in complete):
@@ -503,10 +527,26 @@ class ScreenTranscript:
                 row = ' ' + row.lstrip()
             marked.append(row)
 
+        if self._reflow_words is not None:
+            marked = self._drop_reflowed(marked)
+
         # Blank rows only matter between pieces of text
         while marked and not marked[0].strip():
             marked = marked[1:]
         return marked
+
+    def _drop_reflowed(self, rows: List[str]) -> List[str]:
+        """Drop rows re-wrapped to a new width from text already read out, until a row that is new."""
+        kept = []
+        for row in rows:
+            words = WORD_PATTERN.findall(row.lower())
+            if words and self._reflow_words is not None:
+                # Most rather than all, as a row can be caught half repainted
+                if sum(word in self._reflow_words for word in words) >= 0.8 * len(words):
+                    continue
+                self._reflow_words = None
+            kept.append(row)
+        return kept
 
     def is_wrapped(self, previous: str, row: str) -> bool:
         """Whether row is the overflow of previous, judged by the next word not fitting after it."""

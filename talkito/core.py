@@ -28,6 +28,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -55,7 +56,6 @@ SPEAK_ERRORS = True  # Whether to speak stderr output
 MAX_LINE_PREVIEW = 50
 MAX_LINE_LOG = 100
 STATUS_CHECK_INTERVAL = 0.1
-RESIZE_DEBOUNCE_TIME = 0.5
 BUFFER_SWITCH_DELAY = 0.5
 SCREEN_REDRAW_THRESHOLD = 2
 SCREEN_REDRAW_TIMEOUT = 5.0
@@ -318,8 +318,6 @@ class TerminalState:
     terminal_rows: int = DEFAULT_TERMINAL_HEIGHT
     terminal_cols: int = DEFAULT_TERMINAL_WIDTH
     resize_pending: bool = False
-    resize_lock: threading.Lock = field(default_factory=threading.Lock)
-    last_resize_time: float = 0
     screen_content_cache: Deque[str] = field(default_factory=lambda: deque(maxlen=SCREEN_CONTENT_CACHE_SIZE))
     previous_line_was_skipped: bool = False
     previous_line_was_queued: bool = False
@@ -1496,24 +1494,49 @@ def update_pty_size(master_fd: int):
 
 
 def debounced_winch_handler(signum, frame):
-    """Handle terminal resize signal with debouncing"""
-    with terminal.resize_lock:
-        current_time = time.time()
-        if current_time - terminal.last_resize_time > RESIZE_DEBOUNCE_TIME:
-            terminal.resize_pending = True
-            terminal.last_resize_time = current_time
-            log_message("INFO", "Terminal resize pending")
+    """Note a terminal resize for the main loop to apply, which also coalesces a burst of them."""
+    # Nothing that can block: a second resize arriving inside this handler (dragging a window sends a
+    # burst) used to wait forever on a lock the first still held, freezing talkito
+    terminal.resize_pending = True
 
 
 def process_pending_resize(master_fd):
     """Process pending terminal resize if needed"""
-    with terminal.resize_lock:
-        if terminal.resize_pending and master_fd is not None:
-            terminal.resize_pending = False
-            update_pty_size(master_fd)
-            # Terminal size already updated by update_pty_size via get_pty_winsize
-            return True
+    if terminal.resize_pending and master_fd is not None:
+        terminal.resize_pending = False
+        log_message("INFO", "Terminal resized")
+        update_pty_size(master_fd)
+        # The child shares talkito's process group, so the terminal signals it too, but before its own
+        # PTY has the new size; it is told again now, for programs that only redraw on SIGWINCH
+        if current_proc is not None and current_proc.returncode is None:
+            for pid in [current_proc.pid] + _descendant_pids(current_proc.pid):
+                try:
+                    os.kill(pid, signal.SIGWINCH)
+                except ProcessLookupError:
+                    pass
+        # Terminal size already updated by update_pty_size via get_pty_winsize
+        return True
     return False
+
+
+def _descendant_pids(root: int) -> List[int]:
+    """Processes started under root, since some programs draw from a child (Gemini relaunches itself)."""
+    try:
+        listing = subprocess.run(['ps', '-A', '-o', 'pid=', '-o', 'ppid='], capture_output=True, text=True,
+                                 timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: Dict[int, List[int]] = {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    found, pending = [], [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child)
+    return found
 
 def _log_tty_and_pgrp_state(master_fd: int, proc: asyncio.subprocess.Process):
     """Best-effort logging of process groups and TTY foreground owner."""
@@ -3167,7 +3190,9 @@ def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
                                                  active_profile.screen_settle_frames,
                                                  active_profile.screen_right_margin,
                                                  active_profile.screen_quiet_seconds,
-                                                 active_profile.screen_busy_pattern)
+                                                 active_profile.screen_busy_pattern,
+                                                 active_profile.screen_composer_edges,
+                                                 active_profile.screen_echo_until_busy)
         else:
             screen_transcript.resize(rows, cols)
         completed, turn_ended = screen_transcript.feed(data, now)
@@ -3184,6 +3209,10 @@ def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
         # The turn's footer is up, so the program is back at its composer
         log_message("INFO", "Screen turn ended")
         _update_input_state('', True, asr_mode)
+    elif screen_transcript.busy and asr_state.waiting_for_input:
+        # Working again, so a reply is coming; replies with no marker of their own only show it this way
+        asr_state.waiting_for_input = False
+        check_and_enable_auto_listen(asr_mode)
     return text_buffer, prev_line
 
 

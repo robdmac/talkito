@@ -81,6 +81,8 @@ class Profile:
     screen_settle_frames: int = 0                   # frames a row must sit unchanged to be complete
     screen_right_margin: int = 0                    # columns left unused at the right before wrapping
     screen_quiet_seconds: float = 0.0               # for TUIs without synchronized updates, the pause that ends a frame
+    screen_composer_edges: int = 1                  # composer rows around the input box; the transcript ends at the top one
+    screen_echo_until_busy: bool = False            # unmarked prompt echo: rows before the busy row are the echo
 
     # Input handling
     # Repainting TUIs position the prompt with cursor moves instead of putting it at the start of a
@@ -634,6 +636,24 @@ OPENCODE_PROFILE = Profile(
     input_mic_replace='│ 🎤 ',
 )
 
+PI_PROFILE = Profile(
+    supported=True,
+    name='pi',
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
+    reads_screen=True,
+    # The input box sits between two plain rules, the upper one showing a spinner while it works
+    screen_composer_pattern=r'^──',
+    screen_composer_edges=2,
+    screen_busy_pattern=r'^─+ \S+ Working',
+    # Neither the prompt echo nor the reply carries a marker, and no footer ends a turn
+    screen_echo_until_busy=True,
+    screen_margin=1,
+    response_prefix='',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
+    skip_patterns=COMMON_SKIP_PATTERNS,
+)
+
 AIDER_PROFILE = Profile(
     supported=False,
     name='aider',
@@ -749,6 +769,7 @@ PROFILES: Dict[str, Profile] = {
     'mysql': MYSQL_PROFILE,
     'psql': PSQL_PROFILE,
     'opencode': OPENCODE_PROFILE,
+    'pi': PI_PROFILE,
     'default': DEFAULT_PROFILE,
 }
 

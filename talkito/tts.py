@@ -186,7 +186,7 @@ RE_GREATER_UNDERSCORE = re.compile(r'>_')
 RE_NEWLINES = re.compile(r'\n+')
 RE_FUNCTION_CALL = re.compile(r'(\w+)_(\w+)(?:_(\w+))*\(\)')
 RE_UNDERSCORE_WORDS = re.compile(r'(\w+)_(\w+)(?:_(\w+))*')
-RE_TRAILING_PARENS = re.compile(r' *\([^)]*\)$')
+RE_TRAILING_PARENS = re.compile(r' *\((?![^)]*[.!?]\)$)[^)]*\)$')
 RE_MARKDOWN_BOLD = re.compile(r'\*\*([^*]+)\*\*')
 RE_MARKDOWN_ITALIC = re.compile(r'\*([^*]+)\*')
 RE_MARKDOWN_CODE = re.compile(r'`([^`]+)`')
@@ -2902,7 +2902,7 @@ def extract_speakable_text(text: str) -> str:
     text = RE_FUNCTION_CALL.sub(lambda m: ' '.join(m.group(0).replace('_', ' ').replace('()', '').split()), text)
     text = RE_UNDERSCORE_WORDS.sub(lambda m: ' '.join(m.group(0).split('_')), text)
 
-    # Remove bracketed comments at the end
+    # Remove bracketed comments at the end, but keep a bracketed sentence
     text = RE_TRAILING_PARENS.sub('', text)
 
     # Remove markdown formatting
