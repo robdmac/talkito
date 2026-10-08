@@ -442,14 +442,14 @@ class LineBuffer:
                     return idx
         return None
 
-    def add_or_update_line(self, raw_line: str) -> Tuple[int, str]:
-        """Add a new line or update an existing one if similar."""
+    def add_or_update_line(self, raw_line: str, match_similar: bool = True) -> Tuple[int, str]:
+        """Add a new line or update an existing one if similar (always a new line when not match_similar)."""
         # Special logging for response lines
         if '⏺' in raw_line:
             log_message("INFO", f"[LineBuffer] Adding/updating response line: '{raw_line[:100]}...'")
         
         # Check if this is similar to a recent line
-        similar_idx = self._find_similar_line(raw_line)
+        similar_idx = self._find_similar_line(raw_line) if match_similar else None
 
         if similar_idx is not None:
             old_content = self.lines[similar_idx]
@@ -2515,17 +2515,19 @@ def handle_tts_controls(input_data: bytes) -> bool:
     return False
 
 
-async def drain_pty_output(master_fd: int, line_buffer: bytes):
-    """Drain any remaining output from PTY when process exits"""
+async def drain_pty_output(master_fd: int) -> bytes:
+    """Drain any remaining output from PTY when process exits, returning it"""
+    drained = b''
     try:
         while True:
             data = await async_read(master_fd, 4096)
             if not data:
                 break
             await async_stdout_write(data)
-            line_buffer += data
+            drained += data
     except Exception:
         pass
+    return drained
 
 
 def advance_display_chars(s: str, start: int, n: int) -> int:
@@ -2860,6 +2862,9 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                 break
                             recorder.record_event('OUTPUT', data)
                             await async_stdout_write(data)
+                            if active_profile and active_profile.reads_screen:
+                                buffer, prev_line = process_screen_output(data, buffer, prev_line, asr_mode)
+                                continue
                             # IMPORTANT: Also process this data for TTS
                             line_buffer += data
 
@@ -2875,7 +2880,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                                     # Skip malformed lines
                                     log_message("WARNING", "Skipping malformed UTF-8 line")
                                     continue
-                                line_idx, action = output_buffer.add_or_update_line(line)
+                                line_idx, action = output_buffer.add_or_update_line(line, match_similar=active_profile.debounce_similar)
 
                                 if action in ['added', 'modified']:
                                     buffer, prev_line, _ = process_line(
@@ -2884,8 +2889,14 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                     except Exception:
                         pass
                 else:
-                    await drain_pty_output(current_master_fd, line_buffer)
+                    drained = await drain_pty_output(current_master_fd)
+                    if drained and active_profile and active_profile.reads_screen:
+                        buffer, prev_line = process_screen_output(drained, buffer, prev_line, asr_mode)
                 break
+
+        if active_profile and active_profile.reads_screen:
+            # The program has gone, so the row held back in case it was still growing is complete
+            buffer, prev_line = process_screen_output(b'', buffer, prev_line, asr_mode, final=True)
 
         # Process any remaining content after main loop exits
         if line_buffer:
@@ -2894,7 +2905,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             except UnicodeDecodeError:
                 line = line_buffer.decode('utf-8', errors='replace')
                 log_message("WARNING", "Incomplete UTF-8 sequence in final line buffer")
-            line_idx, action = output_buffer.add_or_update_line(line)
+            line_idx, action = output_buffer.add_or_update_line(line, match_similar=active_profile.debounce_similar)
 
             if action in ['added', 'modified']:
                 buffer, prev_line, _ = process_line(line, buffer, prev_line, False, line_idx, asr_mode)
@@ -3066,12 +3077,9 @@ def process_line_buffer_data(line_buffer: bytes, output_buffer: LineBuffer,
         
         line = line_bytes.decode('utf-8', errors='ignore')
 
-        line_idx, action = output_buffer.add_or_update_line(line)
-        if action == 'unchanged' and not active_profile.debounce_similar and line.strip():
-            # Repeats are a repainting TUI's way of standing still, but a REPL printing the same
-            # answer twice means it ('5' again for another 2 + 3)
-            line_idx, action = output_buffer.next_index, 'added'
-            output_buffer.next_index += 1
+        # Repeats are a repainting TUI's way of standing still, but a REPL printing the same or a
+        # similar answer again means it ('5' again for another 2 + 3, 'result 1' after 'result 0')
+        line_idx, action = output_buffer.add_or_update_line(line, match_similar=active_profile.debounce_similar)
 
         if action == 'added':
             track_line_position(line_idx, cursor_row)
@@ -3158,7 +3166,8 @@ def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
                                                  active_profile.screen_margin,
                                                  active_profile.screen_settle_frames,
                                                  active_profile.screen_right_margin,
-                                                 active_profile.screen_quiet_seconds)
+                                                 active_profile.screen_quiet_seconds,
+                                                 active_profile.screen_busy_pattern)
         else:
             screen_transcript.resize(rows, cols)
         completed, turn_ended = screen_transcript.feed(data, now)
@@ -3591,7 +3600,7 @@ async def replay_recorded_session(args, command_name: str = None) -> Union[int, 
     # Process any remaining line buffer content
     if line_buffer:
         line = line_buffer.decode('utf-8', errors='ignore')
-        line_idx, action = output_buffer.add_or_update_line(line)
+        line_idx, action = output_buffer.add_or_update_line(line, match_similar=active_profile.debounce_similar)
         
         if action in ['added', 'modified']:
             buffer, prev_line, _ = process_line(

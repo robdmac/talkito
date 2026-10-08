@@ -76,6 +76,7 @@ class Profile:
     screen_composer_pattern: Optional[str] = None
     screen_live_pattern: Optional[str] = None
     screen_turn_end_pattern: Optional[str] = None   # footer painted once a turn is over
+    screen_busy_pattern: Optional[str] = None       # with no footer, shown while working; the turn ends when it goes
     screen_margin: int = 0                          # left padding to drop from transcript rows
     screen_settle_frames: int = 0                   # frames a row must sit unchanged to be complete
     screen_right_margin: int = 0                    # columns left unused at the right before wrapping
@@ -390,6 +391,7 @@ CLAUDE_PROFILE = Profile(
     # right-aligned notices just above the input box ('Fast mode disabled · usage credits exhausted')
     screen_live_pattern=r'esc to interrupt|^\s*─{10,}$|^\s*[✻✶✳✢✽·*]\s+\S+…|^\s{20,}\S|^\s*⎿\s+Tip:',
     screen_turn_end_pattern=r'^\s*[✻✶✳✢✽·*]\s+\S+ for \d+(?:m \d+)?s',   # '✻ Baked for 2s · done'
+    screen_busy_pattern=r'esc to interrupt',   # a row stalled on the model is not finished
     screen_quiet_seconds=0.05,          # no synchronized updates, so a pause in output ends a frame
     needs_full_lines=True,
     response_prefix='⏺',
@@ -468,9 +470,10 @@ CODEX_PROFILE = Profile(
     suppress_input_echo=True,
     response_prefix='•',
     reads_screen=True,
-    screen_composer_pattern=r'^› ',
+    screen_composer_pattern=r'^›(?: |$)',   # an empty composer is just the marker once trailing blanks go
     screen_live_pattern=r'esc to interrupt',
     screen_turn_end_pattern=r'^\s*─*\s*Worked for \d',
+    screen_busy_pattern=r'esc to interrupt',   # a row stalled on the model is not finished
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
@@ -518,6 +521,7 @@ GEMINI_PROFILE = Profile(
     screen_composer_pattern=r'^▄{10,}$',                # top edge of the input box
     # Spinner and hint rows, the bars around the input box, and live-area leftovers Gemini does not erase
     screen_live_pattern=r'esc to cancel|^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s|\? for shortcuts|Shift\+Tab|^\s*─{10,}$|^\s*[▀▄]{10,}',
+    screen_busy_pattern=r'esc to cancel',   # no footer at the end of a turn, only the spinner row going away
     screen_quiet_seconds=0.05,          # no synchronized updates, so a pause in output ends a frame
     screen_settle_frames=4,             # it starts the next row before finishing the one above
     needs_full_lines=True,
@@ -580,8 +584,10 @@ OPENCODE_PROFILE = Profile(
     reads_screen=True,
     screen_composer_pattern=r'^\s*╹▀',                   # bottom edge of the input box
     # The input box and prompt echo hang off a ┃ bar; the footer shows no duration until the turn ends
-    screen_live_pattern=r'esc interrupt|^\s*┃|^\s*▣(?!.*\d+(?:\.\d+)?s\s*$)',
+    # The status row's last letter can be painted over by the input box edge ('esc interrup▀')
+    screen_live_pattern=r'esc interrup|^\s*┃|^\s*▣(?!.*\d+(?:\.\d+)?s\s*$)',
     screen_turn_end_pattern=r'^\s*▣.*\d+(?:\.\d+)?s\s*$',
+    screen_busy_pattern=r'esc interrup',       # a row stalled on the model is not finished
     screen_margin=5,
     screen_right_margin=4,
     screen_settle_frames=15,            # it lays out the next row before finishing the one above (seen: 3 frames)

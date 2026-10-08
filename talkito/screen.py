@@ -22,7 +22,7 @@ import codecs
 import re
 import time
 import unicodedata
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # One complete escape sequence at the start of the pending input
 CSI_PATTERN = re.compile(r'\x1b\[([?<>=]?)([0-9;:]*)([ -/]*)([@-~])')
@@ -59,6 +59,7 @@ class Screen:
         self.in_update = False   # inside a synchronized update, so the grid is half painted
         self.updates = 0         # synchronized updates completed, a frame count independent of chunking
         self.closed_lines: Optional[List[str]] = None   # what the alternate screen showed as it closed
+        self.on_frame: Optional[Callable[[], None]] = None   # called as each synchronized update ends
         self._pending = ''
         self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
@@ -88,7 +89,8 @@ class Screen:
         length = len(text)
         while i < length:
             char = text[i]
-            if char < ' ' or char == '\x7f':
+            # Controls that move the cursor cancel a pending wrap; escapes only do when they move it
+            if (char < ' ' or char == '\x7f') and char != '\x1b':
                 self.wrap_pending = False
             if char == '\x1b':
                 consumed = self._escape(text, i)
@@ -127,6 +129,8 @@ class Screen:
             return match.end() - i if match else 0
         if kind in '()*+#%':
             return 3 if i + 2 < len(text) else 0
+        if kind in '8DEMc':
+            self.wrap_pending = False
         if kind == '7':
             self.saved_cursor = (self.cursor_row, self.cursor_col)
         elif kind == '8':
@@ -139,13 +143,18 @@ class Screen:
         elif kind == 'M':
             self._reverse_line_feed()
         elif kind == 'c':
+            on_frame = self.on_frame
             self.__init__(self.rows, self.cols)
+            self.on_frame = on_frame
         return 2
 
     def _csi(self, private: str, params: str, intermediate: str, final: str):
         """Apply a control sequence."""
         if intermediate:
             return
+        if final != 'm':
+            # Colours leave the cursor where it is, so a wrap still waits for the next character
+            self.wrap_pending = False
         values = [int(p) if p.isdigit() else 0 for p in re.split('[;:]', params)] if params else []
 
         def arg(index: int = 0, default: int = 1) -> int:
@@ -154,9 +163,12 @@ class Screen:
 
         if private:
             if private == '?' and final in 'hl' and 2026 in values:
-                if self.in_update and final == 'l':
-                    self.updates += 1
+                ended = self.in_update and final == 'l'
                 self.in_update = final == 'h'
+                if ended:
+                    self.updates += 1
+                    if self.on_frame:
+                        self.on_frame()
             if private == '?' and final in 'hl' and any(v in (47, 1047, 1049) for v in values):
                 if final == 'l':
                     self.closed_lines = self.lines()
@@ -293,11 +305,15 @@ class ScreenTranscript:
     def __init__(self, rows: int, cols: int, composer_pattern: Optional[str] = None,
                  live_pattern: Optional[str] = None, turn_end_pattern: Optional[str] = None,
                  margin: int = 0, settle_frames: int = 0, right_margin: int = 0,
-                 quiet_seconds: float = 0.0):
+                 quiet_seconds: float = 0.0, busy_pattern: Optional[str] = None):
         self.screen = Screen(rows, cols)
         self.composer_pattern = re.compile(composer_pattern) if composer_pattern else None
         self.live_pattern = re.compile(live_pattern) if live_pattern else None
         self.turn_end_pattern = re.compile(turn_end_pattern) if turn_end_pattern else None
+        # Shown anywhere while the program works: the last row is not released for sitting still while it
+        # shows, and for TUIs with no turn footer the turn ends when it goes
+        self.busy_pattern = re.compile(busy_pattern) if busy_pattern else None
+        self.busy = False
         self.margin = margin   # columns of left padding the TUI puts before every transcript row
         self.right_margin = right_margin   # columns it leaves unused at the right before wrapping
         # TUIs that lay out the next row before finishing the one above need rows to sit unchanged
@@ -311,8 +327,15 @@ class ScreenTranscript:
         self.released: List[str] = []
         self.last_turn_end = ''
         self.held_row = ''
-        self.held_since = 0.0
+        self.held_since = 0.0   # when the transcript last changed anywhere, not just its last row
+        self._last_rows: List[str] = []
         self._last_flush_check = 0.0
+        # What frames read part way through a chunk released, collected until the chunk is done
+        self._frame_rows: List[str] = []
+        self._frame_turn_ended = False
+        self._feed_now = 0.0
+        if quiet_seconds <= 0:
+            self.screen.on_frame = self._on_frame
 
     def resize(self, rows: int, cols: int):
         if (rows, cols) != (self.screen.rows, self.screen.cols):
@@ -335,17 +358,36 @@ class ScreenTranscript:
     def feed(self, data: bytes, now: Optional[float] = None) -> Tuple[List[str], bool]:
         """Apply output; return the transcript rows just completed and whether a turn just ended."""
         now = clock() if now is None else now
-        self.screen.feed(data)
         self.last_output = now
-        released = self._release_closed()
-        if self.quiet_seconds > 0:
+        self._feed_now = now
+        self._frame_rows, self._frame_turn_ended = [], False
+        # A read can hold several frames; each is read as it ends, before the next paints over it
+        self.screen.feed(data)
+        if self.busy_pattern and not self.busy:
+            # Checked as output arrives, since a spinner can keep a TUI from ever pausing long enough to be read
+            self.busy = any(self.busy_pattern.search(line) for line in self.screen.lines())
+        self._frame_rows += self._release_closed()
+        if self.quiet_seconds <= 0 and not self.screen.in_update:
+            self._add_frame(*self._read(now))
+        elif self.quiet_seconds > 0:
             # Read once the output pauses, which is when a frame has been painted in full
             self.unread_output = True
-            return released, False
-        if self.screen.in_update:
-            return released, False
-        more, turn_ended = self._read(now)
-        return released + more, turn_ended
+        released, turn_ended = self._frame_rows, self._frame_turn_ended
+        self._frame_rows, self._frame_turn_ended = [], False
+        return released, turn_ended
+
+    def _on_frame(self):
+        self._frame_rows += self._release_closed()
+        self._add_frame(*self._read(self._feed_now))
+
+    def _add_frame(self, rows: List[str], turn_ended: bool):
+        """Collect a frame's rows; whether the turn is over is decided by the latest frame that says."""
+        self._frame_rows += rows
+        if turn_ended:
+            self._frame_turn_ended = True
+        elif any(row.strip() for row in rows):
+            # A later frame in the same read has started another reply
+            self._frame_turn_ended = False
 
     def _release_closed(self) -> List[str]:
         """Everything left on an alternate screen as it closed, which nothing will paint over now."""
@@ -357,24 +399,36 @@ class ScreenTranscript:
 
     def _read(self, now: float) -> Tuple[List[str], bool]:
         """Take a frame from the screen; return the rows it completes and whether a turn just ended."""
-        rows = self.transcript_rows()
+        lines = self.screen.lines()
+        rows = self.transcript_rows(lines)
         frame = self._frame()
         self.row_since = {row: self.row_since.get(row, frame) for row in rows if row.strip()}
         last = max((i for i, row in enumerate(rows) if row.strip()), default=-1)
-        if last < 0:
-            return [], False
 
         turn_ended = False
-        if self.turn_end_pattern and self.turn_end_pattern.search(rows[last]) and rows[last] != self.last_turn_end:
+        if self.busy_pattern:
+            busy = any(self.busy_pattern.search(line) for line in lines)
+            # A footer is the surer sign; status rows can blink out as a reply starts streaming
+            turn_ended = self.busy and not busy and not self.turn_end_pattern
+            self.busy = busy
+        if last < 0:
+            return [], turn_ended
+
+        if self.turn_end_pattern and self.turn_end_pattern.search(rows[last]):
+            turn_ended = turn_ended or rows[last] != self.last_turn_end
             self.last_turn_end = rows[last]
-            turn_ended = True
+        else:
+            # Once the footer is no longer last a new turn has begun, and its footer may read the same
+            self.last_turn_end = ''
 
-        # The last painted row may still be growing; everything above it is complete once settled, or
-        # straight away when it is the turn's footer, since nothing above that is still being painted
-        released = self._release(rows[:last] if turn_ended else self._settled(rows[:last]))
+        # The last painted row may still be growing; everything above it is complete once settled. At
+        # the end of a turn nothing is still being painted, so every row is complete, the footer too
+        released = self._release(rows[:last + 1] if turn_ended else self._settled(rows[:last]))
 
-        if rows[last] != self.held_row:
-            self.held_row = rows[last]
+        self.held_row = rows[last]
+        if rows != self._last_rows:
+            # A row above the last may still be repainted, so stillness counts for the whole transcript
+            self._last_rows = rows
             self.held_since = now
         return released, turn_ended
 
@@ -404,6 +458,9 @@ class ScreenTranscript:
             self.unread_output = False
             self.quiet_frames += 1
             released, turn_ended = self._read(now)
+        if self.unread_output:
+            # Output is still arriving, so the screen may be half way through a frame
+            return released, turn_ended
 
         if not self.held_row:
             return released, turn_ended
@@ -412,8 +469,10 @@ class ScreenTranscript:
         if last < 0:
             return released, turn_ended
         complete = self._settled(rows[:last])
-        # Once the screen has gone quiet nothing is still being painted, settled or not
-        if now - self.held_since >= self.IDLE_SECONDS and not (self.released and self.released[-1] == self.held_row):
+        # Once the screen has gone quiet nothing is still being painted, settled or not, unless the
+        # program still shows it is working, when the reply may only be waiting on the model
+        if now - self.held_since >= self.IDLE_SECONDS and not self.busy \
+                and not (self.released and self.released[-1] == self.held_row):
             complete = rows[:last + 1]
         return released + self._release(complete), turn_ended
 
