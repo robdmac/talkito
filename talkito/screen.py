@@ -335,6 +335,8 @@ class ScreenTranscript:
         self.released: List[str] = []
         # Words already read out when the terminal was resized, which the program then re-wraps and repaints
         self._reflow_words: Optional[set] = None
+        # Words of the held row, not yet read out, which a re-wrapped row may carry up beside spoken ones
+        self._unspoken_words: set = set()
         self.last_turn_end = ''
         self.held_row = ''
         self.held_since = 0.0   # when the transcript last changed anywhere, not just its last row
@@ -350,8 +352,11 @@ class ScreenTranscript:
     def resize(self, rows: int, cols: int):
         if (rows, cols) != (self.screen.rows, self.screen.cols):
             self.screen.resize(rows, cols)
-            words = set(WORD_PATTERN.findall(' '.join(self.released + [self.held_row]).lower()))
+            words = set(WORD_PATTERN.findall(' '.join(self.released).lower()))
             self._reflow_words = words or None
+            # The held row was withheld from speech, unless it has since been released
+            if not (self.released and self.released[-1] == self.held_row):
+                self._unspoken_words = set(WORD_PATTERN.findall(self.held_row.lower())) - words
 
     def transcript_rows(self, lines: Optional[List[str]] = None) -> List[str]:
         """Rows above the composer, without the live status row."""
@@ -541,10 +546,13 @@ class ScreenTranscript:
         for row in rows:
             words = WORD_PATTERN.findall(row.lower())
             if words and self._reflow_words is not None:
-                # Most rather than all, as a row can be caught half repainted
-                if sum(word in self._reflow_words for word in words) >= 0.8 * len(words):
+                # Most rather than all, as a row can be caught half repainted, but never a row carrying
+                # words not yet read out, which is better heard with a few words again than lost
+                if sum(word in self._reflow_words for word in words) >= 0.8 * len(words) \
+                        and not self._unspoken_words.intersection(words):
                     continue
                 self._reflow_words = None
+                self._unspoken_words = set()
             kept.append(row)
         return kept
 
