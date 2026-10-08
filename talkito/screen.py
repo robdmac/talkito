@@ -381,13 +381,20 @@ class ScreenTranscript:
         self._add_frame(*self._read(self._feed_now))
 
     def _add_frame(self, rows: List[str], turn_ended: bool):
-        """Collect a frame's rows; whether the turn is over is decided by the latest frame that says."""
+        """Collect a frame's rows; whether the turn is over is decided by the latest frame."""
         self._frame_rows += rows
         if turn_ended:
             self._frame_turn_ended = True
-        elif any(row.strip() for row in rows):
-            # A later frame in the same read has started another reply
+        elif self._working():
+            # A later frame in the same read has started another reply, released or still held
             self._frame_turn_ended = False
+
+    def _working(self) -> bool:
+        """Whether the last frame read shows the program working: painting below its footer, or busy."""
+        if self.turn_end_pattern:
+            # The status row can outlive the footer by a frame, so the footer decides
+            return bool(self.held_row) and not self.last_turn_end
+        return self.busy
 
     def _release_closed(self) -> List[str]:
         """Everything left on an alternate screen as it closed, which nothing will paint over now."""
@@ -450,7 +457,7 @@ class ScreenTranscript:
         if not final and now - self._last_flush_check < min(0.1, self.quiet_seconds or 0.1):
             return [], False
         self._last_flush_check = now
-        if self.screen.in_update:
+        if self.screen.in_update and not final:
             return [], False
 
         released, turn_ended = [], False
@@ -470,8 +477,9 @@ class ScreenTranscript:
             return released, turn_ended
         complete = self._settled(rows[:last])
         # Once the screen has gone quiet nothing is still being painted, settled or not, unless the
-        # program still shows it is working, when the reply may only be waiting on the model
-        if now - self.held_since >= self.IDLE_SECONDS and not self.busy \
+        # program still shows it is working, when the reply may only be waiting on the model. Once the
+        # program has exited, whatever it left is all there will be
+        if now - self.held_since >= self.IDLE_SECONDS and (final or not self.busy) \
                 and not (self.released and self.released[-1] == self.held_row):
             complete = rows[:last + 1]
         return released + self._release(complete), turn_ended
