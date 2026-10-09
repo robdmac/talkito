@@ -34,7 +34,15 @@ clock = time.monotonic
 
 # Rows that open a list item are never the tail of a wrapped line
 LIST_ITEM_PATTERN = re.compile(r'^\s*(?:[-*•◦▪›>]|\d+[.)])\s')
-WORD_PATTERN = re.compile(r'\w+')
+# Re-wrapping moves breaks, indents and hyphens about, so reflowed text is compared on its letters and digits
+NON_WORD_PATTERN = re.compile(r'[\W_]+')
+# A row caught half repainted keeps cells of the old, wider row past a gap
+STALE_GAP_PATTERN = re.compile(r'\s{3,}')
+
+
+def reflow_key(text: str) -> str:
+    """Text reduced to its letters and digits, the part re-wrapping leaves alone."""
+    return NON_WORD_PATTERN.sub('', text).lower()
 
 
 def char_width(char: str) -> int:
@@ -333,10 +341,10 @@ class ScreenTranscript:
         self.last_output = 0.0
         self.row_since: Dict[str, int] = {}
         self.released: List[str] = []
-        # Words already read out when the terminal was resized, which the program then re-wraps and repaints
-        self._reflow_words: Optional[set] = None
-        # Words of the held row, not yet read out, which a re-wrapped row may carry up beside spoken ones
-        self._unspoken_words: set = set()
+        # Text already read out when the terminal was resized, which the program then re-wraps and repaints,
+        # and where in it the rows dropped so far could have ended
+        self._reflow_text = ''
+        self._reflow_ends: Optional[set] = None
         self.last_turn_end = ''
         self.held_row = ''
         self.held_since = 0.0   # when the transcript last changed anywhere, not just its last row
@@ -352,11 +360,8 @@ class ScreenTranscript:
     def resize(self, rows: int, cols: int):
         if (rows, cols) != (self.screen.rows, self.screen.cols):
             self.screen.resize(rows, cols)
-            words = set(WORD_PATTERN.findall(' '.join(self.released).lower()))
-            self._reflow_words = words or None
-            # The held row was withheld from speech, unless it has since been released
-            if not (self.released and self.released[-1] == self.held_row):
-                self._unspoken_words = set(WORD_PATTERN.findall(self.held_row.lower())) - words
+            self._reflow_text = reflow_key(' '.join(self.released))
+            self._reflow_ends = None if not self._reflow_text else set(range(len(self._reflow_text) + 1))
 
     def transcript_rows(self, lines: Optional[List[str]] = None) -> List[str]:
         """Rows above the composer, without the live status row."""
@@ -532,7 +537,7 @@ class ScreenTranscript:
                 row = ' ' + row.lstrip()
             marked.append(row)
 
-        if self._reflow_words is not None:
+        if self._reflow_ends is not None:
             marked = self._drop_reflowed(marked)
 
         # Blank rows only matter between pieces of text
@@ -544,17 +549,23 @@ class ScreenTranscript:
         """Drop rows re-wrapped to a new width from text already read out, until a row that is new."""
         kept = []
         for row in rows:
-            words = WORD_PATTERN.findall(row.lower())
-            if words and self._reflow_words is not None:
-                # Most rather than all, as a row can be caught half repainted, but never a row carrying
-                # words not yet read out, which is better heard with a few words again than lost
-                if sum(word in self._reflow_words for word in words) >= 0.8 * len(words) \
-                        and not self._unspoken_words.intersection(words):
+            if reflow_key(row) and self._reflow_ends is not None:
+                # A row is old only where it carries on the read text from the rows dropped before it, so
+                # text not yet read out, even the same words in another order, is heard rather than lost
+                ends = self._reflow_continues(reflow_key(row)) \
+                    or self._reflow_continues(reflow_key(STALE_GAP_PATTERN.split(row.strip())[0]))
+                if ends:
+                    self._reflow_ends = ends
                     continue
-                self._reflow_words = None
-                self._unspoken_words = set()
+                self._reflow_ends = None
             kept.append(row)
         return kept
+
+    def _reflow_continues(self, key: str) -> set:
+        """Where the read text ends up if key carries it on from where the rows dropped so far could end."""
+        if not key:
+            return set()
+        return {end + len(key) for end in self._reflow_ends if self._reflow_text.startswith(key, end)}
 
     def is_wrapped(self, previous: str, row: str) -> bool:
         """Whether row is the overflow of previous, judged by the next word not fitting after it."""
