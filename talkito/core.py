@@ -394,6 +394,34 @@ class OutputBuffer:
                 return 0
             raise
     
+    def relay(self, data: bytes):
+        """Write output to stdout, after anything still held back from earlier writes."""
+        # Written ahead of output that still waits, it would land in the middle of an escape sequence
+        # and garble the screen
+        try:
+            if self.buffer:
+                self.add(data)
+                self.write_to_stdout()
+                return
+            written = os.write(sys.stdout.fileno(), data)
+            if written < len(data):
+                # Partial write - buffer the rest
+                self.add(data[written:])
+                if is_logging_enabled():
+                    log_message("DEBUG", f"Partial write: {written}/{len(data)} bytes, buffered {len(data)-written}")
+        except BlockingIOError:
+            # Can't write at all - buffer everything
+            self.add(data)
+            if is_logging_enabled():
+                log_message("DEBUG", f"Stdout blocked, buffered {len(data)} bytes")
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                # Same as BlockingIOError
+                self.add(data)
+            else:
+                log_message("ERROR", f"Error writing to stdout: {e}")
+                log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+
     def __len__(self):
         return len(self.buffer)
 
@@ -2822,26 +2850,7 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                         #     output_data = modify_prompt_for_asr(output_data, active_profile.input_start,
                         #                                         active_profile.input_speaker_replace)
 
-                    # Try direct write first
-                    try:
-                        written = os.write(sys.stdout.fileno(), output_data)
-                        if written < len(output_data):
-                            # Partial write - buffer the rest
-                            stdout_buffer.add(output_data[written:])
-                            if is_logging_enabled():
-                                log_message("DEBUG", f"Partial write: {written}/{len(output_data)} bytes, buffered {len(output_data)-written}")
-                    except BlockingIOError:
-                        # Can't write at all - buffer everything
-                        stdout_buffer.add(output_data)
-                        if is_logging_enabled():
-                            log_message("DEBUG", f"Stdout blocked, buffered {len(output_data)} bytes")
-                    except OSError as e:
-                        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                            # Same as BlockingIOError
-                            stdout_buffer.add(output_data)
-                        else:
-                            log_message("ERROR", f"Error writing to stdout: {e}")
-                            log_message("ERROR", f"Traceback: {traceback.format_exc()}")
+                    stdout_buffer.relay(output_data)
 
                     # Process lines even in alternate buffer to ensure nothing is missed
                     # if in_alternate_buffer:
@@ -3192,7 +3201,8 @@ def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
                                                  active_profile.screen_quiet_seconds,
                                                  active_profile.screen_busy_pattern,
                                                  active_profile.screen_composer_edges,
-                                                 active_profile.screen_echo_until_busy)
+                                                 active_profile.screen_echo_until_busy,
+                                                 active_profile.screen_band_pattern)
         else:
             screen_transcript.resize(rows, cols)
         completed, turn_ended = screen_transcript.feed(data, now)

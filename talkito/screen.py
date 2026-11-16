@@ -310,16 +310,20 @@ class ScreenTranscript:
     """
 
     IDLE_SECONDS = 2.0
+    BAND_ROWS = 20   # how far above the input box an extension's band can reach
 
     def __init__(self, rows: int, cols: int, composer_pattern: Optional[str] = None,
                  live_pattern: Optional[str] = None, turn_end_pattern: Optional[str] = None,
                  margin: int = 0, settle_frames: int = 0, right_margin: int = 0,
                  quiet_seconds: float = 0.0, busy_pattern: Optional[str] = None, composer_edges: int = 1,
-                 echo_until_busy: bool = False):
+                 echo_until_busy: bool = False, band_pattern: Optional[str] = None):
         self.screen = Screen(rows, cols)
         self.composer_pattern = re.compile(composer_pattern) if composer_pattern else None
         # Rows matching the composer pattern that frame the input box; the transcript ends at the top one
         self.composer_edges = composer_edges
+        # The top row of a band an extension draws just above the input box (Claude Code's mods), which
+        # repaints as it pleases and is no part of the transcript
+        self.band_pattern = re.compile(band_pattern) if band_pattern else None
         self.live_pattern = re.compile(live_pattern) if live_pattern else None
         self.turn_end_pattern = re.compile(turn_end_pattern) if turn_end_pattern else None
         # Shown anywhere while the program works: the last row is not released for sitting still while it
@@ -370,6 +374,10 @@ class ScreenTranscript:
             composer = [i for i, row in enumerate(rows) if self.composer_pattern.search(row)]
             if composer:
                 rows = rows[:composer[-min(self.composer_edges, len(composer))]]
+        if self.band_pattern:
+            band = [i for i in range(max(0, len(rows) - self.BAND_ROWS), len(rows)) if self.band_pattern.search(rows[i])]
+            if band:
+                rows = rows[:band[0]]
         if self.live_pattern:
             rows = ['' if self.live_pattern.search(row) else row for row in rows]
         return rows

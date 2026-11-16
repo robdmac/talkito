@@ -83,6 +83,7 @@ class Profile:
     screen_quiet_seconds: float = 0.0               # for TUIs without synchronized updates, the pause that ends a frame
     screen_composer_edges: int = 1                  # composer rows around the input box; the transcript ends at the top one
     screen_echo_until_busy: bool = False            # unmarked prompt echo: rows before the busy row are the echo
+    screen_band_pattern: Optional[str] = None       # top row of an extension's band above the input box, cut with it
 
     # Input handling
     # Repainting TUIs position the prompt with cursor moves instead of putting it at the start of a
@@ -394,6 +395,7 @@ CLAUDE_PROFILE = Profile(
     screen_live_pattern=r'esc to interrupt|^\s*─{10,}$|^\s*[✻✶✳✢✽·*]\s+\S+…|^\s{20,}\S|^\s*⎿\s+Tip:',
     screen_turn_end_pattern=r'^\s*[✻✶✳✢✽·*]\s+\S+ for \d+(?:m \d+)?s',   # '✻ Baked for 2s · done'
     screen_busy_pattern=r'esc to interrupt',   # a row stalled on the model is not finished
+    screen_band_pattern=r'\[-\]\s*$',          # a mod's band above the prompt carries its collapse mark at top right
     screen_quiet_seconds=0.05,          # no synchronized updates, so a pause in output ends a frame
     needs_full_lines=True,
     response_prefix='⏺',
@@ -578,6 +580,15 @@ GEMINI_PROFILE = Profile(
 )
 
 
+# OpenCode's turn footer: agent, model and how long it took, '▣  Build · gpt-5 · 2.3s' before 2.3 and
+# 'Build · Big Pickle · 1.6s · 2111.1 tok/s · 1.4s ttft' since
+OPENCODE_FOOTER = r'^\s*(?:▣\s*)?\w[^·]*·[^·]+·\s*\d+(?:\.\d+)?s(?:\s*·.*ttft)?\s*$'
+# A scene an extension draws just above the input box (flow's): rows of shading and braille dots alone
+# The row of session tabs OpenCode 2.3 shows: titles cut short with wide gaps between, and a + for a new
+# one, sometimes '+ New session' and sometimes with cells of an older paint left after it
+OPENCODE_TABS = r'^(?=(?:.*?\S {3,}){2}\S).*\s\+(?:\s{2,}\S{1,6})?\s*$|\+ New session\s*$|^‹\d+\s'
+DRAWING_ROW = r'^[\s░▒▓█▀▄\u2800-\u28ff]*[░▒▓█\u2800-\u28ff][\s░▒▓█▀▄\u2800-\u28ff]*$'
+
 OPENCODE_PROFILE = Profile(
     supported=True,
     name='opencode',
@@ -586,9 +597,11 @@ OPENCODE_PROFILE = Profile(
     reads_screen=True,
     screen_composer_pattern=r'^\s*╹▀',                   # bottom edge of the input box
     # The input box and prompt echo hang off a ┃ bar; the footer shows no duration until the turn ends
-    # The status row's last letter can be painted over by the input box edge ('esc interrup▀')
-    screen_live_pattern=r'esc interrup|^\s*┃|^\s*▣(?!.*\d+(?:\.\d+)?s\s*$)',
-    screen_turn_end_pattern=r'^\s*▣.*\d+(?:\.\d+)?s\s*$',
+    # The status row's last letter can be painted over by the input box edge ('esc interrup▀'). Since
+    # 2.3 a row of session tabs heads the screen, ending in a + for a new one
+    screen_live_pattern=f'esc interrup|^\\s*┃|^\\s*▣(?!.*\\d+(?:\\.\\d+)?s\\s*$)|{OPENCODE_TABS}',
+    screen_turn_end_pattern=OPENCODE_FOOTER,
+    screen_band_pattern=DRAWING_ROW,
     screen_busy_pattern=r'esc interrup',       # a row stalled on the model is not finished
     screen_margin=5,
     screen_right_margin=4,
@@ -622,7 +635,9 @@ OPENCODE_PROFILE = Profile(
         (4, r'^ Build '),
         (4, r'BUILD AGENT'),
         (4, r'^\+ Thought'),                  # collapsed reasoning
+        (4, r'^\+ \d+ thoughts?$'),            # the same since 2.3
         (4, r'^\s*▣'),                        # turn footer: agent, model and duration
+        (4, OPENCODE_FOOTER),                 # the same footer since 2.3, with no ▣
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
