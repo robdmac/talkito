@@ -35,6 +35,15 @@ class Profile:
     writes_partial_output: bool = False
     needs_full_lines: Optional[bool] = False
     response_prefix: str = '⏺'
+    # AI agents echo the user's message back as a line of its own, which must not be read out; plain
+    # REPLs print real output straight after the prompt, so they leave this off
+    suppress_input_echo: bool = False
+    # Drop text much like what was just spoken, for programs that repaint progress; REPL output is
+    # often alike line to line and all of it is meant
+    debounce_similar: bool = True
+    # Speak a reply that is a single number ('4', '-2.5', '1,024', '50%'). Lines of bare numbers are
+    # usually counters or line numbers, so this is only for programs whose numbers are answers
+    speak_bare_numbers: bool = False
     continuation_prefix: Optional[str] = None
     question_prefix: Optional[str] = None
     
@@ -58,6 +67,23 @@ class Profile:
     # Some TUIs repaint by absolute cursor addressing and emit no newlines at all. When set, any
     # sequence that moves the cursor to another row is treated as a line break.
     repaints_with_cursor_moves: bool = False
+
+    # Some TUIs paint each word into place and never hold a whole line in a single write. These are
+    # read through a virtual screen instead, which hands over each transcript row once it is complete.
+    # The transcript is everything above the last row matching the composer pattern, minus the live
+    # status row shown while a turn is running
+    reads_screen: bool = False
+    screen_composer_pattern: Optional[str] = None
+    screen_live_pattern: Optional[str] = None
+    screen_turn_end_pattern: Optional[str] = None   # footer painted once a turn is over
+    screen_busy_pattern: Optional[str] = None       # with no footer, shown while working; the turn ends when it goes
+    screen_margin: int = 0                          # left padding to drop from transcript rows
+    screen_settle_frames: int = 0                   # frames a row must sit unchanged to be complete
+    screen_right_margin: int = 0                    # columns left unused at the right before wrapping
+    screen_quiet_seconds: float = 0.0               # for TUIs without synchronized updates, the pause that ends a frame
+    screen_composer_edges: int = 1                  # composer rows around the input box; the transcript ends at the top one
+    screen_echo_until_busy: bool = False            # unmarked prompt echo: rows before the busy row are the echo
+    screen_band_pattern: Optional[str] = None       # top row of an extension's band above the input box, cut with it
 
     # Input handling
     # Repainting TUIs position the prompt with cursor moves instead of putting it at the start of a
@@ -146,7 +172,7 @@ class Profile:
             line = line.replace(replacement[0], replacement[1])
         return line
     
-    def should_skip(self, line: str, verbosity: int = 0) -> bool:
+    def should_skip(self, line: str, verbosity: int = 0, continuation: bool = False) -> bool:
         """Check if line should be skipped based on cleaned patterns and verbosity level"""
         if self.is_question_line(line):
             return False
@@ -170,7 +196,15 @@ class Profile:
         
         # Check skip patterns with verbosity
         for min_verbosity, pattern in self._compiled_skip:
-            if pattern.search(line):
+            match = pattern.search(line)
+            if match:
+                # A continuation, or a row read off the screen (where status rows are already left out),
+                # can be a one-word sentence such as 'Lima.'
+                if (continuation or self.reads_screen) and pattern.pattern == SINGLE_WORD_STATUS \
+                        and match.group(0).endswith('.') and not match.group(0).endswith('...'):
+                    continue
+                if self.reads_screen and pattern.pattern == INDENTED_DASH and SCREEN_LIST_ITEM.match(line):
+                    continue
                 # Skip if current verbosity is less than the required verbosity
                 # min_verbosity=1 means skip unless -v or higher (skip at verbosity 0)
                 # min_verbosity=2 means skip unless -vv or higher (skip at verbosity 0,1)
@@ -276,6 +310,15 @@ class Profile:
 
 
 # Common patterns that should be applied to all profiles
+# A lone status word such as 'Thinking…'. A wrapped response line can also open with one word and
+# a full stop ('temporary.'), so continuations only treat the ellipsis form as status
+SINGLE_WORD_STATUS = r'^[^A-Za-z0-9]*[A-Za-z][a-z]+(?:-[a-z]+)*(?:\.\.\.|…|\.)'
+# An indented dash usually means code in a line stream, but a row read off the screen keeps the indent
+# of a markdown list item
+INDENTED_DASH = r'  - '
+SCREEN_LIST_ITEM = re.compile(r'^\s{0,4}- \S')
+
+
 COMMON_SKIP_PATTERNS = [
     # Timestamp patterns - filter log lines with timestamps in first 20 chars
     (2, r'^.{0,20}\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}'),  # [YYYY-MM-DD HH:MM:SS format
@@ -289,10 +332,12 @@ COMMON_SKIP_PATTERNS = [
     (2, r'^  \['),
     (2, r'(import|include|require|use)\s+\w+…\)'),  # Import statements (Python/JS/Rust/PHP)
     (2, r'^\s{5,}'),                                # 5+ leading spaces = code indent (must be at start)
-    (2, r'  - '),                                   # Indent with dash usually means code
+    (2, INDENTED_DASH),                             # Indent with dash usually means code
     (2, r'^\s{2,}\d+\s{2,}[a-zA-Z_#/]'),            # Line numbers + code/comments (added / for C++)
     (2, r'(/usr/bin/|#!/)'),                        # Shebang path prefix or shebang start
-    (2, r'^\s{2,}(import|include|require|use|from|#include)\s+'), # Indented imports (multi-lang)
+    # Indented imports (multi-lang), shaped like code so wrapped prose opening 'from' or 'use' survives
+    (2, r'^\s{2,}(?:from\s+[\w.]+\s+import\b|import\s+[\w.]+(?:\s+as\s+\w+)?\s*;?$|import\s.*\bfrom\s+[\'"]'
+        r'|(?:use|require|include)\s+[\w.:/\'"<>]+\s*;?$|#include\b)'),
     (2, r'│'),                                      # Lines with pipes anywhere
     (2, r'^(#|//|/\*|\*)'),                         # Comments: #, //, /*, or continuation *
     (2, r'^\s*\['),
@@ -310,7 +355,7 @@ COMMON_SKIP_PATTERNS = [
     (3, r'cwd:'),
     (3, r'⎿'),  # subheadings underneath an edit block like "Wrote 122 lines to x.py"
     (3, r'(Bash|Read|Edit|Write|Grep|Task|MultiEdit|NotebookEdit|WebFetch|TodoWrite|Update|Modify|Create|Search)\s*\('),
-    (3, r'^[^A-Za-z0-9]*[A-Za-z][a-z]+(?:-[a-z]+)*(?:\.\.\.|…|\.)'),
+    (3, SINGLE_WORD_STATUS),
     (3, r'^∴'),
     (3, r'talkito:'),
 
@@ -330,9 +375,9 @@ COMMON_SKIP_PATTERNS = [
     (4, r'stop hook'),                              # Claude Code hook status indicator
     (4, r'[Pp]roofing…|[Tt]hinking…'),              # Claude Code thinking/status indicators
     (4, r'^[✳✶✻✽✢·]\s'),                            # Spinner/status indicator lines (• excluded: used as codex response prefix)
-    (4, r'oov|oof|oo[a-z]ing'),                     # Partial "Grooving/Proofing" fragments
-    (4, r'ought for \d'),                           # Timing indicator "(thought for Xs)" fragments
-    (4, r'^\s+[a-z]\s+.*ought'),                    # Garbled timing indicator fragments
+    (4, r'^\W*[a-z]{0,8}(?:oov|oof|oo[a-z]ing)\w*\W*$'),  # Partial "Grooving/Proofing" fragments, alone on a line
+    (4, r'ought for \d+s\b'),                       # Timing indicator "(thought for Xs)" fragments
+    (4, r'^\s+[a-z]\s+.*ought for \d'),             # Garbled timing indicator fragments
     (4, r'^[✳✶✻✽✢·]'),                              # Single spinner characters (no space needed, • excluded: codex response prefix)
 ]
 
@@ -341,6 +386,17 @@ COMMON_SKIP_PATTERNS = [
 CLAUDE_PROFILE = Profile(
     supported=True,
     name='claude',
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
+    reads_screen=True,
+    screen_composer_pattern=r'^❯',
+    # The separators around the input box, the spinner row while a turn runs ('✶ Smooshing… (3s)'), and
+    # right-aligned notices just above the input box ('Fast mode disabled · usage credits exhausted')
+    screen_live_pattern=r'esc to interrupt|^\s*─{10,}$|^\s*[✻✶✳✢✽·*]\s+\S+…|^\s{20,}\S|^\s*⎿\s+Tip:',
+    screen_turn_end_pattern=r'^\s*[✻✶✳✢✽·*]\s+\S+ for \d+(?:m \d+)?s',   # '✻ Baked for 2s · done'
+    screen_busy_pattern=r'esc to interrupt',   # a row stalled on the model is not finished
+    screen_band_pattern=r'\[-\]\s*$',          # a mod's band above the prompt carries its collapse mark at top right
+    screen_quiet_seconds=0.05,          # no synchronized updates, so a pause in output ends a frame
     needs_full_lines=True,
     response_prefix='⏺',
     repaints_with_cursor_moves=True,
@@ -378,10 +434,14 @@ CLAUDE_PROFILE = Profile(
         # Level 4: the v2 status bar and banner, which repaint constantly
         (4, r'⏵⏵'),                           # auto mode / auto-accept indicator
         (4, r'↯'),                            # fast mode indicator
-        (4, r'●\s*(high|medium|low)\b'),      # effort indicator
+        (4, r'[●◐◑○◒◓]\s*(low|medium|high|xhigh|max)\b'),  # effort indicator, the glyph fills with the level
+        (4, r'·\s*/effort\b'),                # '◐ medium · /effort' hint
         (4, r'for agents'),                   # '← for agents' hint, arrow already stripped
         (4, r'^\s*~/'),                       # working directory in the banner
         (4, r'Claude Max|Claude Pro'),        # plan line in the banner
+
+        # Level 4: plugin messages Claude prints as a reply, 'flow: plugin.json changed — reloaded'
+        (4, r'^⏺?\s*[a-z][a-z0-9-]*: '),
 
         # Level 4: shutdown chrome. 'Press Ctrl-C' is painted a character at a time, so the C is
         # already gone by the time the text is cleaned
@@ -410,7 +470,14 @@ CLAUDE_PROFILE = Profile(
 CODEX_PROFILE = Profile(
     supported=True,
     name='codex',
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
     response_prefix='•',
+    reads_screen=True,
+    screen_composer_pattern=r'^›(?: |$)',   # an empty composer is just the marker once trailing blanks go
+    screen_live_pattern=r'esc to interrupt',
+    screen_turn_end_pattern=r'^\s*─*\s*Worked for \d',
+    screen_busy_pattern=r'esc to interrupt',   # a row stalled on the model is not finished
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
@@ -432,6 +499,9 @@ CODEX_PROFILE = Profile(
 
         (4, r'^✨⬆️'),
         (4, r'^[A-Za-z][a-z]'),
+        (4, r'^\s*─*\s*Worked for \d'),   # turn footer
+        (4, r'^\s+[└├]'),                 # tool call detail rows
+        (4, r'^\s+\+ Show details'),
     ],
     skip_progress=[],
     strip_symbols=[],
@@ -449,6 +519,15 @@ CODEX_PROFILE = Profile(
 GEMINI_PROFILE = Profile(
     supported=True,
     name='gemini',
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
+    reads_screen=True,
+    screen_composer_pattern=r'^▄{10,}$',                # top edge of the input box
+    # Spinner and hint rows, the bars around the input box, and live-area leftovers Gemini does not erase
+    screen_live_pattern=r'esc to cancel|^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s|\? for shortcuts|Shift\+Tab|^\s*─{10,}$|^\s*[▀▄]{10,}',
+    screen_busy_pattern=r'esc to cancel',   # no footer at the end of a turn, only the spinner row going away
+    screen_quiet_seconds=0.05,          # no synchronized updates, so a pause in output ends a frame
+    screen_settle_frames=4,             # it starts the next row before finishing the one above
     needs_full_lines=True,
     response_prefix='✦',
     continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
@@ -501,13 +580,36 @@ GEMINI_PROFILE = Profile(
 )
 
 
+# OpenCode's turn footer: agent, model and how long it took, '▣  Build · gpt-5 · 2.3s' before 2.3 and
+# 'Build · Big Pickle · 1.6s · 2111.1 tok/s · 1.4s ttft' since
+OPENCODE_FOOTER = r'^\s*(?:▣\s*)?\w[^·]*·[^·]+·\s*\d+(?:\.\d+)?s(?:\s*·.*ttft)?\s*$'
+# A scene an extension draws just above the input box (flow's): rows of shading and braille dots alone
+# The row of session tabs OpenCode 2.3 shows: titles cut short with wide gaps between, and a + for a new
+# one, sometimes '+ New session' and sometimes with cells of an older paint left after it
+OPENCODE_TABS = r'^(?=(?:.*?\S {3,}){2}\S).*\s\+(?:\s{2,}\S{1,6})?\s*$|\+ New session\s*$|^‹\d+\s'
+DRAWING_ROW = r'^[\s░▒▓█▀▄\u2800-\u28ff]*[░▒▓█\u2800-\u28ff][\s░▒▓█▀▄\u2800-\u28ff]*$'
+
 OPENCODE_PROFILE = Profile(
-    supported=False,
+    supported=True,
     name='opencode',
-    warning="""There's a bit of a performance issue when running with OpenCode due to a lot of redundant processing caused by handling the partial outputs and it noticeably slows down with TalkiTo running. Feel free to flip the supported boolean to True but perhaps don't use the local whisper asr and tts models when using OpenCode.""",
-    writes_partial_output=True,
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
+    reads_screen=True,
+    screen_composer_pattern=r'^\s*╹▀',                   # bottom edge of the input box
+    # The input box and prompt echo hang off a ┃ bar; the footer shows no duration until the turn ends
+    # The status row's last letter can be painted over by the input box edge ('esc interrup▀'). Since
+    # 2.3 a row of session tabs heads the screen, ending in a + for a new one
+    screen_live_pattern=f'esc interrup|^\\s*┃|^\\s*▣(?!.*\\d+(?:\\.\\d+)?s\\s*$)|{OPENCODE_TABS}',
+    screen_turn_end_pattern=OPENCODE_FOOTER,
+    screen_band_pattern=DRAWING_ROW,
+    screen_busy_pattern=r'esc interrup',       # a row stalled on the model is not finished
+    screen_margin=5,
+    screen_right_margin=4,
+    screen_settle_frames=15,            # it lays out the next row before finishing the one above (seen: 3 frames)
+    # Read through the screen, so rows arrive whole rather than as partial writes
+    writes_partial_output=False,
     response_prefix='',
-    continuation_prefix=r'^[A-Z][a-z]',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
     question_prefix=r'│ Do',
     raw_skip_patterns=[
         r'\[38;5;153m│.*\[38;5;246m\d+',      # Box drawing + line numbers
@@ -532,6 +634,10 @@ OPENCODE_PROFILE = Profile(
         (4, r'^ opencode v'),
         (4, r'^ Build '),
         (4, r'BUILD AGENT'),
+        (4, r'^\+ Thought'),                  # collapsed reasoning
+        (4, r'^\+ \d+ thoughts?$'),            # the same since 2.3
+        (4, r'^\s*▣'),                        # turn footer: agent, model and duration
+        (4, OPENCODE_FOOTER),                 # the same footer since 2.3, with no ▣
     ],
     skip_progress=['Forming', 'Exploring'],
     strip_symbols=['⏺'],
@@ -545,9 +651,28 @@ OPENCODE_PROFILE = Profile(
     input_mic_replace='│ 🎤 ',
 )
 
+PI_PROFILE = Profile(
+    supported=True,
+    name='pi',
+    speak_bare_numbers=True,
+    suppress_input_echo=True,
+    reads_screen=True,
+    # The input box sits between two plain rules, the upper one showing a spinner while it works
+    screen_composer_pattern=r'^──',
+    screen_composer_edges=2,
+    screen_busy_pattern=r'^─+ \S+ Working',
+    # Neither the prompt echo nor the reply carries a marker, and no footer ends a turn
+    screen_echo_until_busy=True,
+    screen_margin=1,
+    response_prefix='',
+    continuation_prefix=r'^(\s+[-\w()\'"]|  [a-z]\w*\.|[a-z]\w*\. )',
+    skip_patterns=COMMON_SKIP_PATTERNS,
+)
+
 AIDER_PROFILE = Profile(
     supported=False,
     name='aider',
+    suppress_input_echo=True,
     warning="""Have a problem with how Aider prints its output to the terminal in a non linear fashion.
 Unlikely to be able to support Aider any time soon.""",
     skip_patterns=COMMON_SKIP_PATTERNS + [
@@ -595,6 +720,8 @@ PIPET_PROFILE = Profile(
 PYTHON_PROFILE = Profile(
     supported=True,
     name='python',
+    speak_bare_numbers=True,
+    debounce_similar=False,
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^>>>\s*',  # Python REPL prompt
@@ -606,6 +733,8 @@ PYTHON_PROFILE = Profile(
 MYSQL_PROFILE = Profile(
     supported=True,
     name='mysql',
+    speak_bare_numbers=True,
+    debounce_similar=False,
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^mysql>\s*',  # MySQL prompt
@@ -617,6 +746,8 @@ MYSQL_PROFILE = Profile(
 PSQL_PROFILE = Profile(
     supported=True,
     name='psql',
+    speak_bare_numbers=True,
+    debounce_similar=False,
     skip_patterns=COMMON_SKIP_PATTERNS,
     prompt_patterns=[
         r'^\w+=#\s*',  # PostgreSQL prompt (database=#)
@@ -649,15 +780,20 @@ PROFILES: Dict[str, Profile] = {
     'ollama': OLLAMA_PROFILE,
     'pipet': PIPET_PROFILE,
     'python': PYTHON_PROFILE,
+    'python3': PYTHON_PROFILE,
     'mysql': MYSQL_PROFILE,
     'psql': PSQL_PROFILE,
     'opencode': OPENCODE_PROFILE,
+    'pi': PI_PROFILE,
     'default': DEFAULT_PROFILE,
 }
 
 
 def get_profile(name: str) -> Profile:
     """Get a profile by name, returns default profile if not found"""
+    if name and name not in PROFILES:
+        # Versioned interpreters such as python3.12 share their family's profile
+        name = re.sub(r'^(python)\d+(?:\.\d+)*$', r'\1', name)
     return PROFILES.get(name, DEFAULT_PROFILE)
 
 

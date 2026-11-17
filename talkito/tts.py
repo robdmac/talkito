@@ -148,9 +148,10 @@ DEBOUNCE_TIME = 0.5  # Seconds to wait before speaking rapidly changing text
 SKIP_INTERJECTIONS = ["oh", "hmm", "um", "right", "okay"]  # Interjections to add when auto-skipping
 
 # Compiled regex patterns for performance
-RE_FILENAME_PATH = re.compile(r'(?:/?(?:[\w.-]+/)+)([\w.-]+)')
+RE_FILENAME_PATH = re.compile(r'(?<![\w.~/])(?:~|\.{1,2})?/?(?:[\w.-]+/)+([\w.-]+)')
+RE_FILE_NAME_WITH_EXTENSION = re.compile(r'\.[A-Za-z]\w{0,9}$')
 RE_FILE_EXTENSION = re.compile(r'(\w+)\.(\w+)')
-RE_LIST_MARKERS = re.compile(r'^[-+]\s+', re.MULTILINE)
+RE_LIST_MARKERS = re.compile(r'^\s*[-+*]\s+', re.MULTILINE)   # '*' too, which is otherwise read as 'times'
 RE_MULTIPLE_ASTERISKS = re.compile(r'\*\*+')
 RE_MULTIPLE_HASHES = re.compile(r'##+')
 RE_MULTIPLE_QUESTIONS = re.compile(r'\?\?+')
@@ -171,7 +172,8 @@ RE_SUSPICIOUS_QUERY = re.compile(
 )
 RE_PERCENT_ENCODE = re.compile(r'%[0-9A-Fa-f]{2}')
 RE_SLASH_PATH = re.compile(r'(?<![.\w])/([a-zA-Z][\w-]+)')
-RE_SLASH_OR = re.compile(r'(?<![.\w])(\w+)/(\w+)(?![.\w])')
+RE_AND_OR = re.compile(r'\band/or\b', re.IGNORECASE)
+RE_SLASH_OR = re.compile(r'(?<![.\w/])([A-Za-z]\w*(?:/[A-Za-z]\w*)+)(?![.\w/])')
 RE_QUOTE_PREFIX = re.compile(r'^> ')
 RE_CWD = re.compile(r'cwd')
 RE_USAGE = re.compile(r'Usage:')
@@ -184,13 +186,15 @@ RE_GREATER_UNDERSCORE = re.compile(r'>_')
 RE_NEWLINES = re.compile(r'\n+')
 RE_FUNCTION_CALL = re.compile(r'(\w+)_(\w+)(?:_(\w+))*\(\)')
 RE_UNDERSCORE_WORDS = re.compile(r'(\w+)_(\w+)(?:_(\w+))*')
-RE_TRAILING_PARENS = re.compile(r' *\([^)]*\)$')
+RE_TRAILING_PARENS = re.compile(r' *\((?![^)]*[.!?]\)$)[^)]*\)$')
 RE_MARKDOWN_BOLD = re.compile(r'\*\*([^*]+)\*\*')
 RE_MARKDOWN_ITALIC = re.compile(r'\*([^*]+)\*')
 RE_MARKDOWN_CODE = re.compile(r'`([^`]+)`')
 RE_NON_SPEECH_CHARS = re.compile(r'[^a-zA-Z0-9 .,!?:\'-•☐▪▫■□◦‣⁃-]')
 RE_MULTIPLE_SPACES = re.compile(r' +')
 RE_HAS_LETTERS = re.compile(r'[a-zA-Z]')
+# A single number on its own, after any list or reply marker: '4', '-2.5', '1,024', '50%'
+RE_BARE_NUMBER = re.compile(r'^\s*(?:[•⏺✦*-]\s+)?([-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?)\s*$')
 
 # Global configuration
 auto_skip_tts_enabled = False  # Whether to auto-skip long text
@@ -2780,9 +2784,14 @@ def context_aware_symbol_replacement(text: str) -> str:
     # Match common file path patterns and replace with just the filename
     def extract_filename(match):
         full_path = match.group(0)
-        # Get just the filename (last component after /)
-        filename = full_path.split('/')[-1]
-        return filename
+        filename = match.group(1)
+        # Only real paths shrink to their filename; 'Codex/Gemini' or '1/2' is not a path
+        if full_path.startswith(('/', '~', '.')) or RE_FILE_NAME_WITH_EXTENSION.search(filename):
+            return filename
+        return full_path
+
+    # URLs go before path handling, which would otherwise chop them into fragments
+    text = RE_HTTP_URL_ALL.sub('', text)
 
     # Replace absolute and relative file paths with just the filename
     text = RE_FILENAME_PATH.sub(extract_filename, text)
@@ -2829,8 +2838,9 @@ def context_aware_symbol_replacement(text: str) -> str:
     # Commands that start with slash (e.g., /install-github-app, /help)
     text = RE_SLASH_PATH.sub(r'slash \1', text)
 
-    # Remaining "Either/or" pattern - only for simple word/word without dots or extensions
-    text = RE_SLASH_OR.sub(r'\1 or \2', text)
+    # Remaining "Either/or" pattern - only for words without dots or extensions, never numbers
+    text = RE_AND_OR.sub('and or', text)
+    text = RE_SLASH_OR.sub(lambda m: m.group(1).replace('/', ' or '), text)
 
     # Starting with any '>'
     text = RE_QUOTE_PREFIX.sub('', text)
@@ -2892,7 +2902,7 @@ def extract_speakable_text(text: str) -> str:
     text = RE_FUNCTION_CALL.sub(lambda m: ' '.join(m.group(0).replace('_', ' ').replace('()', '').split()), text)
     text = RE_UNDERSCORE_WORDS.sub(lambda m: ' '.join(m.group(0).split('_')), text)
 
-    # Remove bracketed comments at the end
+    # Remove bracketed comments at the end, but keep a bracketed sentence
     text = RE_TRAILING_PARENS.sub('', text)
 
     # Remove markdown formatting
@@ -2931,6 +2941,41 @@ def is_similar_to_recent(text: str) -> bool:
                 return True
 
     return False
+
+
+ECHO_COVERAGE = 0.7  # Share of dictated text found in what was playing for it to be the mic hearing the speakers
+ECHO_MIN_WORDS = 3   # Shorter dictation ("yes do it") is kept even if it was just said
+
+
+def _echo_form(text: str) -> str:
+    """Lower case words with punctuation dropped, so "didn’t—could" and "didn't, could" compare equal."""
+    text = text.lower().replace("'", '').replace('’', '')
+    return ' '.join(re.sub(r'[^\w\s]', ' ', text).split())
+
+
+def is_echo_of_speech(text: str, since: float) -> bool:
+    """Whether dictated text is mostly what TTS played since `since`, the mic having heard the speakers."""
+    heard = _echo_form(text)
+    if len(heard.split()) < ECHO_MIN_WORDS:
+        return False
+    # Without speech while recording there's nothing to echo, however alike the words
+    if current_speech_item is None and last_speech_end_time < since:
+        return False
+    playing = []
+    for item in reversed(get_speech_history()):
+        if item.start_time is None:
+            continue
+        playing.append(item.text)
+        # Speech plays one item at a time, so the first to start before recording began is the last that could be heard
+        if item.start_time < since:
+            break
+    spoken = _echo_form(' '.join(reversed(playing)))
+    if not spoken:
+        return False
+    blocks = SequenceMatcher(None, heard, spoken, autojunk=False).get_matching_blocks()
+    coverage = sum(block.size for block in blocks if block.size >= 4) / len(heard)
+    log_message("DEBUG", f"Dictation '{text}' is {coverage:.0%} covered by what was playing")
+    return coverage >= ECHO_COVERAGE
 
 
 def speak_text(text: str, engine: str, needs_skip: bool = False) -> bool:
@@ -3261,7 +3306,7 @@ def _text_is_novel(new_text: str, old_text: str) -> bool:
         return True
 
 
-def queue_for_speech(original_text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False, writes_partial_output: bool = False, callback: Optional[Callable[[str], None]] = None, constituent_parts: Optional[List[str]] = None) -> str:
+def queue_for_speech(original_text: str, line_number: Optional[int] = None, source: str = "output", exception_match: bool = False, writes_partial_output: bool = False, callback: Optional[Callable[[str], None]] = None, constituent_parts: Optional[List[str]] = None, similarity_checks: bool = True, bare_numbers: bool = False) -> str:
     """Queue text for TTS with debouncing and filtering."""
     global highest_spoken_line_number, last_queued_text, last_queue_time, _delayed_timer, _delayed_speech_item
 
@@ -3276,7 +3321,11 @@ def queue_for_speech(original_text: str, line_number: Optional[int] = None, sour
 
     speakable_text = extract_speakable_text(original_text)
 
-    if not speakable_text or len(speakable_text) < MIN_SPEAK_LENGTH:
+    # A lone number has no letters and may be a single character, but for some programs it is the answer
+    bare_number = RE_BARE_NUMBER.match(original_text) if bare_numbers else None
+    if bare_number:
+        speakable_text = bare_number.group(1)
+    elif not speakable_text or len(speakable_text) < MIN_SPEAK_LENGTH:
         log_message("INFO", f"Text too short: '{original_text}' -> '{speakable_text}'")
         return ""
     
@@ -3321,7 +3370,7 @@ def queue_for_speech(original_text: str, line_number: Optional[int] = None, sour
         # Always check for exact duplicates of the last spoken text
         with _state_lock:
             time_since_last = current_time - last_queue_time
-            if last_queued_text and speakable_text == last_queued_text and (not exception_match or time_since_last < 5.0):
+            if similarity_checks and last_queued_text and speakable_text == last_queued_text and (not exception_match or time_since_last < 5.0):
                 log_message("INFO", f"Skipping exact duplicate of last spoken text: '{speakable_text}' (time_since_last={time_since_last:.1f}s, exception_match={exception_match})")
                 return ""
 
@@ -3329,8 +3378,11 @@ def queue_for_speech(original_text: str, line_number: Optional[int] = None, sour
         shared_state = get_shared_state()
         in_tool_use = shared_state.get_in_tool_use()
 
-        # Skip similarity checks if we're in tool use mode (prompting the user)
-        if not (in_tool_use and "Do you " in speakable_text):
+        # Skip similarity checks if we're in tool use mode (prompting the user), or for programs whose
+        # output lines are often alike and all meant ('row 0', 'row 1')
+        if not similarity_checks:
+            log_message("DEBUG", f"Similarity checks off for this program: '{speakable_text}'")
+        elif not (in_tool_use and "Do you " in speakable_text):
             # Debounce rapidly changing text
             with _state_lock:
                 if (last_queued_text and
