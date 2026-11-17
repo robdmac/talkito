@@ -45,6 +45,57 @@ def reflow_key(text: str) -> str:
     return NON_WORD_PATTERN.sub('', text).lower()
 
 
+# A cell's style: foreground and background as SGR parameters ('' for the default) and its other attributes
+Style = Tuple[str, str, str]
+DEFAULT_STYLE: Style = ('', '', '')
+SGR_FLAGS = {'1', '2', '3', '4', '5', '7', '8', '9'}
+SGR_UNSET = {'21': '12', '22': '12', '23': '3', '24': '4', '25': '5', '27': '7', '28': '8', '29': '9'}
+
+
+def apply_sgr(style: Style, params: str) -> Style:
+    """The style after a select-graphic-rendition sequence with these parameters."""
+    fg, bg, flags = style
+    tokens = params.split(';') if params else ['0']
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        head = token.split(':')[0]
+        i += 1
+        if head in ('', '0'):
+            fg, bg, flags = DEFAULT_STYLE
+        elif head in SGR_FLAGS:
+            flags = ''.join(sorted(set(flags) | {head}))
+        elif head in SGR_UNSET:
+            flags = ''.join(f for f in flags if f not in SGR_UNSET[head])
+        elif head in ('38', '48', '58'):
+            # Extended colours: 38;5;n and 38;2;r;g;b, or the same joined with colons in one token
+            if ':' in token:
+                colour = token
+            else:
+                take = {'5': 2, '2': 4}.get(tokens[i] if i < len(tokens) else '', 0)
+                colour = ';'.join(tokens[i - 1:i + take])
+                i += take
+            if head == '38':
+                fg = colour
+            elif head == '48':
+                bg = colour
+        elif head == '39':
+            fg = ''
+        elif head == '49':
+            bg = ''
+        elif head.isdigit() and (30 <= int(head) <= 37 or 90 <= int(head) <= 97):
+            fg = head
+        elif head.isdigit() and (40 <= int(head) <= 47 or 100 <= int(head) <= 107):
+            bg = head
+    return fg, bg, flags
+
+
+def sgr(style: Style) -> str:
+    """The sequence that sets exactly this style."""
+    fg, bg, flags = style
+    return '\x1b[' + ';'.join(['0', *flags, *(p for p in (fg, bg) if p)]) + 'm'
+
+
 def char_width(char: str) -> int:
     """Number of cells a character occupies."""
     if unicodedata.combining(char):
@@ -64,6 +115,9 @@ class Screen:
         self.scroll_top = 0
         self.scroll_bottom = self.rows - 1
         self.grid = [self._blank_row() for _ in range(self.rows)]
+        self.style: Style = DEFAULT_STYLE
+        # Each cell's style, so a cell painted over can be put back as the program drew it
+        self.styles = [self._blank_styles() for _ in range(self.rows)]
         self.wrap_pending = False
         self.in_update = False   # inside a synchronized update, so the grid is half painted
         self.updates = 0         # synchronized updates completed, a frame count independent of chunking
@@ -75,13 +129,36 @@ class Screen:
     def _blank_row(self) -> List[str]:
         return [' '] * self.cols
 
+    def _erased(self) -> Style:
+        """The style of an erased cell: blank, in the current background."""
+        return ('', self.style[1], '')
+
+    def _blank_styles(self) -> List[Style]:
+        return [self._erased()] * self.cols
+
+    def _blank(self, r: int):
+        self.grid[r] = self._blank_row()
+        self.styles[r] = self._blank_styles()
+
+    @property
+    def at_rest(self) -> bool:
+        """Whether the program has finished what it was writing: no sequence or frame half done."""
+        return not self._pending and not self.in_update and not self.wrap_pending
+
+    def paint(self, r: int, c: int) -> str:
+        """What puts a cell back as the program drew it, with the cursor already there."""
+        char = self.grid[r][c]
+        return '' if char is None else sgr(self.styles[r][c]) + char
+
     def resize(self, rows: int, cols: int):
         """Change the grid size, keeping what fits."""
         rows, cols = max(1, rows), max(1, cols)
         grid = [(row + [' '] * cols)[:cols] for row in self.grid[-rows:]]
+        styles = [(row + [DEFAULT_STYLE] * cols)[:cols] for row in self.styles[-rows:]]
         while len(grid) < rows:
             grid.append([' '] * cols)
-        self.rows, self.cols, self.grid = rows, cols, grid
+            styles.append([DEFAULT_STYLE] * cols)
+        self.rows, self.cols, self.grid, self.styles = rows, cols, grid, styles
         self.scroll_top, self.scroll_bottom = 0, rows - 1
         self.cursor_row = min(self.cursor_row, rows - 1)
         self.cursor_col = min(self.cursor_col, cols - 1)
@@ -161,9 +238,12 @@ class Screen:
         """Apply a control sequence."""
         if intermediate:
             return
-        if final != 'm':
+        if final == 'm':
             # Colours leave the cursor where it is, so a wrap still waits for the next character
-            self.wrap_pending = False
+            if not private:
+                self.style = apply_sgr(self.style, params)
+            return
+        self.wrap_pending = False
         values = [int(p) if p.isdigit() else 0 for p in re.split('[;:]', params)] if params else []
 
         def arg(index: int = 0, default: int = 1) -> int:
@@ -182,7 +262,8 @@ class Screen:
                 if final == 'l':
                     self.closed_lines = self.lines()
                 # Entering or leaving the alternate screen starts from a blank grid either way
-                self.grid = [self._blank_row() for _ in range(self.rows)]
+                for r in range(self.rows):
+                    self._blank(r)
                 if final == 'h':
                     self.cursor_row = self.cursor_col = 0
             return
@@ -209,11 +290,13 @@ class Screen:
         elif final == 'd':
             self.cursor_row = min(self.rows - 1, arg() - 1)
         elif final == 'K':
-            row = self.grid[self.cursor_row]
+            row, styles = self.grid[self.cursor_row], self.styles[self.cursor_row]
             mode = values[0] if values else 0
             start, end = {0: (self.cursor_col, self.cols), 1: (0, self.cursor_col + 1)}.get(mode, (0, self.cols))
+            erased = self._erased()
             for col in range(start, end):
                 row[col] = ' '
+                styles[col] = erased
         elif final == 'J':
             mode = values[0] if values else 0
             if mode == 0:
@@ -225,27 +308,37 @@ class Screen:
             else:
                 rows = range(self.rows)
             for r in rows:
-                self.grid[r] = self._blank_row()
+                self._blank(r)
         elif final == 'X':
-            row = self.grid[self.cursor_row]
+            row, styles = self.grid[self.cursor_row], self.styles[self.cursor_row]
+            erased = self._erased()
             for col in range(self.cursor_col, min(self.cols, self.cursor_col + arg())):
                 row[col] = ' '
+                styles[col] = erased
         elif final == 'P':
-            row = self.grid[self.cursor_row]
+            row, styles = self.grid[self.cursor_row], self.styles[self.cursor_row]
             del row[self.cursor_col:self.cursor_col + arg()]
+            del styles[self.cursor_col:self.cursor_col + arg()]
             row.extend([' '] * (self.cols - len(row)))
+            styles.extend([self._erased()] * (self.cols - len(styles)))
         elif final == '@':
-            row = self.grid[self.cursor_row]
+            row, styles = self.grid[self.cursor_row], self.styles[self.cursor_row]
             row[self.cursor_col:self.cursor_col] = [' '] * arg()
+            styles[self.cursor_col:self.cursor_col] = [self._erased()] * arg()
             del row[self.cols:]
+            del styles[self.cols:]
         elif final == 'L' and self.scroll_top <= self.cursor_row <= self.scroll_bottom:
             for _ in range(arg()):
                 del self.grid[self.scroll_bottom]
+                del self.styles[self.scroll_bottom]
                 self.grid.insert(self.cursor_row, self._blank_row())
+                self.styles.insert(self.cursor_row, self._blank_styles())
         elif final == 'M' and self.scroll_top <= self.cursor_row <= self.scroll_bottom:
             for _ in range(arg()):
                 del self.grid[self.cursor_row]
+                del self.styles[self.cursor_row]
                 self.grid.insert(self.scroll_bottom, self._blank_row())
+                self.styles.insert(self.scroll_bottom, self._blank_styles())
         elif final == 'S':
             for _ in range(arg()):
                 self._scroll_up()
@@ -267,10 +360,12 @@ class Screen:
             self.cursor_col = 0
             self._line_feed()
         self.wrap_pending = False
-        row = self.grid[self.cursor_row]
+        row, styles = self.grid[self.cursor_row], self.styles[self.cursor_row]
         row[self.cursor_col] = char
+        styles[self.cursor_col] = self.style
         if width == 2:
             row[self.cursor_col + 1] = None   # the right half of a wide character
+            styles[self.cursor_col + 1] = self.style
         self.cursor_col += width
         if self.cursor_col >= self.cols:
             # Writing the last column leaves the cursor there; only the next character wraps
@@ -291,11 +386,15 @@ class Screen:
 
     def _scroll_up(self):
         del self.grid[self.scroll_top]
+        del self.styles[self.scroll_top]
         self.grid.insert(self.scroll_bottom, self._blank_row())
+        self.styles.insert(self.scroll_bottom, self._blank_styles())
 
     def _scroll_down(self):
         del self.grid[self.scroll_bottom]
+        del self.styles[self.scroll_bottom]
         self.grid.insert(self.scroll_top, self._blank_row())
+        self.styles.insert(self.scroll_top, self._blank_styles())
 
 
 class ScreenTranscript:

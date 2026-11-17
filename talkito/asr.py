@@ -129,6 +129,47 @@ load_dotenv()
 load_dotenv('.talkito.env')
 
 SQUARE_BRACKETS_CLEANER = re.compile(r'\[.*?\]')
+# Whisper's sound tags in brackets, as "(mouse clicks)" or "(music)"
+SOUND_TAG_CLEANER = re.compile(r'(?:^|(?<=\s))\((?:[a-z]{3,} ?){1,4}\)')
+
+# Terms a coding agent's user says that whisper otherwise mishears ("get bunch" for "git branch").
+# TALKITO_ASR_TERMS adds more, comma separated.
+DEFAULT_ASR_TERMS = ("git, git branch, git status, git diff, git commit, git push, git pull, git rebase, "
+                     "git checkout, main branch, pull request, merge, repo, README, npm, pip, Python, "
+                     "TypeScript, JSON, API, CLI, Claude, Codex, OpenCode, Gemini, talkito")
+
+
+# A tap-to-talk hold is shown live as it's heard and committed in pieces once this long, cut where it's quietest
+LIVE_COMMIT_SECONDS = 6.0
+
+
+def commit_cut(audio: np.ndarray, rate: int) -> Optional[int]:
+    """Where to end a committed piece of a hold: its latest pause, or None to wait for one a while longer."""
+    frame = rate // 20
+    first, last = int(1.5 * rate) // frame, (len(audio) - rate) // frame
+    if last - first < 8:
+        return None
+    frames = audio[first * frame:last * frame].reshape(-1, frame)
+    loudness = 10 * np.log10(np.mean(frames ** 2, axis=1) + 1e-12)
+    # Judged against the room's own quiet rather than an absolute level, since a pause in a real room is its
+    # noise, not silence: a pause sits in the bottom quarter of the range between that and the speech
+    floor, speech = np.percentile(loudness, 5), np.percentile(loudness, 90)
+    if speech - floor >= 6:
+        quiet = loudness <= floor + 0.25 * (speech - floor)
+        # Quiet throughout a fifth of a second: a sibilant like the s of "screen", or the stop in a word, is shorter
+        run = 4
+        for i in range(len(quiet) - run, -1, -1):
+            if quiet[i:i + run].all():
+                return (first + i + run // 2) * frame
+    if len(audio) < 2 * LIVE_COMMIT_SECONDS * rate:
+        return None
+    return (first + int(np.argmin(loudness))) * frame + frame // 2
+
+
+def whisper_prompt() -> str:
+    """The vocabulary whisper is primed with, so it expects terms like these."""
+    extra = os.environ.get('TALKITO_ASR_TERMS', '').strip().strip(',')
+    return f"{DEFAULT_ASR_TERMS}, {extra}." if extra else f"{DEFAULT_ASR_TERMS}."
 
 # Wrapper to add [ASR] prefix to all log messages
 def log_message(level: str, message: str):
@@ -1501,7 +1542,7 @@ class FasterWhisperProvider(ASRProvider):
                 log_prob_threshold=-1.0,
                 no_speech_threshold=0.6,
                 condition_on_previous_text=False,
-                initial_prompt=None,
+                initial_prompt=whisper_prompt(),
                 word_timestamps=False
             )
             
@@ -1586,7 +1627,9 @@ class FasterWhisperProvider(ASRProvider):
                             log_message("DEBUG", "[LOCAL_WHISPER] Transcription worker shutting down")
                             break
                             
-                        audio_np, energy_level, frames_in_segment = audio_segment_data
+                        # 'final' pieces are typed in; 'live' ones are the hold so far, shown until replaced
+                        audio_np, energy_level, frames_in_segment, *kind = audio_segment_data
+                        kind = kind[0] if kind else 'final'
                         
                         # Check if we should ignore input (e.g., during TTS) before processing
                         # But don't ignore if we still have outstanding chunks to process
@@ -1609,7 +1652,8 @@ class FasterWhisperProvider(ASRProvider):
                             # Check if we're using PyWhisperCpp or faster-whisper
                             if hasattr(model, '__class__') and 'pywhispercpp' in str(type(model)):
                                 # PyWhisperCpp CoreML backend - direct transcription
-                                raw_result = model.transcribe(audio_np, print_progress=False, print_realtime=False, print_timestamps=False, print_special=False)
+                                raw_result = model.transcribe(audio_np, print_progress=False, print_realtime=False, print_timestamps=False, print_special=False,
+                                                              initial_prompt=whisper_prompt())
                                 transcription_time = time.time() - start_time
                                 log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp transcription took {transcription_time:.3f}s for {len(audio_np)/RATE:.3f}s audio (real-time factor: {transcription_time/(len(audio_np)/RATE):.2f}x)")
                                 log_message("DEBUG", f"[LOCAL_WHISPER] PyWhisperCpp raw result type: {type(raw_result)}, content: '{raw_result}'")
@@ -1621,7 +1665,7 @@ class FasterWhisperProvider(ASRProvider):
                                     segment_count = len(raw_result)
                                     for segment in raw_result:
                                         if hasattr(segment, 'text'):
-                                            text_result += segment.text
+                                            text_result += ' ' + segment.text
                                         elif isinstance(segment, str):
                                             text_result += segment
                                         else:
@@ -1653,7 +1697,7 @@ class FasterWhisperProvider(ASRProvider):
                                     compression_ratio_threshold=2.4,   # Skip overly repetitive text
                                     log_prob_threshold=-1.0,          # Skip low confidence text
                                     no_speech_threshold=0.6,          # Skip segments with no speech
-                                    initial_prompt=None,              # No context prompt
+                                    initial_prompt=whisper_prompt(),  # Expect coding terms like "git branch"
                                     suppress_blank=True,              # Don't output blank tokens
                                     suppress_tokens=[-1],             # Suppress special tokens
                                     without_timestamps=True           # Skip timestamp calculation for speed
@@ -1671,10 +1715,12 @@ class FasterWhisperProvider(ASRProvider):
                                 for segment in segments:
                                     segment_count += 1
                                     log_message("DEBUG", f"[LOCAL_WHISPER] Segment {segment_count}: '{segment.text}' (start={segment.start:.2f}s, end={segment.end:.2f}s)")
-                                    text_result += segment.text
+                                    text_result += ' ' + segment.text
                                 
                                 log_message("DEBUG", f"[LOCAL_WHISPER] faster-whisper total segments: {segment_count}, combined_text: '{text_result}'")
-                            
+
+                            text_result = SOUND_TAG_CLEANER.sub('', SQUARE_BRACKETS_CLEANER.sub('', text_result))
+                            text_result = re.sub(r'\s{2,}', ' ', text_result)
                             if text_result.strip():
                                 log_message("INFO", f"[LOCAL_WHISPER] Transcribed: '{text_result.strip()}'")
                                 
@@ -1691,6 +1737,9 @@ class FasterWhisperProvider(ASRProvider):
                                 
                                 if should_ignore and not has_outstanding_frames:
                                     log_message("DEBUG", f"[LOCAL_WHISPER] Discarding transcription due to ignore_input flag: '{text_result.strip()}'")
+                                elif kind == 'live':
+                                    if engine.partial_callback:
+                                        engine.partial_callback(engine._process_dictation_text(text_result.strip()))
                                 else:
                                     # Process and callback
                                     processing_start_time = time.time()
@@ -1704,6 +1753,9 @@ class FasterWhisperProvider(ASRProvider):
                                         log_message("DEBUG", f"[LOCAL_WHISPER] Callback execution took {callback_duration:.3f}s")
                             else:
                                 log_message("DEBUG", f"[LOCAL_WHISPER] Model returned empty text (segments={segment_count})")
+                                # Nothing heard, so nothing is shown live: no words of earlier audio linger
+                                if engine.partial_callback:
+                                    engine.partial_callback('')
                                 
                         except Exception as model_error:
                             log_message("ERROR", f"[LOCAL_WHISPER] Model transcription failed: {model_error}")
@@ -1754,6 +1806,7 @@ class FasterWhisperProvider(ASRProvider):
             
             audio_buffer = []
             frame_count = 0
+            frames_since_live = 0   # frames held since the hold so far was last sent to be shown live
             
             # Pre-fill audio buffer before marking as ready for tap-to-talk
             log_message("DEBUG", "[LOCAL_WHISPER] Pre-filling audio buffer...")
@@ -1800,6 +1853,7 @@ class FasterWhisperProvider(ASRProvider):
                         stream.read(CHUNK, exception_on_overflow=False)
                         audio_buffer = []  # Clear buffer when ignoring
                         frame_count = 0
+                        frames_since_live = 0
                         time.sleep(0.01)
                         continue
                     
@@ -1850,8 +1904,38 @@ class FasterWhisperProvider(ASRProvider):
                             
                             # Force processing by setting frame_count to threshold
                             frame_count = FRAMES_TO_ACCUMULATE
-                    
-                    if frame_count >= FRAMES_TO_ACCUMULATE:
+
+                    # Tap-to-talk transcribes the whole hold once the key is released: whisper then hears each
+                    # word in context, where windows a second long turned "git branch" into "get bunch"
+                    holding = asr_mode == 'tap-to-talk' and is_tap_to_talk_active and not process_remaining_frames
+                    if holding:
+                        frames_since_live += 1
+                    if holding and frames_since_live >= FRAMES_TO_ACCUMULATE:
+                        frames_since_live = 0
+                        committed = False
+                        cut = None
+                        if len(audio_buffer) >= LIVE_COMMIT_SECONDS * RATE:
+                            held = np.array(audio_buffer, dtype=np.float32)
+                            cut = commit_cut(held, RATE)
+                            if not cut:
+                                log_message("DEBUG", f"[LOCAL_WHISPER] No pause to commit at in {len(held) / RATE:.1f}s held yet")
+                        if cut:
+                            # Speech before the pause is final: typed in, while what follows it stays live
+                            del audio_buffer[:cut]
+                            frame_count = len(audio_buffer) // CHUNK
+                            try:
+                                audio_queue.put_nowait((held[:cut], 0.0, cut // CHUNK, 'final'))
+                                committed = True
+                                log_message("INFO", f"[LOCAL_WHISPER] Committed {cut / RATE:.1f}s of a hold, {len(audio_buffer) / RATE:.1f}s still live")
+                            except queue.Full:
+                                log_message("WARNING", "[LOCAL_WHISPER] Transcription queue full, dropping committed audio")
+                        # Only when the worker has caught up, so live text never lags behind a backlog
+                        if committed or audio_queue.empty():
+                            try:
+                                audio_queue.put_nowait((np.array(audio_buffer, dtype=np.float32), 0.0, 0, 'live'))
+                            except queue.Full:
+                                pass
+                    if frame_count >= FRAMES_TO_ACCUMULATE and not holding:
                         # Convert to numpy array and normalize
                         audio_np = np.array(audio_buffer, dtype=np.float32)
                         
@@ -1899,7 +1983,9 @@ class FasterWhisperProvider(ASRProvider):
                                 log_message("DEBUG", f"[LOCAL_WHISPER] Queueing audio segment (energy threshold): shape={audio_np.shape}, energy={energy_level:.4f}")
                             try:
                                 # Queue audio for transcription (non-blocking) - include frame count for outstanding frames tracking
-                                audio_queue.put_nowait((audio_np, energy_level, frame_count))
+                                # The end of a hold settles every frame it counted, whatever was committed before
+                                settles = 1 << 30 if asr_mode == 'tap-to-talk' else frame_count
+                                audio_queue.put_nowait((audio_np, energy_level, settles, 'final'))
                                 
                                 # Note: Outstanding frames are tracked per individual PyAudio frame, not per segment
                             except queue.Full:

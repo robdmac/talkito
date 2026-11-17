@@ -43,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import asr, comms, tts
 from .profiles import get_profile, Profile
+from .live_text import LiveText
 from .screen import ScreenTranscript
 from .logs import setup_logging, get_logger, log_message, restore_stderr, is_logging_enabled
 from .state import get_shared_state, sync_communication_state_from_config
@@ -84,6 +85,7 @@ KEY_RIGHT = b'\x1b[C'
 KEY_SPACE = b' '
 # Tap-to-talk keys - multiple options for flexibility
 KEY_TAP_TO_TALK_SEQUENCES = [b'`']  # Backtick as mic button
+ECHO_LOOKBACK = 15.0  # Seconds of speech dictation outside tap-to-talk may have picked up
 
 # Filtering Configuration
 SKIP_LINE_STARTS = ["?", "/", "cwd:", "#", "DEBUG:", "INFO:", "WARNING:"]
@@ -209,6 +211,7 @@ current_proc: Optional[asyncio.subprocess.Process] = None
 verbosity_level: int = 0
 comm_manager: Optional[Any] = None  # Will be CommunicationManager when initialized
 screen_transcript: Optional[ScreenTranscript] = None  # Virtual screen for profiles that read_screen
+live_text = LiveText()  # Dictation heard but not final, drawn in grey at the caret of programs read as a screen
 screen_line_number = 0
 
 # Thread pool for blocking I/O operations
@@ -341,6 +344,7 @@ class ASRState:
     asr_auto_started: bool = False
     tap_to_talk_active: bool = False
     tap_to_talk_last_press: float = 0
+    tap_to_talk_press_start: float = 0  # When the key went down, so what the mic heard can be checked against speech
     tap_to_talk_last_release: float = 0
     tap_to_talk_redraw_triggered: bool = False
     current_partial: str = ""
@@ -1802,6 +1806,8 @@ async def handle_stdin_input(master_fd: int, asr_mode: str):
                     was_already_active = asr_state.tap_to_talk_active
                     asr_state.tap_to_talk_active = True
                     asr_state.tap_to_talk_last_press = time.time()
+                    if not was_already_active:
+                        asr_state.tap_to_talk_press_start = asr_state.tap_to_talk_last_press
                     
                     # Trigger screen redraw only once when first pressed
                     if not was_already_active and not asr_state.tap_to_talk_redraw_triggered:
@@ -2133,6 +2139,14 @@ def handle_partial_transcript(text: str):
     if not asr_state.partial_enabled:
         return
 
+    if active_profile and active_profile.reads_screen:
+        # Drawn over the screen by the run loop, where the program shows its caret
+        live_text.set(text)
+        if text.strip():
+            asr_state.last_partial_transcript_time = time.time()
+            asr_state.has_pending_transcript = True
+        return
+
     asr_state.current_partial = text # + '\u200b'
     asr_state.last_partial_transcript_time = time.time()
     asr_state.has_pending_transcript = True
@@ -2166,7 +2180,18 @@ def handle_dictated_text(text: str):
         return
     
     log_message("INFO", f"[ASR TRANSCRIPTION] Received dictated text: '{text}'")
-    
+
+    # The mic heard talkito's own voice, as when the key is held while it speaks: acting on it would answer itself
+    if shared_state.asr_mode == 'tap-to-talk' and asr_state.tap_to_talk_press_start:
+        recording_since = asr_state.tap_to_talk_press_start - 1.0
+    else:
+        recording_since = time.time() - ECHO_LOOKBACK
+    if tts.is_echo_of_speech(text, recording_since):
+        log_message("INFO", f"[ASR TRANSCRIPTION] Dropped as an echo of talkito's speech: '{text}'")
+        if asr_state.partial_enabled:
+            handle_partial_transcript("")
+        return
+
     # Update timing for auto-submit
     asr_state.last_finalized_transcript_time = time.time()
     asr_state.has_pending_transcript = True
@@ -2734,7 +2759,12 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
                 # - It's been at least 200ms since the last finalized transcript AND no partial transcripts in 3 seconds
                 # - In tap-to-talk mode: key is released AND all outstanding frames are processed
                 silence_threshold = 2.5  # 2.5 seconds of actual silence
-                if tap_to_talk_complete or (time_since_finalized >= silence_threshold or (time_since_finalized >= 0.2 and time_since_partial >= silence_threshold)):
+                if shared_state.asr_mode == "tap-to-talk":
+                    # A hold can pause for longer than that, with pieces of it typed and more still live
+                    submit = tap_to_talk_complete
+                else:
+                    submit = time_since_finalized >= silence_threshold or (time_since_finalized >= 0.2 and time_since_partial >= silence_threshold)
+                if submit:
                     try:
                         await async_write(current_master_fd, RETURN)
                         asr_state.has_pending_transcript = False
@@ -2883,6 +2913,10 @@ async def run_command(cmd: List[str], asr_mode: str = "auto-input", record_file:
             if active_profile and active_profile.reads_screen:
                 # A row still being painted is held back until the screen goes quiet
                 buffer, prev_line = process_screen_output(b'', buffer, prev_line, asr_mode)
+                if screen_transcript is not None:
+                    live = live_text.frame(screen_transcript.screen)
+                    if live:
+                        stdout_buffer.relay(live)
 
             if current_proc.returncode is not None:
                 if recorder.enabled:
@@ -3206,6 +3240,7 @@ def process_screen_output(data: bytes, text_buffer: List[str], prev_line: str,
         else:
             screen_transcript.resize(rows, cols)
         completed, turn_ended = screen_transcript.feed(data, now)
+        live_text.on_output()
 
     for row in completed:
         screen_line_number += 1

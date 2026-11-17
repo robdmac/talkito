@@ -2943,6 +2943,41 @@ def is_similar_to_recent(text: str) -> bool:
     return False
 
 
+ECHO_COVERAGE = 0.7  # Share of dictated text found in what was playing for it to be the mic hearing the speakers
+ECHO_MIN_WORDS = 3   # Shorter dictation ("yes do it") is kept even if it was just said
+
+
+def _echo_form(text: str) -> str:
+    """Lower case words with punctuation dropped, so "didn’t—could" and "didn't, could" compare equal."""
+    text = text.lower().replace("'", '').replace('’', '')
+    return ' '.join(re.sub(r'[^\w\s]', ' ', text).split())
+
+
+def is_echo_of_speech(text: str, since: float) -> bool:
+    """Whether dictated text is mostly what TTS played since `since`, the mic having heard the speakers."""
+    heard = _echo_form(text)
+    if len(heard.split()) < ECHO_MIN_WORDS:
+        return False
+    # Without speech while recording there's nothing to echo, however alike the words
+    if current_speech_item is None and last_speech_end_time < since:
+        return False
+    playing = []
+    for item in reversed(get_speech_history()):
+        if item.start_time is None:
+            continue
+        playing.append(item.text)
+        # Speech plays one item at a time, so the first to start before recording began is the last that could be heard
+        if item.start_time < since:
+            break
+    spoken = _echo_form(' '.join(reversed(playing)))
+    if not spoken:
+        return False
+    blocks = SequenceMatcher(None, heard, spoken, autojunk=False).get_matching_blocks()
+    coverage = sum(block.size for block in blocks if block.size >= 4) / len(heard)
+    log_message("DEBUG", f"Dictation '{text}' is {coverage:.0%} covered by what was playing")
+    return coverage >= ECHO_COVERAGE
+
+
 def speak_text(text: str, engine: str, needs_skip: bool = False) -> bool:
     """Speak text using appropriate engine, return completion status."""
     if disable_tts:
