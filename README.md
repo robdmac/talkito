@@ -9,7 +9,7 @@
 
 </div>
 
-TalkiTo lets developers talk, slack and whatsapp with Claude Code and OpenAI Codex. It can be used as a command-line tool, a web extension, and as a Python library.
+TalkiTo lets developers talk, slack and whatsapp with Claude Code, OpenAI Codex, Gemini CLI, OpenCode and pi. It can be used as a command-line tool, a web extension, and as a Python library.
 
 ## 🚀 Quick Install
 
@@ -88,6 +88,9 @@ then go to chrome://extensions/ and load unpacked the extensions/chrome/ dir
 |-----------------|---------------|---------------------|
 | **Claude Code** | Terminal      | **Fully Supported** |
 | **Codex Cli**   | Terminal      | **Fully Supported** |
+| **Gemini CLI**  | Terminal      | **Fully Supported** |
+| **OpenCode**    | Terminal      | **Fully Supported** |
+| **pi**          | Terminal      | **Fully Supported** |
 | bolt.new        | Web Extension | Output Only         |
 | v0.dev          | Web Extension | Output Only         |
 | replit.com      | Web Extension | Output Only         |
@@ -102,6 +105,16 @@ run `talkito claude`
 ### Run with Codex Cli
 
 run `talkito codex`
+
+### Run with Gemini CLI, OpenCode or pi
+
+run `talkito gemini`, `talkito opencode` or `talkito pi`
+
+### Talk to your agent
+
+TalkiTo listens while you hold the backtick key (`` ` ``). What it hears appears in grey after your cursor as you speak and becomes the final text when you let go, which sends it. In a long hold, what you said up to each pause is typed in after about six seconds while the rest stays grey. Say "execute" to send straight away.
+
+Use `--asr-mode auto-input` to listen whenever the agent is waiting for you, or `--asr-mode off` for speech output only. Anything the microphone picks up of TalkiTo's own voice while you hold the key is ignored.
 
 ### Run as an MCP server
 
@@ -301,6 +314,7 @@ except KeyboardInterrupt:
 - **Install**: `pip install faster-whisper` (default) or `WHISPER_COREML=1 pip install pywhispercpp` for Apple Silicon/CoreML acceleration
 - **Setup**: No API key required. Configure `WHISPER_MODEL` (e.g., `small`, `medium`), `WHISPER_DEVICE` (`cpu`, `cuda`, or `mps`), and `WHISPER_COMPUTE_TYPE` (`int8`, `int8_float16`, etc.). Models are cached locally and TalkiTo will prompt before downloading unless `TALKITO_AUTO_APPROVE_DOWNLOADS=1`.
 - **Usage**: `WHISPER_MODEL=small WHISPER_COMPUTE_TYPE=int8 talkito --asr-provider local_whisper`
+- **Vocabulary**: Whisper is primed to expect coding terms such as "git branch" and "pull request". Add your own with `TALKITO_ASR_TERMS="Kokoro, pywhispercpp"`.
 
 ### Communication Providers (Remote Interaction)
 

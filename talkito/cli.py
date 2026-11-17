@@ -136,8 +136,8 @@ def parse_arguments():
                            default='tap-to-talk',
                            help='ASR mode: off, auto-input, tap-to-talk, or file:<path> for testing (default: tap-to-talk)')
     asr_group.add_argument('--asr-provider', type=str,
-                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'off'],
-                           help='ASR provider to use (use "off" to disable ASR)')
+                           choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'azure', 'bing', 'local_whisper', 'off'],
+                           help='ASR provider to use (use "off" to disable ASR; bing is azure\'s old name)')
     asr_group.add_argument('--asr-language', type=str, default='en-US',
                            help='Language code for ASR (default: en-US)')
     asr_group.add_argument('--asr-model', type=str,
@@ -194,6 +194,9 @@ def parse_arguments():
                         help='Arguments for the command')
     
     args = parser.parse_args()
+    # Azure's speech service was Bing's, and still answers to that name
+    if args.asr_provider == 'bing':
+        args.asr_provider = 'azure'
 
     # Handle verbosity levels
     if args.verbose > 0 and args.verbosity is None:
@@ -701,7 +704,7 @@ def show_welcome_and_config(args):
     # ASR Configuration choices
     asr_available_list = []
     if asr_available:
-        asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper', 'off', 'auto']
+        asr_choices = ['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'azure', 'local_whisper', 'off', 'auto']
 
         for provider in asr_choices:
             if provider == 'auto':

@@ -3246,12 +3246,15 @@ def main():
                         choices=['system', 'openai', 'aws', 'polly', 'azure', 'gcloud', 'elevenlabs', 'deepgram'],
                         help='TTS provider to use')
     parser.add_argument('--asr-provider', type=str,
-                        choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'bing', 'local_whisper'],
+                        choices=['google', 'gcloud', 'assemblyai', 'deepgram', 'houndify', 'aws', 'azure', 'bing', 'local_whisper'],
                         help='ASR provider to use')
     parser.add_argument('--client-command', type=str,
                         help='The command that is using this MCP server (e.g., claude)')
     args = parser.parse_args()
-    
+    # Azure's speech service was Bing's, and still answers to that name
+    if args.asr_provider == 'bing':
+        args.asr_provider = 'azure'
+
     # Set up logging if log file specified
     global _log_file_path, _cors_enabled, _running_for_terminal_agent
     
