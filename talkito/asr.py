@@ -2084,10 +2084,10 @@ def check_asr_provider_accessibility() -> Dict[str, Dict[str, Any]]:
         "note": aws_note
     }
     
-    # Microsoft Bing
-    accessible["bing"] = {
-        "available": bool(os.environ.get("BING_KEY")),
-        "note": "Requires BING_KEY environment variable"
+    # Azure Speech Services, once Bing's
+    accessible["azure"] = {
+        "available": bool(os.environ.get("AZURE_SPEECH_KEY") and os.environ.get("AZURE_SPEECH_REGION")),
+        "note": "Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables"
     }
     
     # local_whisper - Smart backend selection (PyWhisperCpp CoreML on Apple Silicon, faster-whisper elsewhere)
