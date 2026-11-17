@@ -148,8 +148,9 @@ def update_claude_hooks(webhook_port=8080):
     if "hooks" not in settings:
         settings["hooks"] = {}
 
-    # Identifier to find/update our hooks
-    talkito_marker = "talkito/hook"
+    # Our hooks post to the webhook server's /hook on whatever port it had then; matching that finds
+    # every earlier one (the old "talkito/hook" marker matched none, so each launch added another)
+    talkito_hook_url = re.compile(r'http://127\.0\.0\.1:\d+/hook\b')
 
     # Update each hook, merging with existing hooks
     for hook_type in hook_types:
@@ -170,7 +171,7 @@ def update_claude_hooks(webhook_port=8080):
         filtered_hooks = [
             h for h in existing_hooks
             if not any(
-                talkito_marker in hook.get("command", "")
+                talkito_hook_url.search(hook.get("command", ""))
                 for hook in h.get("hooks", [])
                 if hook.get("type") == "command"
             )
